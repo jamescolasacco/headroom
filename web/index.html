@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Headroom</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="description" content="Remote desktop for your own computers.">
+  <meta name="theme-color" content="#0b0d11">
+  <meta name="color-scheme" content="dark light">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Headroom">
+  <meta name="format-detection" content="telephone=no">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="/css/app.css">
+  <script type="module" src="/js/app.js"></script>
+</head>
+<body>
+  <!-- ======================================================== home: saved computers -->
+  <section id="home" class="screen" hidden>
+    <header class="home-head">
+      <div class="brand">
+        <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="6" width="26" height="17" rx="3.5" fill="none" stroke="currentColor" stroke-width="2.4"/><path d="M11 27h10" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M10 14.5l4 4 8-8" fill="none" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <h1>Headroom</h1>
+      </div>
+      <button class="icon-btn" id="btn-app-settings" title="Settings" aria-label="Settings"><svg viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg></button>
+    </header>
+    <div id="host-list" class="host-list" aria-live="polite"></div>
+    <div id="home-empty" class="empty" hidden>
+      <p class="empty-title">No computers yet</p>
+      <p class="muted">Install Headroom on a Windows PC, then add it here with its address and password or pairing code.</p>
+    </div>
+    <button class="primary wide" id="btn-add-host">Add computer</button>
+    <p class="muted small center" id="home-hint"></p>
+  </section>
+
+  <!-- ======================================================== viewer -->
+  <section id="viewer" class="screen" hidden>
+    <div id="stage-wrap">
+      <div id="stage">
+        <video id="video" muted playsinline autoplay disablepictureinpicture disableremoteplayback></video>
+        <canvas id="canvas"></canvas>
+        <div id="remote-cursor" hidden></div>
+      </div>
+    </div>
+    <!-- transparent layer that receives all pointer/touch input (iOS swallows touches on <video>) -->
+    <div id="input-layer" tabindex="-1"></div>
+    <textarea id="kbd-sink" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+              enterkeyhint="enter" aria-label="Remote keyboard input" rows="1"></textarea>
+    <div id="ripples" aria-hidden="true"></div>
+
+    <div id="overlay" class="overlay" hidden>
+      <div class="overlay-card">
+        <div class="spinner" id="overlay-spinner"></div>
+        <p id="overlay-title">Connecting…</p>
+        <p class="muted small" id="overlay-detail"></p>
+        <div class="overlay-actions" id="overlay-actions"></div>
+      </div>
+    </div>
+
+    <div id="toolbar-handle" aria-label="Show toolbar"></div>
+    <nav id="toolbar" class="toolbar" aria-label="Session toolbar"></nav>
+    <div id="extra-keys" class="extra-keys" hidden></div>
+    <div id="stats" class="stats" hidden></div>
+    <div id="toast" class="toast" hidden></div>
+    <div id="sheet-backdrop" class="sheet-backdrop" hidden></div>
+    <div id="sheet" class="sheet" hidden role="dialog" aria-modal="true"></div>
+  </section>
+
+  <!-- ======================================================== dialogs -->
+  <dialog id="dlg" class="dlg"></dialog>
+</body>
+</html>
