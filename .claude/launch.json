@@ -1,0 +1,16 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "headroom-host",
+      "runtimeExecutable": "C:\\Users\\eddyc\\AppData\\Local\\Microsoft\\dotnet\\dotnet.exe",
+      "runtimeArgs": [
+        "host-windows/Headroom.Host/bin/Debug/net10.0-windows10.0.19041.0/headroom.dll",
+        "run",
+        "--data=.devdata",
+        "--webroot=web"
+      ],
+      "port": 7080
+    }
+  ]
+}
