@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Headroom Host</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/css/app.css">
+  <style>
+    body { overflow: auto; }
+    main { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+    .card { background: var(--bg-elev); border: 1px solid var(--line); border-radius: 16px; padding: 18px; margin: 14px 0; }
+    .card h2 { margin: 0 0 4px; font-size: 18px; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .grow { flex: 1 1 220px; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    td, th { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+    th { color: var(--muted); font-weight: 500; }
+    code, .mono { font-family: var(--mono); font-size: 13px; }
+    .code { font: 600 34px/1.2 var(--mono); letter-spacing: .12em; margin: 8px 0; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; background: var(--bg-elev2); color: var(--muted); }
+    .pill.ok { color: var(--ok); } .pill.warn { color: var(--warn); }
+    .toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+    .toggle:last-child { border-bottom: 0; }
+    input[type=checkbox] { width: 22px; height: 22px; accent-color: var(--accent); }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+<main>
+  <div class="brand" style="margin-bottom:8px">
+    <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="6" width="26" height="17" rx="3.5" fill="none" stroke="currentColor" stroke-width="2.4"/><path d="M11 27h10" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M10 14.5l4 4 8-8" fill="none" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <h1 id="title">Headroom Host</h1>
+  </div>
+  <p class="muted" id="subtitle">Loading…</p>
+
+  <section class="card">
+    <h2>Connect from another device</h2>
+    <p class="muted small">Open one of these addresses on your phone, tablet or other computer:</p>
+    <ul id="urls" class="mono"></ul>
+    <p class="muted small" id="trust-hint"></p>
+  </section>
+
+  <section class="card">
+    <h2>Pair a new device</h2>
+    <p class="muted small">A one-time code works once, for 10 minutes — no password needed.</p>
+    <div class="row"><button class="primary" id="btn-code">Create pairing code</button></div>
+    <div id="code-out" hidden>
+      <div class="code" id="code"></div>
+      <p class="small muted">Or open this link on the new device:</p>
+      <p class="mono small" id="code-url" style="word-break:break-all"></p>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Password</h2>
+    <p class="muted small" id="pw-state"></p>
+    <form id="pw-form" class="row">
+      <input class="grow" type="password" id="pw1" placeholder="New password (8+ characters)" autocomplete="new-password">
+      <input class="grow" type="password" id="pw2" placeholder="Repeat" autocomplete="new-password">
+      <button class="primary" type="submit">Save</button>
+    </form>
+    <p class="small" id="pw-msg"></p>
+  </section>
+
+  <section class="card">
+    <h2>Paired devices</h2>
+    <table><thead><tr><th>Device</th><th>Last seen</th><th>From</th><th>View only</th><th></th></tr></thead><tbody id="devices"></tbody></table>
+  </section>
+
+  <section class="card">
+    <h2>Connected now</h2>
+    <div id="sessions" class="small muted">Nobody.</div>
+  </section>
+
+  <section class="card">
+    <h2>Settings</h2>
+    <div class="toggle"><span>Lock this PC when the last viewer disconnects</span><input type="checkbox" id="s-lock"></div>
+    <div class="toggle"><span>Clipboard sync</span><input type="checkbox" id="s-clip"></div>
+    <div class="toggle"><span>File transfer</span><input type="checkbox" id="s-files"></div>
+    <div class="toggle"><span>Stream audio</span><input type="checkbox" id="s-audio"></div>
+    <div class="toggle"><span>Encoder</span>
+      <select id="s-encoder" style="width:auto"><option value="auto">Automatic (GPU)</option><option value="hardware">Hardware only</option><option value="software">Software</option></select></div>
+    <div class="toggle"><span>Max frame rate</span>
+      <select id="s-fps" style="width:auto"><option>30</option><option>60</option><option>120</option><option>144</option><option>240</option></select></div>
+    <div class="toggle"><span>Max bitrate (Mb/s)</span>
+      <select id="s-bitrate" style="width:auto"><option value="10000">10</option><option value="20000">20</option><option value="40000">40</option><option value="80000">80</option><option value="150000">150</option></select></div>
+  </section>
+</main>
+<script type="module" src="/js/admin.js"></script>
+</body>
+</html>
