@@ -165,8 +165,12 @@ export class Connection extends EventTarget {
         if (sent != null) {
           this._pings.delete(msg.id);
           const rtt = performance.now() - sent;
-          this.rttMs = this.rttMs ? this.rttMs * 0.8 + rtt * 0.2 : rtt;
           this.lastRtt = rtt;
+          // Median of the last 7: robust to the odd slow ping (e.g. during stream start-up).
+          (this._rtts ||= []).push(rtt);
+          if (this._rtts.length > 7) this._rtts.shift();
+          const sorted = [...this._rtts].sort((a, b) => a - b);
+          this.rttMs = sorted[sorted.length >> 1];
         }
         break;
       }
