@@ -173,8 +173,10 @@ public static class WebHost
                 urls = ServerUrls(certs),
                 tailscale = certs.TailscaleName,
                 devices = c.Devices.Select(d => new { d.Id, d.Name, d.Created, d.LastSeen, d.LastAddress, d.ViewOnly }),
-                sessions = SessionManager.Active.Select(s => new { s.Id, device = s.Device?.Name, s.RemoteAddress, s.ConnectedAt }),
+                sessions = SessionManager.Active.Select(s => new { s.Id, device = s.Device?.Name, deviceId = s.Device?.Id, s.RemoteAddress, s.ConnectedAt }),
                 elevated = Input.InputInjector.IsSystem,
+                serviceInstalled = Service.ServiceInstaller.Exists(),
+                pid = Environment.ProcessId,
                 caThumbprint = certs.CaCertificate.Thumbprint,
                 settings = new { c.Video, c.Audio, c.Permissions, c.LockOnDisconnect },
             }, ConfigStore.JsonOptions);
@@ -192,6 +194,18 @@ public static class WebHost
         {
             var code = AuthService.CreatePairCode(TimeSpan.FromMinutes(10));
             return Results.Json(new { code, expiresInSeconds = 600, urls = ServerUrls(certs).Select(u => $"{u}#pair={code}") });
+        });
+        admin.MapPost("/sessions/{id}/disconnect", (string id) =>
+        {
+            var s = SessionManager.Active.FirstOrDefault(x => x.Id == id);
+            if (s == null) return Results.NotFound();
+            s.Disconnect("disconnected from the host");
+            return Results.Json(new { ok = true });
+        });
+        admin.MapPost("/sessions/disconnect-all", () =>
+        {
+            foreach (var s in SessionManager.Active) s.Disconnect("disconnected from the host");
+            return Results.Json(new { ok = true });
         });
         admin.MapDelete("/devices/{id}", (string id) =>
         {
