@@ -183,7 +183,7 @@ public static class WebHost
                 dataDir = Paths.DataDir,
                 logDir = Paths.LogDir,
                 caThumbprint = certs.CaCertificate.Thumbprint,
-                settings = new { c.Video, c.Audio, c.Permissions, c.LockOnDisconnect },
+                settings = new { c.Video, c.Audio, c.Permissions, c.LockOnDisconnect, c.DisplayName },
             }, ConfigStore.JsonOptions);
         });
         admin.MapPost("/password", async (HttpContext ctx) =>
@@ -263,6 +263,8 @@ public static class WebHost
                 if (body.TryGetProperty("audio", out var a)) c.Audio.Enabled = a.GetBoolean();
                 if (body.TryGetProperty("clipboard", out var cb)) c.Permissions.Clipboard = cb.GetBoolean();
                 if (body.TryGetProperty("fileTransfer", out var ft)) c.Permissions.FileTransfer = ft.GetBoolean();
+                if (body.TryGetProperty("input", out var inp)) c.Permissions.Input = inp.GetBoolean();
+                if (body.TryGetProperty("displayName", out var dn)) c.DisplayName = string.IsNullOrWhiteSpace(dn.GetString()) ? null : dn.GetString()!.Trim();
             });
             return Results.Json(new { ok = true });
         });
