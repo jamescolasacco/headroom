@@ -21,6 +21,20 @@ export const hasWebCodecs = typeof VideoDecoder !== 'undefined';
 export const hasAudioDecoder = typeof AudioDecoder !== 'undefined';
 export const secure = window.isSecureContext;
 
+/** Running inside Headroom Viewer for Windows (WebView2 shell serving the bundled client). */
+export const nativeViewer = !!window.chrome?.webview && location.hostname === 'app.headroom.local';
+
+export function postNative(msg) {
+  if (nativeViewer) window.chrome.webview.postMessage(msg);
+}
+
+export function onNative(handler) {
+  if (!nativeViewer) return () => { };
+  const fn = e => handler(e.data);
+  window.chrome.webview.addEventListener('message', fn);
+  return () => window.chrome.webview.removeEventListener('message', fn);
+}
+
 export function deviceLabel() {
   if (isIPad) return 'iPad';
   if (isIPhone) return 'iPhone';
