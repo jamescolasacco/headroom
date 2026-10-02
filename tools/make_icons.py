@@ -32,7 +32,26 @@ def sd_segment(px, py, ax, ay, bx, by):
     return math.hypot(pax - bax * t, pay - bay * t)
 
 
-def render(size, maskable=False, rounded=True):
+def ico(path, images):
+    """Windows .ico with PNG-compressed entries (supported since Vista). images: [(size, rgba)]."""
+    pngs = []
+    for size, rgba in images:
+        tmp = path.with_suffix(f".{size}.tmp")
+        png(tmp, size, size, rgba)
+        pngs.append((size, tmp.read_bytes()))
+        tmp.unlink()
+    header = struct.pack("<HHH", 0, 1, len(pngs))
+    offset = 6 + 16 * len(pngs)
+    entries, blobs = b"", b""
+    for size, data in pngs:
+        dim = 0 if size >= 256 else size
+        entries += struct.pack("<BBBBHHII", dim, dim, 0, 0, 1, 32, len(data), offset)
+        blobs += data
+        offset += len(data)
+    path.write_bytes(header + entries + blobs)
+
+
+def render(size, maskable=False, rounded=True, badge=False):
     s = size / 512.0
     # Maskable icons need content inside the central 80% safe zone and a full-bleed background.
     inner = 0.78 if maskable else 1.0
@@ -63,6 +82,13 @@ def render(size, maskable=False, rounded=True):
                         col = [0xe8, 0xeb, 0xf0]
                     if d_chk <= 0:
                         col = [0x5b, 0x9d, 0xff]
+                    if badge:
+                        # "someone is connected" dot for the tray icon, with a dark ring to separate it
+                        d_dot = math.hypot(px - 412, py - 412) - 100
+                        if d_dot <= 26:
+                            col = [0x0b, 0x0d, 0x11]
+                        if d_dot <= 0:
+                            col = [0x3f, 0xbf, 0x74]
                     acc[0] += col[0]; acc[1] += col[1]; acc[2] += col[2]; acc[3] += 255
             n = ss * ss
             i = (y * size + x) * 4
@@ -85,6 +111,13 @@ def main():
     ]:
         png(OUT / name, size, size, render(size, maskable, rounded))
         print("wrote", OUT / name)
+    # Windows app / tray icons
+    assets = OUT.parent.parent / "assets"
+    assets.mkdir(exist_ok=True)
+    sizes = [16, 20, 24, 32, 40, 48, 64, 256]
+    ico(assets / "headroom.ico", [(n, render(n)) for n in sizes])
+    ico(assets / "headroom-active.ico", [(n, render(n, badge=True)) for n in sizes])
+    print("wrote", assets / "headroom.ico", "and headroom-active.ico")
 
 
 if __name__ == "__main__":
