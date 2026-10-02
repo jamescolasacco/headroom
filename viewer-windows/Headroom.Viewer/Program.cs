@@ -10,6 +10,13 @@ public static class Program
     public static Icon AppIcon { get; private set; } = SystemIcons.Application;
     private static readonly List<ViewerWindow> Windows = new();
     private static readonly ApplicationContext Context = new();
+    private static readonly KeyboardHook Hook = new(hwnd => Windows.FirstOrDefault(w => w.SessionActive && w.IsHandleCreated && w.Handle == hwnd));
+
+    /// <summary>The system-shortcut hook only runs while at least one window has a live session.</summary>
+    private static void UpdateHook()
+    {
+        if (Windows.Any(w => w.SessionActive)) Hook.Install(); else Hook.Uninstall();
+    }
 
     [STAThread]
     public static void Main(string[] args)
@@ -29,10 +36,12 @@ public static class Program
     {
         var w = new ViewerWindow(url);
         Windows.Add(w);
+        w.SessionChanged += _ => UpdateHook();
         w.FormClosed += (_, _) =>
         {
             Windows.Remove(w);
-            if (Windows.Count == 0) Context.ExitThread();
+            UpdateHook();
+            if (Windows.Count == 0) { Hook.Dispose(); Context.ExitThread(); }
         };
         w.Show();
         return w;
@@ -42,6 +51,7 @@ public static class Program
     public static async Task RestartBrowserAsync(ViewerWindow requester, string url)
     {
         foreach (var w in Windows) w.DetachWebView();
+        UpdateHook();
         await ViewerEnvironment.RestartAsync();
         foreach (var w in Windows.ToList())
         {
