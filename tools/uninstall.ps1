@@ -1,4 +1,5 @@
-# Removes the Headroom service and program files. Add -Purge to also delete pairings, certificates and settings.
+# Removes the Headroom service, tray app and program files. Add -Purge to also delete pairings,
+# certificates and settings.
 param([switch]$Purge)
 $ErrorActionPreference = "Stop"
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -9,10 +10,16 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 }
 $dst = Join-Path $env:ProgramFiles "Headroom"
 $exe = Join-Path $dst "headroom.exe"
+
+Get-Process HeadroomServer -ErrorAction SilentlyContinue | Stop-Process -Force
+$tray = Join-Path $dst "HeadroomServer.exe"
+if (Test-Path $tray) { & $tray --disable-autostart }
+Remove-Item (Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs\Headroom Server.lnk") -ErrorAction SilentlyContinue
+
 if (Test-Path $exe) {
     if ($Purge) { & $exe service uninstall --purge } else { & $exe service uninstall }
 }
 Start-Sleep -Seconds 1
 if (Test-Path $dst) { Remove-Item -Recurse -Force $dst }
-Write-Host "Headroom removed." + ($(if ($Purge) { " Data deleted." } else { " Pairings kept in $env:ProgramData\Headroom (use -Purge to delete)." }))
+Write-Host ("Headroom removed." + $(if ($Purge) { " Data deleted." } else { " Pairings kept in $env:ProgramData\Headroom (use -Purge to delete)." }))
 Read-Host "Press Enter to close"

@@ -16,10 +16,15 @@ $env:DOTNET_NOLOGO = "1"
 if (Test-Path $out) { Remove-Item -Recurse -Force $out }
 & $dotnet publish $proj -c Release -r $Runtime --self-contained true -o $out `
     -p:PublishReadyToRun=true -p:DebugType=none -p:GenerateDocumentationFile=false
-if ($LASTEXITCODE -ne 0) { throw "publish failed" }
+if ($LASTEXITCODE -ne 0) { throw "publish failed (engine)" }
+# The tray app shares the same self-contained runtime folder (same .NET version).
+$tray = Join-Path $root "host-windows\Headroom.Server\Headroom.Server.csproj"
+& $dotnet publish $tray -c Release -r $Runtime --self-contained true -o $out `
+    -p:PublishReadyToRun=true -p:DebugType=none
+if ($LASTEXITCODE -ne 0) { throw "publish failed (tray app)" }
 Copy-Item (Join-Path $root "tools\install.ps1") $out
 Copy-Item (Join-Path $root "tools\uninstall.ps1") $out
 Write-Host ""
 Write-Host "Published to $out"
-Write-Host "Try it:   $out\headroom.exe"
+Write-Host "Try it:   $out\HeadroomServer.exe   (tray app; runs the engine in user mode)"
 Write-Host "Install:  right-click $out\install.ps1 > Run with PowerShell (as administrator)"
