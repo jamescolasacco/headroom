@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.NetworkInformation;
+using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -67,7 +68,7 @@ public sealed class CertificateManager
         }, null, TimeSpan.FromMinutes(5), TimeSpan.FromMinutes(5));
     }
 
-    /// <summary>Kestrel ServerCertificateSelector.</summary>
+    /// <summary>The certificate to present for this SNI name.</summary>
     public X509Certificate2 Select(string? sniName)
     {
         if (_custom != null) return _custom;
@@ -75,6 +76,25 @@ public sealed class CertificateManager
             sniName.Equals(_tailscaleName, StringComparison.OrdinalIgnoreCase))
             return _tailscale;
         lock (_gate) return _server!;
+    }
+
+    private readonly Dictionary<string, SslStreamCertificateContext> _contexts = new();
+    private X509Certificate2Collection _tailscaleIntermediates = new();
+
+    /// <summary>TLS context for this SNI name, including the issuer chain to send with the leaf.</summary>
+    public SslStreamCertificateContext SelectContext(string? sniName)
+    {
+        var cert = Select(sniName);
+        lock (_contexts)
+        {
+            if (_contexts.TryGetValue(cert.Thumbprint, out var ctx)) return ctx;
+            var extra = new X509Certificate2Collection();
+            if (ReferenceEquals(cert, _tailscale)) extra.AddRange(_tailscaleIntermediates);
+            else if (!ReferenceEquals(cert, _custom) && _ca != null) extra.Add(_ca);
+            ctx = SslStreamCertificateContext.Create(cert, extra, offline: true);
+            _contexts[cert.Thumbprint] = ctx;
+            return ctx;
+        }
     }
 
     public IReadOnlyCollection<string> ServerNames
@@ -128,7 +148,16 @@ public sealed class CertificateManager
                     if (IsIssuedBy(existing, _ca!)) _server = existing;
                 }
                 catch (Exception ex) { Log.Warn("tls", $"could not read server cert: {ex.Message}"); }
-                if (_server != null) _serverNames = ReadSans(_server);
+                if (_server != null)
+                {
+                    _serverNames = ReadSans(_server);
+                    // Older installs: adopt the existing certificate's key as the persistent server key.
+                    if (!File.Exists(ServerKeyFile) && _server.GetECDsaPrivateKey() is { } existingKey)
+                    {
+                        using (existingKey)
+                            File.WriteAllBytes(ServerKeyFile, ProtectedData.Protect(existingKey.ExportPkcs8PrivateKey(), Encoding.UTF8.GetBytes("headroom-key"), DataProtectionScope.LocalMachine));
+                    }
+                }
             }
 
             bool needsNew = force || _server == null
@@ -146,9 +175,44 @@ public sealed class CertificateManager
         }
     }
 
+    private static string ServerKeyFile => Path.Combine(Paths.CertDir, "server-key.protected");
+
+    /// <summary>
+    /// The server's TLS key is generated once and reused for every re-issued certificate (renewal, new IP
+    /// addresses). Desktop viewers pin this key, so the pin keeps working for the life of the install.
+    /// </summary>
+    private static ECDsa LoadOrCreateServerKey()
+    {
+        var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        if (File.Exists(ServerKeyFile))
+        {
+            try
+            {
+                var pkcs8 = ProtectedData.Unprotect(File.ReadAllBytes(ServerKeyFile), Encoding.UTF8.GetBytes("headroom-key"), DataProtectionScope.LocalMachine);
+                key.ImportPkcs8PrivateKey(pkcs8, out _);
+                return key;
+            }
+            catch (Exception ex) { Log.Warn("tls", $"server key unreadable, generating a new one: {ex.Message}"); }
+        }
+        File.WriteAllBytes(ServerKeyFile, ProtectedData.Protect(key.ExportPkcs8PrivateKey(), Encoding.UTF8.GetBytes("headroom-key"), DataProtectionScope.LocalMachine));
+        return key;
+    }
+
+    /// <summary>SHA-256 of the server certificate's public key — what Headroom Viewer pins and displays.</summary>
+    public string ServerKeyFingerprint
+    {
+        get
+        {
+            X509Certificate2 cert;
+            lock (_gate) cert = _server!;
+            var hex = Convert.ToHexString(SHA256.HashData(cert.PublicKey.ExportSubjectPublicKeyInfo()))[..32];
+            return string.Join(" ", Enumerable.Range(0, 8).Select(i => hex.Substring(i * 4, 4)));
+        }
+    }
+
     private static X509Certificate2 IssueServerCert(X509Certificate2 ca, IEnumerable<string> names)
     {
-        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var key = LoadOrCreateServerKey();
         var req = new CertificateRequest(new X500DistinguishedName($"CN={Environment.MachineName}, O=Headroom"), key, HashAlgorithmName.SHA256);
         var san = new SubjectAlternativeNameBuilder();
         foreach (var n in names)
@@ -279,6 +343,9 @@ public sealed class CertificateManager
                 return;
             }
             using var pem = X509Certificate2.CreateFromPemFile(certFile, keyFile);
+            var all = new X509Certificate2Collection();
+            all.ImportFromPemFile(certFile);
+            _tailscaleIntermediates = new X509Certificate2Collection(all.Skip(1).ToArray()); // Let's Encrypt intermediates
             _tailscale = Reload(pem);
             _tailscaleName = dnsName;
             Log.Info("tls", $"Tailscale certificate ready for https://{dnsName}:{ConfigStore.Current.Port}/ (expires {_tailscale.NotAfter:d})");
