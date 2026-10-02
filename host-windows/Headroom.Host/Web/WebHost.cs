@@ -177,6 +177,11 @@ public static class WebHost
                 elevated = Input.InputInjector.IsSystem,
                 serviceInstalled = Service.ServiceInstaller.Exists(),
                 pid = Environment.ProcessId,
+                httpPort = c.HttpHelperPort,
+                lanAddresses = CertificateManager.GetLocalAddresses()
+                    .Where(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork).Select(a => a.ToString()),
+                dataDir = Paths.DataDir,
+                logDir = Paths.LogDir,
                 caThumbprint = certs.CaCertificate.Thumbprint,
                 settings = new { c.Video, c.Audio, c.Permissions, c.LockOnDisconnect },
             }, ConfigStore.JsonOptions);
@@ -188,6 +193,32 @@ public static class WebHost
             if (pw.Length < 8) return Results.Json(new { error = "Password must be at least 8 characters." }, statusCode: 400);
             AuthService.SetPassword(pw);
             Log.Info("admin", "password changed");
+            return Results.Json(new { ok = true });
+        });
+        // Two-factor (TOTP) for pairing: setup returns a secret + otpauth URI; it only takes effect once a
+        // code from the authenticator app verifies.
+        string? pendingTotp = null;
+        admin.MapPost("/totp/setup", () =>
+        {
+            pendingTotp = Totp.NewSecret();
+            return Results.Json(new { secret = pendingTotp, uri = Totp.ProvisioningUri(pendingTotp, HostInfo.Name) });
+        });
+        admin.MapPost("/totp/enable", async (HttpContext ctx) =>
+        {
+            var body = await ReadJson(ctx);
+            var code = Str(body, "code") ?? "";
+            if (pendingTotp == null) return Results.Json(new { error = "Start setup first." }, statusCode: 400);
+            if (!Totp.Verify(pendingTotp, code)) return Results.Json(new { error = "That code didn't match. Check the time on your phone and try the next code." }, statusCode: 400);
+            var secret = pendingTotp;
+            pendingTotp = null;
+            ConfigStore.Update(c => { c.TotpSecret = secret; c.TotpEnabled = true; });
+            Log.Info("admin", "two-factor pairing enabled");
+            return Results.Json(new { ok = true });
+        });
+        admin.MapPost("/totp/disable", () =>
+        {
+            ConfigStore.Update(c => { c.TotpEnabled = false; c.TotpSecret = null; });
+            Log.Info("admin", "two-factor pairing disabled");
             return Results.Json(new { ok = true });
         });
         admin.MapPost("/paircode", () =>
