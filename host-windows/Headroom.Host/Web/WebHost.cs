@@ -7,6 +7,7 @@ using Headroom.Host.Session;
 using Headroom.Host.Util;
 using Microsoft.AspNetCore.Connections.Features;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.AspNetCore.Server.Kestrel.Https;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.FileProviders;
 
@@ -40,11 +41,19 @@ public static class WebHost
             }
             Listen(cfg.Port, lo =>
             {
-                lo.Protocols = HttpProtocols.Http1AndHttp2;
-                lo.UseHttps(h =>
+                // HTTP/1.1 only: WebSockets ride on it, and the handshake callback below owns ALPN.
+                lo.Protocols = HttpProtocols.Http1;
+                lo.UseHttps(new TlsHandshakeCallbackOptions
                 {
-                    h.ServerCertificateSelector = (_, sni) => certs.Select(sni);
-                    h.SslProtocols = System.Security.Authentication.SslProtocols.Tls12 | System.Security.Authentication.SslProtocols.Tls13;
+                    // Present the full chain (leaf + issuer), not just the leaf: clients can then build the
+                    // chain themselves, and Headroom Viewer can pin the local CA's key (Chromium only matches
+                    // pinned keys against certificates the server actually sends).
+                    OnConnection = ctx => ValueTask.FromResult(new System.Net.Security.SslServerAuthenticationOptions
+                    {
+                        ServerCertificateContext = certs.SelectContext(ctx.ClientHelloInfo.ServerName),
+                        EnabledSslProtocols = System.Security.Authentication.SslProtocols.Tls12 | System.Security.Authentication.SslProtocols.Tls13,
+                        ApplicationProtocols = new() { System.Net.Security.SslApplicationProtocol.Http11 },
+                    }),
                 });
             });
             if (cfg.HttpHelperPort > 0) Listen(cfg.HttpHelperPort, _ => { });
@@ -189,6 +198,7 @@ public static class WebHost
                 dataDir = Paths.DataDir,
                 logDir = Paths.LogDir,
                 caThumbprint = certs.CaCertificate.Thumbprint,
+                serverKeyFingerprint = certs.ServerKeyFingerprint,
                 settings = new { c.Video, c.Audio, c.Permissions, c.LockOnDisconnect, c.DisplayName },
             }, ConfigStore.JsonOptions);
         });
