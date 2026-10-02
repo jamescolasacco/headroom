@@ -32,7 +32,13 @@ public static class WebHost
         {
             k.AddServerHeader = false;
             k.Limits.MaxRequestBodySize = null; // uploads are streamed to disk
-            k.ListenAnyIP(cfg.Port, lo =>
+            // HEADROOM_BIND=loopback: development only — no LAN exposure (and no firewall prompt).
+            bool loopbackOnly = Environment.GetEnvironmentVariable("HEADROOM_BIND") == "loopback";
+            void Listen(int port, Action<Microsoft.AspNetCore.Server.Kestrel.Core.ListenOptions> configure)
+            {
+                if (loopbackOnly) k.ListenLocalhost(port, configure); else k.ListenAnyIP(port, configure);
+            }
+            Listen(cfg.Port, lo =>
             {
                 lo.Protocols = HttpProtocols.Http1AndHttp2;
                 lo.UseHttps(h =>
@@ -41,7 +47,7 @@ public static class WebHost
                     h.SslProtocols = System.Security.Authentication.SslProtocols.Tls12 | System.Security.Authentication.SslProtocols.Tls13;
                 });
             });
-            if (cfg.HttpHelperPort > 0) k.ListenAnyIP(cfg.HttpHelperPort);
+            if (cfg.HttpHelperPort > 0) Listen(cfg.HttpHelperPort, _ => { });
         });
         builder.Services.AddRouting();
 

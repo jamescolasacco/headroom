@@ -174,7 +174,7 @@ public sealed class CaptureSource : IDisposable
                     if (desktop.Sync()) { ResetDuplication(); continue; }
                 }
 
-                var result = _dup.AcquireNextFrame(100, out var info, out var resource);
+                var result = _dup!.AcquireNextFrame(100, out var info, out var resource);
                 if (result.Code == DXGI_ERROR_WAIT_TIMEOUT) continue;
                 if (result.Code == DXGI_ERROR_ACCESS_LOST || result.Code == DXGI_ERROR_INVALID_CALL)
                 {
@@ -390,7 +390,7 @@ public sealed class CaptureSource : IDisposable
 
         if (KeyedMutex.Acquire(_capMutex!, 0, 100) != 0) return false; // a consumer is stuck; drop this frame
         try { _capContext!.CopyResource(_capShared, src); }
-        finally { _capMutex.ReleaseSync(0); }
+        finally { _capMutex!.ReleaseSync(0); }
         return true;
     }
 

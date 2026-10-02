@@ -306,7 +306,7 @@ public sealed class VideoPipeline : IDisposable
         else
         {
             var gpu = src.Gpu!;
-            int w = _converter.OutputWidth, h = _converter.OutputHeight;
+            int w = conv.OutputWidth, h = conv.OutputHeight;
             var bytes = new byte[w * h * 3 / 2];
             gpu.Lock();
             try
