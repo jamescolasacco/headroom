@@ -13,7 +13,7 @@ import { ClipboardSync } from './clipboard.js';
 import { Toolbar } from './ui/toolbar.js';
 import { StatsOverlay } from './ui/stats.js';
 import { loadPrefs, savePrefs, touchHost } from './store.js';
-import { isIPhone, isIPad, isTouchPrimary, hasWebCodecs, secure, canFullscreen, isApple } from './platform.js';
+import { isIPhone, isIPad, isTouchPrimary, hasWebCodecs, secure, canFullscreen, isApple, postNative, onNative } from './platform.js';
 import { toast, closeSheet, h } from './ui/dom.js';
 
 const $ = id => document.getElementById(id);
@@ -114,6 +114,11 @@ export class Session {
     this.audio.setEnabled(this.prefs.audio);
     if (!isTouchPrimary) sink.focus({ preventScroll: true });
     this._overlay('Connecting…', this.host.url.replace(/^https?:\/\//, ''), true);
+    // Headroom Viewer (Windows): its keyboard hook captures Win/Alt+Tab/PrtScn while a session is up.
+    this._offNative = onNative(m => {
+      if (m?.type === 'nativeKey') this.keyboard.nativeKey(m.code, m.down);
+    });
+    postNative({ cmd: 'session', active: true, host: this.host.name });
     this.conn.connect();
     this.toolbar.peek(3500);
     this._requestWakeLock();
@@ -442,6 +447,8 @@ export class Session {
   stop() {
     if (this.disposed) return;
     this.disposed = true;
+    this._offNative?.();
+    postNative({ cmd: 'session', active: false });
     closeSheet();
     try { this.keyboard?.detach(); } catch { }
     try { this.mouse?.detach(); } catch { }

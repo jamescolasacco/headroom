@@ -77,6 +77,19 @@ export class KeyboardInput {
 
   tap(code) { this.send(code, true); this.send(code, false); }
 
+  /**
+   * A key captured by Headroom Viewer's low-level hook (Win, Alt+Tab, PrtScn...) — the page never sees
+   * these as DOM events, so they bypass the browser path and go straight to the host.
+   */
+  nativeKey(code, down) {
+    if (!this.enabled) return;
+    const hostCode = this._mapPlain(code);
+    if (!down && !this.down.has(hostCode)) return;
+    if (down && !isModifier(code)) this.ctx.mods?.pressForKey();
+    this.send(hostCode, down);
+    if (down) this.ctx.mods?.consume(code);
+  }
+
   releaseAll() {
     for (const c of [...this.down]) this.send(c, false);
     this.down.clear();
@@ -121,6 +134,13 @@ export class KeyboardInput {
     }
 
     if (!e.repeat) this._syncLocks(e);
+
+    // Ctrl+Alt+End = Ctrl+Alt+Del on the remote (the real one never reaches applications) — RDP's convention.
+    if (code === 'End' && e.ctrlKey && e.altKey && !e.shiftKey) {
+      e.preventDefault();
+      if (!e.repeat) this.ctx.conn.sendJson({ t: 'special', action: 'cad' });
+      return;
+    }
 
     // Caps Lock on Apple keyboards reports state changes, not presses: each transition = one tap.
     if (code === 'CapsLock' && isApple) {

@@ -4,7 +4,7 @@ import { normalizeUrl, getInfo, pair, checkHost } from './api.js';
 import { Session } from './session.js';
 import { h, svg, dialog, confirmDialog, toast } from './ui/dom.js';
 import { I } from './ui/icons.js';
-import { deviceLabel, secure, hasWebCodecs, isStandalone, isIOS } from './platform.js';
+import { deviceLabel, secure, hasWebCodecs, isStandalone, isIOS, nativeViewer, postNative, onNative } from './platform.js';
 
 const $ = id => document.getElementById(id);
 let session = null;
@@ -29,7 +29,29 @@ async function main() {
   }
   renderHome();
   const hosts = loadHosts();
+  // Headroom Viewer: #add=<url> resumes adding a computer after its certificate was trusted;
+  // #connect=<hostId> opens a session (used by "Open in new window").
+  const add = hash.get('add');
+  if (add) {
+    try { await addHostFlow({ url: add, info: await getInfo(add) }); } catch (e) { toast(e.message, 6000); }
+    return;
+  }
+  const connectId = hash.get('connect');
+  const toConnect = connectId && hosts.find(x => x.id === connectId);
+  if (toConnect) { connect(toConnect); return; }
   if (!hosts.length && sameOriginInfo && !code) addHostFlow({ url: location.origin, info: sameOriginInfo });
+}
+
+/** Headroom Viewer: ask the native shell to verify + pin a computer's certificate. */
+function requestTrust(url) {
+  return new Promise(resolve => {
+    const off = onNative(m => {
+      if (m?.cmd !== 'trustResult' || m.url !== url) return;
+      off();
+      resolve(m);
+    });
+    postNative({ cmd: 'trustHost', url });
+  });
 }
 
 // ---------------------------------------------------------------------------------------------- home
@@ -45,6 +67,7 @@ function renderHome() {
   if (!secure) hint.push('Not a secure connection: video needs HTTPS.');
   else if (!hasWebCodecs) hint.push('This browser lacks WebCodecs (needs Safari 16.4+, Chrome/Edge 94+, Firefox 130+).');
   if (isIOS && !isStandalone) hint.push('Tip: Share → Add to Home Screen for a full-screen app.');
+  if (nativeViewer) hint.push('Tip: Win, Alt+Tab and PrtScn go to the remote computer while its window is focused. Ctrl+Alt+End sends Ctrl+Alt+Del.');
   $('home-hint').textContent = hint.join(' ');
   for (const host of hosts) refreshStatus(host);
 }
@@ -92,6 +115,7 @@ async function hostMenu(host) {
           },
         }, 'Remove'),
         h('button', { type: 'button', onclick: () => { done(); addHostFlow({ url: host.url, repair: host }); } }, 'Pair again'),
+        nativeViewer ? h('button', { type: 'button', onclick: () => { done(); postNative({ cmd: 'newWindow', url: `${location.origin}/index.html#connect=${encodeURIComponent(host.id)}` }); } }, 'Open in new window') : null,
         h('button', { type: 'button', class: 'primary', onclick: () => { upsertHost({ ...host, name: name.value.trim() || host.name }); done(); renderHome(); } }, 'Save'))));
   });
 }
@@ -139,6 +163,15 @@ async function addHostFlow({ url, info, code, repair } = {}) {
             step = 2;
             render();
           } catch (ex) {
+            if (ex.unreachable && nativeViewer) {
+              // Probably an untrusted certificate: the viewer verifies the computer's key fingerprint
+              // with the user and pins it (it then reloads straight back into this flow).
+              err.textContent = 'Checking this computer\'s certificate…';
+              const r = await requestTrust(target);
+              if (r.ok && r.reason === 'already-trusted') err.textContent = 'This computer is reachable but didn\'t answer as a Headroom host. Check the address and port.';
+              else if (!r.ok) err.textContent = r.reason === 'declined' ? 'Not trusted — nothing was saved.' : r.reason;
+              return;
+            }
             err.replaceChildren(ex.message, ex.unreachable ? certHelp(target || addr.value) : '');
           }
         });
