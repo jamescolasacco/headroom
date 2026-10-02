@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>HeadroomViewer</AssemblyName>
+    <RootNamespace>Headroom.Viewer</RootNamespace>
+    <ApplicationIcon>..\..\assets\headroom.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Version>0.1.0</Version>
+    <Product>Headroom</Product>
+    <Description>Headroom Viewer — connect to your Headroom computers</Description>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <MSBuildWarningsAsMessages>$(MSBuildWarningsAsMessages);MSB3277</MSBuildWarningsAsMessages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4258.31" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\assets\headroom.ico" LogicalName="headroom.ico" />
+    <!-- The same web client the hosts serve, bundled so the viewer works on its own. -->
+    <Content Include="..\..\web\**\*" Exclude="..\..\web\admin.html;..\..\web\js\admin.js;..\..\web\css\admin.css" LinkBase="client" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
