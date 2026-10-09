@@ -202,6 +202,20 @@ public final class WebHost: HttpApp {
                 }
             }
             return .json(["ok": true])
+        case (.POST, "/account/join"):
+            // The password goes to the account server only; this computer keeps its own credential there.
+            switch AccountService.shared.join(server: body.str("server") ?? "", username: body.str("username") ?? "",
+                                              password: body.str("password") ?? "", totp: body.str("totp")) {
+            case .success(let name): return .json(["ok": true, "username": name])
+            case .failure(let e):
+                let status: HTTPResponseStatus = e.code == "bad-credentials" || e.code == "totp-required" || e.code == "bad-totp" ? .unauthorized : .badRequest
+                return .json(["error": e.code, "message": e.description], status: status)
+            }
+        case (.POST, "/account/leave"):
+            AccountService.shared.leave()
+            return .json(["ok": true])
+        case (.POST, "/account/sync"):
+            return .json(["ok": AccountService.shared.sync()])
         case (.POST, "/permissions/request"):
             // Shows the macOS prompt (or, once declined, the user must use System Settings).
             switch body.str("kind") {
@@ -256,6 +270,7 @@ public final class WebHost: HttpApp {
             "serverKeyFingerprint": certs.serverKeyFingerprint,
             "permissions": Permissions.json,
             "testPattern": Displays.testPatternSize != nil,
+            "account": AccountService.shared.statusJson as Any?,
             "settings": [
                 "video": c.video.json, "audio": c.audio.json, "permissions": c.permissions.json,
                 "lockOnDisconnect": c.lockOnDisconnect, "displayName": c.displayName as Any?, "notifyOnConnect": c.notifyOnConnect,

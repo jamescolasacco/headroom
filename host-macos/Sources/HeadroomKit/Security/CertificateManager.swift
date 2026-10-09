@@ -121,6 +121,15 @@ public final class CertificateManager {
         return Self.formatFingerprint(spki)
     }
 
+    /// Base64 SHA-256 of the server key's SubjectPublicKeyInfo: the pin Headroom Viewer uses (and what an
+    /// account hands to viewers so they trust this computer without a fingerprint prompt).
+    public var serverSpkiPin: String {
+        let der: [UInt8]
+        lock.lock(); der = server.der; lock.unlock()
+        guard let cert = try? Certificate(derEncoded: der), let spki = try? Self.spkiBytes(cert) else { return "" }
+        return Data(SHA256.hash(data: spki)).base64EncodedString()
+    }
+
     static func spkiBytes(_ cert: Certificate) throws -> [UInt8] {
         var s = DER.Serializer()
         try s.serialize(cert.publicKey)

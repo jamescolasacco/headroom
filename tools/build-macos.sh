@@ -109,6 +109,7 @@ if [ "$ONLY" != "viewer" ]; then
     LSUIElement '!<true/>' \
     NSHighResolutionCapable '!<true/>' \
     NSPrincipalClass NSApplication \
+    NSLocalNetworkUsageDescription "Headroom Server checks in with your Headroom account server when it's on this network." \
     NSHumanReadableCopyright "Headroom — self-hosted remote desktop"
   xattr -cr "$APP"
   sign "$APP/Contents/MacOS/headroom"
