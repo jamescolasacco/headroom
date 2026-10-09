@@ -142,7 +142,11 @@ The host only ever sees plain key codes.
 | POST | `/api/files/upload?dir=&name=` | Bearer | raw body; saved under a non-clashing name |
 | GET | `/api/files/download?t=` | ephemeral token | file download |
 | GET | `/headroom-ca.crt`, `/headroom-ca.mobileconfig` | none | local CA for device trust |
-| * | `/api/admin/*` | loopback only: loopback peer *and* loopback `Host`, no foreign `Origin`, `Sec-Fetch-Site` same-origin/none (so web pages can't use it); never CORS | password, pairing codes, devices, settings; on macOS also `permissions` in `/status` and `POST /permissions/request {"kind":"screen"\|"accessibility"}` |
+| * | `/api/admin/*` | loopback only: loopback peer *and* loopback `Host`, no foreign `Origin`, `Sec-Fetch-Site` same-origin/none (so web pages can't use it); never CORS | password, pairing codes, devices, settings, `account/join\|leave\|sync`; on macOS also `permissions` in `/status` and `POST /permissions/request {"kind":"screen"\|"accessibility"}` |
+
+Hosts joined to a Headroom account also accept the account's devices: their tokens are checked against the
+hashes from the host's last check-in with the account server ([ACCOUNTS.md](ACCOUNTS.md)), and they appear as
+`account:<id>` devices. To a client, nothing in this protocol changes.
 
 The WebSocket upgrade is accepted on any request of a keep-alive connection, not only the first.
 
