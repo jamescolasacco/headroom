@@ -7,3 +7,7 @@ dist/
 *.pfx
 *.log
 .devdata/
+.build/
+.swiftpm/
+.devdata-mac/
+*.xcodeproj/
