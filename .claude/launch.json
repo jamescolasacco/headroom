@@ -11,6 +11,18 @@
         "--webroot=web"
       ],
       "port": 7080
+    },
+    {
+      "name": "headroom-host-mac",
+      "runtimeExecutable": "host-macos/.build/debug/headroom",
+      "runtimeArgs": ["run", "--data=.devdata-mac", "--webroot=web", "--loopback"],
+      "port": 7080
+    },
+    {
+      "name": "headroom-host-mac-test-pattern",
+      "runtimeExecutable": "host-macos/.build/debug/headroom",
+      "runtimeArgs": ["run", "--data=.devdata-mac", "--webroot=web", "--loopback", "--test-pattern=1280x720"],
+      "port": 7080
     }
   ]
 }

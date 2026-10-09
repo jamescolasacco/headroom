@@ -1,7 +1,7 @@
 """Rasterises the Headroom icon (same geometry as web/icons/icon.svg) to PNGs, no dependencies.
 
 Shapes are evaluated as signed distance fields at 4x4 supersampling, so edges are antialiased.
-Run: python tools/make_icons.py
+Run: python tools/make_icons.py   (or --macos for just assets/macos/AppIcon.icns)
 """
 import math
 import pathlib
@@ -101,7 +101,85 @@ def render(size, maskable=False, rounded=True, badge=False):
     return rgba
 
 
+def render_macos(size):
+    """macOS app icon: the same artwork on Apple's icon grid — an 824/1024 rounded plate centred in the canvas,
+    with a soft drop shadow (the system does not round or shade app icons itself)."""
+    s = size / 1024.0
+    plate, inset = 824.0, 100.0
+    k = plate / 512.0  # design units -> canvas units
+    rgba = bytearray(size * size * 4)
+    ss = 2
+    for y in range(size):
+        for x in range(size):
+            acc = [0.0, 0.0, 0.0]
+            cov = 0.0
+            shadow = 0.0
+            for sy in range(ss):
+                for sx in range(ss):
+                    px = (x + (sx + 0.5) / ss) / s
+                    py = (y + (sy + 0.5) / ss) / s
+                    # design coordinates inside the plate
+                    qx, qy = (px - inset) / k, (py - inset) / k
+                    d_plate = sd_round_rect(qx, qy, 0, 0, 512, 512, 115)
+                    if d_plate > 0:
+                        # shadow: offset down 12 px, ~28 px falloff
+                        ds = sd_round_rect(qx, qy - 12 / k, 0, 0, 512, 512, 115) * k
+                        shadow += max(0.0, 1 - max(0.0, ds) / 28.0) ** 2 * 0.32
+                        continue
+                    t = (qx + qy) / 1024
+                    col = [0x1b * (1 - t) + 0x0b * t, 0x22 * (1 - t) + 0x0d * t, 0x30 * (1 - t) + 0x11 * t]
+                    d_mon = abs(sd_round_rect(qx, qy, 96, 120, 320, 210, 34)) - 15
+                    d_base = sd_segment(qx, qy, 196, 396, 316, 396) - 15
+                    d_chk = min(sd_segment(qx, qy, 190, 226, 236, 272), sd_segment(qx, qy, 236, 272, 328, 180)) - 17
+                    if min(d_mon, d_base) <= 0:
+                        col = [0xe8, 0xeb, 0xf0]
+                    if d_chk <= 0:
+                        col = [0x5b, 0x9d, 0xff]
+                    acc[0] += col[0]; acc[1] += col[1]; acc[2] += col[2]
+                    cov += 1
+            n = ss * ss
+            i = (y * size + x) * 4
+            a_plate = cov / n
+            a_shadow = (shadow / n) * (1 - a_plate)
+            a = a_plate + a_shadow
+            if a > 0:
+                # plate colour over black shadow, straight alpha
+                rgba[i] = int(acc[0] / n / a) if cov else 0
+                rgba[i + 1] = int(acc[1] / n / a) if cov else 0
+                rgba[i + 2] = int(acc[2] / n / a) if cov else 0
+            rgba[i + 3] = int(min(1.0, a) * 255)
+    return rgba
+
+
+def macos_icns(out_path):
+    """Renders 1024 px once, downsizes with sips, packs with iconutil (macOS only)."""
+    import shutil
+    import subprocess
+    import tempfile
+    if not shutil.which("iconutil") or not shutil.which("sips"):
+        print("skipping macOS icon (needs iconutil + sips)")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = pathlib.Path(tmp)
+        master = tmp / "master.png"
+        png(master, 1024, 1024, render_macos(1024))
+        iconset = tmp / "AppIcon.iconset"
+        iconset.mkdir()
+        for base in (16, 32, 128, 256, 512):
+            for scale in (1, 2):
+                px = base * scale
+                name = f"icon_{base}x{base}{'@2x' if scale == 2 else ''}.png"
+                subprocess.run(["sips", "-z", str(px), str(px), str(master), "--out", str(iconset / name)], check=True, capture_output=True)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(out_path)], check=True)
+    print("wrote", out_path)
+
+
 def main():
+    import sys
+    if "--macos" in sys.argv:  # only the macOS icon (fast path for tools/build-macos.sh)
+        macos_icns(OUT.parent.parent / "assets" / "macos" / "AppIcon.icns")
+        return
     OUT.mkdir(parents=True, exist_ok=True)
     for name, size, maskable, rounded in [
         ("icon-192.png", 192, False, True),
@@ -118,6 +196,8 @@ def main():
     ico(assets / "headroom.ico", [(n, render(n)) for n in sizes])
     ico(assets / "headroom-active.ico", [(n, render(n, badge=True)) for n in sizes])
     print("wrote", assets / "headroom.ico", "and headroom-active.ico")
+    # macOS app icon (Headroom Server.app and Headroom Viewer.app)
+    macos_icns(assets / "macos" / "AppIcon.icns")
 
 
 if __name__ == "__main__":
