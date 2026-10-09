@@ -1,0 +1,14 @@
+{
+  "name": "headroom-account-server",
+  "version": "0.1.0",
+  "description": "Optional accounts for Headroom: sign in once, every computer in the account is there.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "bin": { "headroom-account-server": "server.mjs" },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node test.mjs"
+  }
+}
