@@ -16,6 +16,9 @@ public static class ViewerEnvironment
 
     private static Task<CoreWebView2Environment>? _env;
 
+    /// <summary>The pinned keys the running browser process was started with.</summary>
+    public static string ActiveSpkiList { get; private set; } = "";
+
     public static Task<CoreWebView2Environment> GetAsync() => _env ??= CreateAsync();
 
     private static async Task<CoreWebView2Environment> CreateAsync()
@@ -27,6 +30,7 @@ public static class ViewerEnvironment
             "--autoplay-policy=no-user-gesture-required",
         };
         var spki = TrustStore.SpkiList;
+        ActiveSpkiList = spki;
         if (spki.Length > 0) args.Add($"--ignore-certificate-errors-spki-list={spki}");
         // Development: expose Chrome DevTools Protocol for automated testing.
         if (int.TryParse(Environment.GetEnvironmentVariable("HEADROOM_CDP_PORT"), out var cdp)) args.Add($"--remote-debugging-port={cdp}");

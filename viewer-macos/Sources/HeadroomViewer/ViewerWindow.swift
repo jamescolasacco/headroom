@@ -96,6 +96,15 @@ final class ViewerWindow: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUI
         switch cmd {
         case "trustHost":
             trustHost(body["url"] as? String ?? "")
+        case "accountPins":
+            // The account server is the user's own (signed in over HTTPS): its computers' keys need no prompt.
+            let pins = (body["pins"] as? [[String: Any]] ?? []).compactMap { p -> TrustStore.Pin? in
+                guard let host = p["host"] as? String, !host.isEmpty, let spki = p["spki"] as? String,
+                      Data(base64Encoded: spki)?.count == 32 else { return nil }
+                return .init(host: host, spki: spki, fingerprint: p["fingerprint"] as? String ?? "",
+                             subject: p["subject"] as? String ?? host, added: Date())
+            }
+            TrustStore.addVouched(pins)
         case "session":
             sessionActive = body["active"] as? Bool ?? false
             sessionHost = body["host"] as? String

@@ -38,6 +38,27 @@ public static class TrustStore
         File.WriteAllText(FilePath, JsonSerializer.Serialize(list, new JsonSerializerOptions { WriteIndented = true }));
     }
 
+    /// <summary>
+    /// Keys vouched for by the user's Headroom account: each computer reports its server key to the account
+    /// server, which hands it to signed-in devices. Returns true if anything new was stored.
+    /// </summary>
+    public static bool AddVouched(IEnumerable<Pin> pins)
+    {
+        var list = Pins.ToList();
+        bool added = false;
+        foreach (var p in pins)
+        {
+            if (list.Any(x => string.Equals(x.Host, p.Host, StringComparison.OrdinalIgnoreCase) && x.Spki == p.Spki)) continue;
+            list.Add(p);
+            added = true;
+        }
+        if (!added) return false;
+        _pins = list;
+        Directory.CreateDirectory(Program.DataDir);
+        File.WriteAllText(FilePath, JsonSerializer.Serialize(list, new JsonSerializerOptions { WriteIndented = true }));
+        return true;
+    }
+
     /// <summary>Chromium switch value: comma-separated base64 SHA-256 SPKI hashes.</summary>
     public static string SpkiList => string.Join(",", Pins.Select(p => p.Spki).Distinct());
 

@@ -38,6 +38,21 @@ enum TrustStore {
     static func add(_ pin: Pin) {
         var list = pins.filter { !($0.host == pin.host && $0.spki == pin.spki) }
         list.append(pin)
+        save(list)
+    }
+
+    /// Keys vouched for by the user's Headroom account: each computer reports its server key to the account
+    /// server, which hands it to signed-in devices. Only new (host, key) pairs are written.
+    static func addVouched(_ new: [Pin]) {
+        let list = pins
+        var fresh = [Pin]()
+        for p in new where !(list + fresh).contains(where: { normalizeHost($0.host) == normalizeHost(p.host) && $0.spki == p.spki }) {
+            fresh.append(p)
+        }
+        if !fresh.isEmpty { save(list + fresh) }
+    }
+
+    private static func save(_ list: [Pin]) {
         lock.lock()
         cached = list
         lock.unlock()
