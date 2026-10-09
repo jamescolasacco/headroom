@@ -1,4 +1,4 @@
-// Binary wire format shared with the host (host-windows/.../Session/Wire.cs). Little-endian.
+// Binary wire format shared with the hosts (host-windows/.../Session/Wire.cs, host-macos/.../Session/Wire.swift). Little-endian.
 
 export const H2C = { VIDEO: 0x01, CURSOR_POS: 0x02, AUDIO: 0x03, CURSOR_SHAPE: 0x05 };
 export const C2H = { MOUSE_ABS: 0x10, MOUSE_REL: 0x11, MOUSE_BUTTON: 0x12, MOUSE_WHEEL: 0x13, KEY: 0x14, FRAME_ACK: 0x15 };

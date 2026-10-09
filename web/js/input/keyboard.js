@@ -11,6 +11,7 @@ export class KeyboardInput {
   constructor(ctx) {
     this.ctx = ctx;
     this.profile = 'pc';
+    this.hostOs = 'windows';
     this.enabled = false;
     this.down = new Set();          // codes we told the host are down
     this.deferred = new Map();      // modifier code -> { sent, used } (Mac profile)
@@ -24,7 +25,19 @@ export class KeyboardInput {
     this._onBlur = () => this.releaseAll();
   }
 
-  setProfile(p) { this.profile = p === 'auto' ? (isApple ? 'mac' : 'pc') : p; }
+  /**
+   * Profiles: 'pc' sends keys as pressed; 'mac' translates Mac shortcuts for a Windows host (⌘C → Ctrl+C…);
+   * 'cmdctrl' swaps ⌘/Win and Ctrl. Auto picks by viewer and host: Mac→Windows 'mac', PC→Mac 'cmdctrl'
+   * (Ctrl+C → ⌘C), and same-platform pairs 'pc'.
+   */
+  setProfile(p, hostOs = this.hostOs) {
+    this.hostOs = hostOs || 'windows';
+    const macHost = this.hostOs === 'macos';
+    if (p === 'auto') this.profile = macHost ? (isApple ? 'pc' : 'cmdctrl') : (isApple ? 'mac' : 'pc');
+    else this.profile = macHost && p === 'mac' ? 'pc' : p; // Windows-shortcut translation means nothing on a Mac host
+  }
+
+  get macHost() { return this.hostOs === 'macos'; }
 
   attach() {
     this.enabled = true;
@@ -133,7 +146,8 @@ export class KeyboardInput {
       if (this.ctx.onLocalHotkey?.(code)) { e.preventDefault(); e.stopPropagation(); return; }
     }
 
-    if (!e.repeat) this._syncLocks(e);
+    // Lock keys change the lock state themselves (the host toggles on the key): syncing too would toggle twice.
+    if (!e.repeat && code !== 'CapsLock' && code !== 'NumLock') this._syncLocks(e);
 
     // Ctrl+Alt+End = Ctrl+Alt+Del on the remote (the real one never reaches applications) — RDP's convention.
     if (code === 'End' && e.ctrlKey && e.altKey && !e.shiftKey) {
@@ -151,13 +165,16 @@ export class KeyboardInput {
 
     // Paste: let the browser fire 'paste' so we get clipboard text without a permission prompt,
     // push it to the host, then replay the shortcut (Selkies-style ordering hold).
-    const pasteCombo = code === 'KeyV' && (this.profile === 'pc' ? e.ctrlKey && !e.metaKey : (e.metaKey || e.ctrlKey)) && !e.altKey;
+    const pasteCombo = code === 'KeyV' && !e.altKey && (this.macHost
+      ? (this.profile === 'cmdctrl' ? e.ctrlKey && !e.metaKey : e.metaKey && !e.ctrlKey)
+      : (this.profile === 'pc' ? e.ctrlKey && !e.metaKey : (e.metaKey || e.ctrlKey)));
     if (pasteCombo && !e.repeat) {
       let action = this._resolve(code, e);
       // Replay as a self-contained chord: the user may release Ctrl before the replay fires.
       if (action.kind === 'key') {
         const mods = [];
-        if (e.ctrlKey) mods.push(this.down.has('ControlRight') ? 'ControlRight' : 'ControlLeft');
+        if (e.ctrlKey) mods.push(this._mapModifier(this.down.has('ControlRight') ? 'ControlRight' : 'ControlLeft'));
+        if (e.metaKey) mods.push(this._mapModifier('MetaLeft'));
         if (e.shiftKey) mods.push('ShiftLeft');
         if (e.altKey) mods.push('AltLeft');
         action = { kind: 'chord', codes: [...mods, action.code] };
@@ -225,7 +242,7 @@ export class KeyboardInput {
       setTimeout(() => this._replay(action), text ? 40 : 0);
     } else if (text) {
       // Paste from the browser's menu: paste on the host too.
-      setTimeout(() => this.chord(['ControlLeft', 'KeyV']), 40);
+      setTimeout(() => this.chord([this.macHost ? 'MetaLeft' : 'ControlLeft', 'KeyV']), 40);
     }
   }
 

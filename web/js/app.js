@@ -4,7 +4,7 @@ import { normalizeUrl, getInfo, pair, checkHost } from './api.js';
 import { Session } from './session.js';
 import { h, svg, dialog, confirmDialog, toast } from './ui/dom.js';
 import { I } from './ui/icons.js';
-import { deviceLabel, secure, hasWebCodecs, isStandalone, isIOS, nativeViewer, postNative, onNative } from './platform.js';
+import { deviceLabel, secure, hasWebCodecs, isStandalone, isIOS, isMac, nativeViewer, postNative, onNative } from './platform.js';
 
 const $ = id => document.getElementById(id);
 let session = null;
@@ -67,7 +67,9 @@ function renderHome() {
   if (!secure) hint.push('Not a secure connection: video needs HTTPS.');
   else if (!hasWebCodecs) hint.push('This browser lacks WebCodecs (needs Safari 16.4+, Chrome/Edge 94+, Firefox 130+).');
   if (isIOS && !isStandalone) hint.push('Tip: Share → Add to Home Screen for a full-screen app.');
-  if (nativeViewer) hint.push('Tip: Win, Alt+Tab and PrtScn go to the remote computer while its window is focused. Ctrl+Alt+End sends Ctrl+Alt+Del.');
+  if (nativeViewer) hint.push(isMac
+    ? 'Tip: ⌘Tab, ⌘Space and other system shortcuts go to the remote computer while its window is focused.'
+    : 'Tip: Win, Alt+Tab and PrtScn go to the remote computer while its window is focused. Ctrl+Alt+End sends Ctrl+Alt+Del.');
   $('home-hint').textContent = hint.join(' ');
   for (const host of hosts) refreshStatus(host);
 }
