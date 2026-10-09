@@ -1,9 +1,9 @@
 // Offline-capable app shell. Network-first so a host update is picked up immediately; the cache
 // lets the home-screen app open (and reach *other* computers) even when this host is off.
-const CACHE = 'headroom-shell-v1';
+const CACHE = 'headroom-shell-v2';
 const SHELL = [
   '/', '/index.html', '/manifest.webmanifest', '/css/app.css',
-  '/js/app.js', '/js/api.js', '/js/store.js', '/js/platform.js', '/js/protocol.js', '/js/connection.js',
+  '/js/app.js', '/js/account.js', '/js/qr.js', '/js/api.js', '/js/store.js', '/js/platform.js', '/js/protocol.js', '/js/connection.js',
   '/js/session.js', '/js/viewport.js', '/js/cursor.js', '/js/clipboard.js',
   '/js/video/presenter.js', '/js/video/decoder-core.js', '/js/video/video-worker.js',
   '/js/audio/player.js', '/js/audio/worklet.js',

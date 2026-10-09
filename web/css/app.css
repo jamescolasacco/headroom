@@ -89,6 +89,32 @@ label.field { display: block; margin: 12px 0 4px; font-size: 14px; color: var(--
 .dot.online { background: var(--ok); } .dot.offline { background: var(--bad); } .dot.unauth { background: var(--warn); }
 .empty { text-align: center; padding: 28px 12px; border: 1px dashed var(--line); border-radius: var(--radius); margin-bottom: 16px; }
 .empty-title { font-weight: 600; margin: 0 0 6px; }
+#home > button.wide + button.wide { margin-top: 10px; }
+.home-head .spacer { flex: 1; }
+.account-chip {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 60%; margin-left: auto; margin-right: 8px;
+  min-height: 36px; padding: 6px 12px; border-radius: 999px; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.account-chip svg { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; }
+.account-chip .muted { overflow: hidden; text-overflow: ellipsis; }
+.tag {
+  display: inline-block; margin-left: 8px; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 500;
+  vertical-align: 2px; background: var(--bg-elev2); color: var(--muted); border: 1px solid var(--line);
+}
+.warn-text { color: var(--warn); }
+
+/* account dialog */
+.dlg .sub-h { font-size: 14px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 20px 0 8px; font-weight: 600; }
+.list-mini { display: grid; gap: 6px; max-height: 40vh; overflow: auto; }
+.li-mini { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
+.li-mini .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.li-mini svg { width: 16px; height: 16px; vertical-align: -3px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+button.small-btn { min-height: 32px; padding: 4px 10px; font-size: 13px; }
+.row-inline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 8px; }
+.row-inline input { flex: 1 1 140px; width: auto; }
+.qr-mini { width: 168px; margin: 4px auto 8px; background: #fff; border-radius: 8px; padding: 4px; }
+.qr-mini svg { display: block; width: 100%; height: auto; }
+button.link { background: none; border: 0; padding: 4px 0; min-height: 0; color: var(--accent); }
 
 /* ------------------------------------------------------------------ dialogs */
 .dlg {

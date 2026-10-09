@@ -14,6 +14,7 @@ const ICON = {
   status: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
   pair: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 20h4v-3"/>',
   devices: '<rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/>',
+  account: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
   security: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/>',
   features: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
   quality: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
@@ -26,7 +27,7 @@ const ICON = {
 };
 
 const SECTIONS = [
-  ['status', 'Status'], ['pair', 'Pair a device'], ['devices', 'Devices'], ['security', 'Security'],
+  ['status', 'Status'], ['account', 'Account'], ['pair', 'Pair a device'], ['devices', 'Devices'], ['security', 'Security'],
   ['features', 'Features'], ['quality', 'Quality'], ['connection', 'Connection'], ['about', 'About'],
 ];
 
@@ -34,6 +35,7 @@ let st = null;            // last /status
 let current = 'status';
 let pairState = null;     // { code, expires, urls }
 let totpSetup = null;     // { secret, uri }
+let accountNote = null;   // { ok, text } — result of the last account action, shown until the next one
 let pollTimer = 0;
 
 // ------------------------------------------------------------------ api
@@ -85,7 +87,7 @@ function renderOffline(message) {
 
 function render() {
   const c = document.getElementById('content');
-  const views = { status: viewStatus, pair: viewPair, devices: viewDevices, security: viewSecurity, features: viewFeatures, quality: viewQuality, connection: viewConnection, about: viewAbout };
+  const views = { status: viewStatus, account: viewAccount, pair: viewPair, devices: viewDevices, security: viewSecurity, features: viewFeatures, quality: viewQuality, connection: viewConnection, about: viewAbout };
   c.replaceChildren(views[current]());
 }
 
@@ -239,6 +241,98 @@ function viewPair() {
       h('p', { class: 'small muted' }, st.hasPassword ? 'Any device can also pair with the password (Security section).' : 'No password is set yet — set one in Security if you want to pair without a code.')));
 }
 
+/** Re-reads the status and redraws now (refresh() leaves the page alone while a field has focus). */
+async function redraw() {
+  try { st = await api('/status'); } catch (e) { renderOffline(e.message); return; }
+  renderNav();
+  render();
+}
+
+const ACCOUNT_ERRORS = {
+  'bad-credentials': 'Wrong username or password.',
+  'bad-totp': 'That code didn\'t work. Wait for the next one and try again.',
+  'rate-limited': 'Too many attempts. Try again in a minute.',
+  'bad-server': 'Enter the account server\'s address.',
+};
+
+function viewAccount() {
+  const a = st.account;
+  if (a) {
+    const m = h('div', { class: accountNote ? `msg ${accountNote.ok ? 'ok' : 'err'}` : 'msg' }, accountNote?.text || '');
+    const devs = a.devices.length ? a.devices.map(d => {
+      const online = st.sessions.some(x => x.deviceId === d.id);
+      return h('div', { class: 'li' }, h('div', { class: 'main' },
+        h('div', { class: 't' }, d.name, online ? h('span', { class: 'badge ok', style: { marginLeft: '8px' } }, 'connected') : null),
+        h('div', { class: 's' }, d.viewOnly ? 'View only' : 'Full control')));
+    }) : [h('div', { class: 'empty' }, 'No devices signed in to the account yet.')];
+    return h('section', {}, h('h2', {}, 'Account'),
+      h('p', { class: 'lead' }, `Every device signed in to this Headroom account can connect to ${thisPc()} — no pairing. Manage them from the Headroom app (tap your account name).`),
+      h('div', { class: 'card' }, h('div', { class: 'kv' },
+        h('div', { class: 'k' }, 'Account'), h('div', {}, a.username),
+        h('div', { class: 'k' }, 'Server'), h('div', { class: 'mono' }, a.server),
+        h('div', { class: 'k' }, 'Last check-in'), h('div', {}, a.error
+          ? h('span', {}, h('span', { class: 'badge warn' }, 'Problem'), ` ${a.error}`)
+          : ago(a.lastSync))),
+        h('div', { class: 'row', style: { marginTop: '12px' } },
+          h('button', { type: 'button', onclick: async () => {
+            m.className = 'msg'; m.textContent = 'Checking in…';
+            const r = await post('/account/sync').catch(() => ({}));
+            accountNote = r.ok ? { ok: true, text: 'Up to date.' } : { ok: false, text: 'Couldn\'t reach the account server.' };
+            redraw();
+          } }, 'Check in now'),
+          h('button', { class: 'danger', type: 'button', onclick: async () => {
+            if (!confirm(`Leave ${a.username}'s account? Its devices can no longer connect to ${thisPc()} (devices paired directly keep working).`)) return;
+            await post('/account/leave').catch(() => { });
+            accountNote = null;
+            redraw();
+          } }, 'Leave account')), m),
+      h('div', { class: 'card' }, h('h3', {}, 'Devices in the account'), h('div', { class: 'list' }, ...devs)));
+  }
+  const err = h('div', { class: 'msg' });
+  const server = h('input', { type: 'text', inputmode: 'url', class: 'grow', placeholder: 'accounts.example.com', autocapitalize: 'off', spellcheck: 'false' });
+  try { server.value = localStorage.getItem('headroom.admin.accountServer') || ''; } catch { }
+  const user = h('input', { type: 'text', class: 'grow', placeholder: 'Username', autocomplete: 'username', autocapitalize: 'off', spellcheck: 'false' });
+  const pass = h('input', { type: 'password', class: 'grow', placeholder: 'Password', autocomplete: 'current-password' });
+  const totp = h('input', { type: 'text', inputmode: 'numeric', maxlength: '6', placeholder: '123456', autocomplete: 'one-time-code' });
+  const totpRow = h('div', { class: 'row', hidden: true }, h('span', { class: 'small' }, 'Authenticator code'), totp);
+  const submit = h('button', { class: 'primary', type: 'submit' }, 'Join account');
+  const form = h('form', {},
+    h('div', { class: 'row' }, server), h('div', { class: 'row' }, user, pass), totpRow,
+    h('div', { class: 'row' }, submit), err);
+  form.onsubmit = async e => {
+    e.preventDefault();
+    err.className = 'msg'; err.textContent = 'Signing in…';
+    submit.disabled = true;
+    try {
+      const r = await fetch('/api/admin/account/join', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
+        body: JSON.stringify({ server: server.value, username: user.value.trim(), password: pass.value, totp: totp.value.trim() || undefined }),
+      });
+      const b = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        err.className = 'msg err';
+        if (b.error === 'totp-required') { totpRow.hidden = false; totp.focus(); err.textContent = 'This account uses two-factor sign-in: enter the code from your authenticator app.'; }
+        else err.textContent = ACCOUNT_ERRORS[b.error] || b.message || b.error || `HTTP ${r.status}`;
+        return;
+      }
+      try { localStorage.setItem('headroom.admin.accountServer', server.value); } catch { }
+      accountNote = { ok: true, text: `Joined ${b.username}'s account. Devices signed in to it can now connect.` };
+      redraw();
+    } catch (ex) { err.className = 'msg err'; err.textContent = ex.message; } finally { submit.disabled = false; }
+  };
+  return h('section', {}, h('h2', {}, 'Account'),
+    h('p', { class: 'lead' }, `Join ${thisPc()} to your Headroom account, and every phone, tablet and computer signed in to that account can connect — they all see it in one list, without pairing each one.`),
+    h('div', { class: 'card' }, h('h3', {}, 'Join an account'),
+      h('p', { class: 'small muted' }, `Your password goes only to the account server; ${thisPc()} gets its own sign-in there, which you can remove from any device. Don't have an account server? Run one with account-server/ (one small Node.js process or a Docker container), or keep pairing devices directly.`),
+      form),
+    h('div', { class: 'card' }, h('h3', {}, 'How it works'),
+      h('ul', { class: 'steps small' },
+        h('li', {}, `${thisPc()[0].toUpperCase() + thisPc().slice(1)} checks in with the account server every 20 seconds with its addresses and its certificate's fingerprint.`),
+        h('li', {}, 'Signed-in devices get the list, plus a key for each computer that only that device can use.'),
+        h('li', {}, 'Video, input and files still go directly between your devices — never through the account server.'),
+        h('li', {}, 'Removing a device from the account cuts it off from every computer within seconds.'))));
+}
+
 function viewDevices() {
   const rows = st.devices.length ? st.devices.map(d => {
     const online = st.sessions.some(s => s.deviceId === d.id);
@@ -253,9 +347,15 @@ function viewDevices() {
         refresh();
       } }, 'Revoke'));
   }) : [h('div', { class: 'empty' }, 'No devices yet. Pair one from “Pair a device”.')];
+  const acct = st.account;
   return h('section', {}, h('h2', {}, 'Devices'),
     h('p', { class: 'lead' }, `Everything that can connect to ${thisPc()}. View-only devices can watch but not control.`),
-    h('div', { class: 'card' }, h('div', { class: 'list' }, ...rows)));
+    h('div', { class: 'card' }, acct ? h('h3', {}, 'Paired directly') : null, h('div', { class: 'list' }, ...rows)),
+    acct ? h('div', { class: 'card' }, h('h3', {}, `Through ${acct.username}'s account`),
+      h('p', { class: 'small muted' }, 'Managed from the Headroom app (tap the account name) — removing one there disconnects it here within seconds.'),
+      h('div', { class: 'list' }, ...(acct.devices.length ? acct.devices.map(d => h('div', { class: 'li' }, h('div', { class: 'main' },
+        h('div', { class: 't' }, d.name, st.sessions.some(x => x.deviceId === d.id) ? h('span', { class: 'badge ok', style: { marginLeft: '8px' } }, 'connected') : null),
+        h('div', { class: 's' }, d.viewOnly ? 'View only' : 'Full control')))) : [h('div', { class: 'empty' }, 'None yet.')]))) : null);
 }
 
 function viewSecurity() {
@@ -380,4 +480,4 @@ if (SECTIONS.some(([id]) => id === fromHash)) current = fromHash;
 window.addEventListener('hashchange', () => go(location.hash.slice(1)));
 native?.on(m => { if (m?.cmd === 'navigate') go(m.section); });
 refresh();
-pollTimer = setInterval(() => { if (current === 'status' || current === 'devices') refresh(); else api('/status').then(s => { st = s; renderNav(); postNative({ cmd: 'status', viewers: st.sessions.length, names: st.sessions.map(x => x.device) }); }).catch(() => renderOffline('not reachable')); }, 2000);
+pollTimer = setInterval(() => { if (current === 'status' || current === 'devices' || (current === 'account' && st?.account)) refresh(); else api('/status').then(s => { st = s; renderNav(); postNative({ cmd: 'status', viewers: st.sessions.length, names: st.sessions.map(x => x.device) }); }).catch(() => renderOffline('not reachable')); }, 2000);
