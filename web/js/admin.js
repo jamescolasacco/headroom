@@ -230,7 +230,7 @@ function viewPair() {
         h('li', {}, 'Scan this code (opens ', h('span', { class: 'mono' }, trustUrl), ' in Safari).'),
         h('li', {}, 'Download the profile, then install it in Settings → General → VPN & Device Management.'),
         h('li', {}, 'Turn it on in Settings → General → About → Certificate Trust Settings.'),
-        h('li', {}, 'Scan the pairing code above, then Share → Add to Home Screen.')))) : h('p', { class: 'muted small' }, 'No local network address found.'));
+        h('li', {}, 'Open the Headroom address in Safari, tap Share → Add to Home Screen, then open Headroom from the Home Screen and enter the pairing code above. (The Home Screen app keeps its own pairing; scanning the QR code pairs Safari instead.)')))) : h('p', { class: 'muted small' }, 'No local network address found.'));
 
   return h('section', {}, h('h2', {}, 'Pair a device'),
     h('p', { class: 'lead' }, 'Each phone, tablet or computer pairs once; after that it connects with its own key, which you can revoke any time.'),
