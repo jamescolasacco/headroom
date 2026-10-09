@@ -320,7 +320,7 @@ public sealed class ClientSession : IVideoSink
             case "audio":
                 SetAudio(Bool(root, "enabled"));
                 break;
-            case "file-token" when cfg.Permissions.FileTransfer:
+            case "file-token" when cfg.Permissions.FileTransfer && !_viewOnly:
             {
                 var path = Str(root, "path");
                 if (path != null && _device != null)

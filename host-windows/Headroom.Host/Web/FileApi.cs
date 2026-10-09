@@ -46,8 +46,11 @@ public static class FileApi
         app.MapGet("/api/files/download", (HttpContext ctx, string? t) =>
         {
             if (!ConfigStore.Current.Permissions.FileTransfer) return Results.StatusCode(403);
-            var path = AuthService.RedeemEphemeral(t, "download", out _);
+            var path = AuthService.RedeemEphemeral(t, "download", out var deviceId);
             if (path == null) return Results.Json(new { error = "link expired" }, statusCode: 401);
+            // The device may have been made view-only since the link was minted.
+            if (ConfigStore.Current.Devices.FirstOrDefault(d => d.Id == deviceId) is not { ViewOnly: false })
+                return Results.Json(new { error = "view-only device" }, statusCode: 403);
             if (!File.Exists(path)) return Results.NotFound();
             Log.Info("files", $"download {path} -> {ctx.Connection.RemoteIpAddress}");
             var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16, FileOptions.Asynchronous | FileOptions.SequentialScan);
