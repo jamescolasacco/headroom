@@ -1,7 +1,8 @@
 # Headroom
 
 Self-hosted remote desktop for your own computers, in the spirit of RealVNC, Jump Desktop and Parsec.
-It has no accounts, no cloud and no subscriptions.
+No cloud and no subscriptions: pair each device with each computer, or run your own small account server and
+sign in once to see all your computers in one list.
 
 Like VNC Server + VNC Viewer, every device gets the half it needs:
 
@@ -11,7 +12,8 @@ Like VNC Server + VNC Viewer, every device gets the half it needs:
 | **Mac** | **Headroom Server**: menu-bar app + settings window | **Headroom Viewer**: desktop app; captures ⌘Tab, ⌘Space, Mission Control, screenshots |
 | **iPhone / iPad** | — | the web app, installed via Share → Add to Home Screen (no App Store or developer account) |
 
-The same web client also runs in any modern browser, served by each Headroom Server.
+The same web client also runs in any modern browser, served by each Headroom Server (and by the optional
+account server).
 
 ## What you get
 
@@ -29,7 +31,8 @@ The same web client also runs in any modern browser, served by each Headroom Ser
 | **Audio** | System audio as Opus (Windows: WASAPI loopback; Mac: ScreenCaptureKit + AudioToolbox's encoder), with roughly 40 ms of buffering. |
 | **Displays** | Pick or cycle monitors (Ctrl+Alt+Shift+1…9 / ←→). Fit, 1:1 or Fill scaling, a resolution cap (native/1440p/1080p/720p/"this screen"), and frame-rate and bandwidth limits. |
 | **Service mode** (Windows) | Runs as a Windows service, so it works **at the sign-in screen, lock screen and UAC prompts**, starts before anyone logs in, and supports **real Ctrl+Alt+Del**. On a Mac, Headroom Server runs in your session (start it at login); the login window after a restart isn't reachable yet. |
-| **Security** | TLS everywhere. Devices pair once (password, optional TOTP, or a one-time code); after that only a revocable 256-bit device token is used. Brute-force protection, view-only devices, loopback-only admin page, optional lock-on-disconnect. |
+| **Accounts** (optional) | Your own account server (one Node.js process or Docker container): sign in once with username, password and optional two-factor, and every computer in the account is listed and connects without pairing. Remove a device once and it loses access everywhere within seconds. Traffic still goes directly to each computer. |
+| **Security** | TLS everywhere. Devices pair once (password, optional TOTP, or a one-time code) or sign in to an account; after that only a revocable 256-bit token is used, made for that one computer. Brute-force protection, view-only devices, loopback-only admin page, optional lock-on-disconnect. |
 | **Resilience** | Auto-reconnect with backoff, recovery when the app returns from the background (iOS), keep-awake during sessions, and a decoder watchdog that falls back to software decoding. |
 
 ## Build
@@ -157,6 +160,25 @@ Sound needs iOS 26 or later (Safari's WebCodecs audio); on older versions everyt
 Tip: in the iPhone's Settings → Apps → Safari (or the home-screen app), allow "Paste from Other Apps" to
 avoid paste prompts.
 
+## Accounts (optional)
+
+Pairing works computer by computer. With an account, each device signs in once and sees every computer:
+
+1. Run the account server somewhere your devices can reach (a home server, a VPS, a Tailscale machine). It needs
+   Node.js 20+ and nothing else:
+   ```bash
+   node account-server/server.mjs                # or: docker build -f account-server/Dockerfile -t headroom-accounts .
+   ```
+   The first account created is the owner's; after that, sign-up closes (`SIGNUP=open` to allow more, or
+   `node account-server/server.mjs add-user <name>`). Give it HTTPS with a real certificate (`TLS_CERT`/`TLS_KEY`,
+   `tailscale cert`, or a reverse proxy such as Caddy): the app can't reach a plain-HTTP server from an HTTPS page.
+2. On each computer: Headroom Server → Settings → **Account** → sign in.
+3. On each device: open Headroom (any Headroom Server's address, the account server's own address, or Headroom
+   Viewer) → **Sign in to your account**.
+
+Tap your account name to remove devices, make one view-only, turn on two-factor sign-in or change the password.
+Pairing keeps working alongside. Details and the trust model: [docs/ACCOUNTS.md](docs/ACCOUNTS.md).
+
 ## Keyboard shortcuts in a session
 
 | Keys | Action |
@@ -220,7 +242,9 @@ viewer-macos/                 Headroom Viewer.app: WKWebView shell, pinned-key t
 web/                          the client (vanilla ES modules, no build step), also the PWA
   js/video/  worker decoder: VideoTrackGenerator→<video> on Safari, OffscreenCanvas elsewhere
   js/input/  keyboard (profiles, quirks), mouse, touch gestures, soft keyboard
+account-server/               optional account server (Node.js, no dependencies): accounts, devices, per-computer keys
 docs/PROTOCOL.md              wire protocol (the contract for other hosts)
+docs/ACCOUNTS.md              accounts: setup, trust model, API
 tools/                        publish / install / uninstall scripts (Windows .ps1, macOS .sh), icon generator,
                               protocol-check.mjs (headless end-to-end test of any host)
 ```
