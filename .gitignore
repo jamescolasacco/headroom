@@ -11,3 +11,4 @@ dist/
 .swiftpm/
 .devdata-mac/
 *.xcodeproj/
+.DS_Store
