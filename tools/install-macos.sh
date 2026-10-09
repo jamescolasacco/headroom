@@ -24,9 +24,11 @@ DEST=/Applications
 install_app() { # name
   local src="$ROOT/dist/$1.app" dst="$DEST/$1.app"
   [ -d "$src" ] || { echo "$src not found: run tools/build-macos.sh first" >&2; exit 1; }
-  osascript -e "tell application \"$1\" to quit" >/dev/null 2>&1 || true
-  pkill -x "$(defaults read "$src/Contents/Info" CFBundleExecutable)" 2>/dev/null || true
-  sleep 1
+  # Stop a running copy (SIGTERM: the app quits and its engine follows). No AppleScript: "tell … to quit"
+  # can launch an app that isn't running, and asks for the Automation permission.
+  local exe
+  exe="$(defaults read "$src/Contents/Info" CFBundleExecutable)"
+  if pgrep -x "$exe" >/dev/null; then pkill -x "$exe"; sleep 1; fi
   rm -rf "$dst"
   ditto "$src" "$dst"
   xattr -dr com.apple.quarantine "$dst" 2>/dev/null || true
