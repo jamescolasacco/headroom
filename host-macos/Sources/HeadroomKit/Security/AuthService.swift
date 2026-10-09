@@ -154,9 +154,20 @@ public enum AuthService {
     public static func validateToken(_ token: String?, ip: String?, touch: Bool = true) -> PairedDevice? {
         guard let token, !token.isEmpty, token.count <= 128 else { return nil }
         if retryAfter(ip) != nil { return nil }
-        let hash = Array(hashToken(token).utf8)
+        let hashText = hashToken(token)
+        let hash = Array(hashText.utf8)
         var match: PairedDevice?
         for d in ConfigStore.current.devices where Bytes.constantTimeEquals(Array(d.tokenHash.utf8), hash) { match = d }
+        if match == nil {
+            // A device of this computer's account? (If not yet known, it may have signed in moments ago: check in.)
+            var acct = AccountService.shared.device(forHash: hashText)
+            if acct == nil, AccountService.shared.refreshForUnknownToken() { acct = AccountService.shared.device(forHash: hashText) }
+            if let a = acct {
+                var d = PairedDevice(id: AccountService.localId(a.id), name: a.name, tokenHash: a.tokenHash, created: Date(), lastAddress: ip)
+                d.viewOnly = a.viewOnly
+                return d // account devices are managed (and their last-seen kept) by the account server
+            }
+        }
         guard let found = match else {
             recordFailure(ip)
             return nil
@@ -204,8 +215,15 @@ public enum AuthService {
         let e = ephemeralTokens.removeValue(forKey: token)
         lock.unlock()
         guard let e, e.expires > Date(), e.purpose == purpose else { return nil }
-        guard ConfigStore.current.devices.contains(where: { $0.id == e.deviceId }) else { return nil }
+        guard deviceStatus(e.deviceId) != nil else { return nil }
         return (e.value, e.deviceId)
+    }
+
+    /// Whether a device (paired here, or an account device) still exists, and if it's view-only.
+    public static func deviceStatus(_ id: String) -> (viewOnly: Bool, account: Bool)? {
+        if let d = ConfigStore.current.devices.first(where: { $0.id == id }) { return (d.viewOnly, false) }
+        if id.hasPrefix("account:"), let a = AccountService.shared.device(id: String(id.dropFirst(8))) { return (a.viewOnly, true) }
+        return nil
     }
 
     public static func hashToken(_ token: String) -> String {

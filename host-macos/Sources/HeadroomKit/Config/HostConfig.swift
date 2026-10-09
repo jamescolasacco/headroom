@@ -28,6 +28,8 @@ public struct HostConfig: Codable {
     public var lockOnDisconnect = false
     /// Show a notification when someone connects (menu-bar app).
     public var notifyOnConnect = true
+    /// Membership in a Headroom account (account-server/), if joined.
+    public var account: AccountLink?
 
     public init() {}
 
@@ -47,7 +49,19 @@ public struct HostConfig: Codable {
         tls = try c.decodeIfPresent(TlsSettings.self, forKey: .tls) ?? TlsSettings()
         lockOnDisconnect = try c.decodeIfPresent(Bool.self, forKey: .lockOnDisconnect) ?? false
         notifyOnConnect = try c.decodeIfPresent(Bool.self, forKey: .notifyOnConnect) ?? true
+        account = try c.decodeIfPresent(AccountLink.self, forKey: .account)
     }
+}
+
+/// This computer's link to an account: its own credential there (not the account password) and the last device
+/// list it received, so it keeps working through a short account-server outage.
+public struct AccountLink: Codable {
+    public var server: String
+    public var username: String
+    public var accountId: String
+    public var deviceId: String
+    public var token: String
+    public var devices: [AccountService.Device]
 }
 
 public struct PasswordRecord: Codable {

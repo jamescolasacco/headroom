@@ -48,6 +48,7 @@ public enum Engine {
         }
         server = srv
         webHost = host
+        AccountService.shared.start(certs: certs, web: host)
 
         for sig in [SIGINT, SIGTERM] {
             signal(sig, SIG_IGN)

@@ -51,7 +51,7 @@ enum FileApi {
             return .json(["error": "link expired"], status: .unauthorized)
         }
         // The device may have been made view-only (or input turned off) since the link was minted.
-        guard let dev = ConfigStore.current.devices.first(where: { $0.id == deviceId }), !dev.viewOnly else {
+        guard let status = AuthService.deviceStatus(deviceId), !status.viewOnly else {
             return .json(["error": "view-only device"], status: .forbidden)
         }
         var isDir: ObjCBool = false
