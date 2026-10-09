@@ -147,7 +147,32 @@ public sealed class ViewerWindow : Form
                 var text = root.GetProperty("text").GetString();
                 if (text != null) try { Clipboard.SetText(text); } catch { }
                 break;
+            case "accountPins":
+                if (root.TryGetProperty("pins", out var pins) && pins.ValueKind == JsonValueKind.Array) await AddAccountPinsAsync(pins);
+                break;
         }
+    }
+
+    /// <summary>
+    /// The account server is the user's own (signed in over HTTPS): the keys of its computers need no prompt.
+    /// A key the running browser doesn't know yet needs a fresh browser process — never while a session is open
+    /// (the page sends the list again later, from the home screen).
+    /// </summary>
+    private async Task AddAccountPinsAsync(JsonElement pins)
+    {
+        static string? S(JsonElement e, string n) => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+        var list = new List<TrustStore.Pin>();
+        foreach (var p in pins.EnumerateArray())
+        {
+            var host = S(p, "host");
+            var spki = S(p, "spki");
+            if (string.IsNullOrEmpty(host) || spki == null) continue;
+            try { if (Convert.FromBase64String(spki).Length != 32) continue; } catch (FormatException) { continue; }
+            list.Add(new TrustStore.Pin(host, spki, S(p, "fingerprint") ?? "", S(p, "subject") ?? host, DateTimeOffset.UtcNow));
+        }
+        TrustStore.AddVouched(list);
+        if (TrustStore.SpkiList != ViewerEnvironment.ActiveSpkiList && !Program.AnySessionActive)
+            await Program.RestartBrowserAsync(this, Core?.Source ?? ViewerEnvironment.StartUrl);
     }
 
     private async Task TrustHostAsync(string url)

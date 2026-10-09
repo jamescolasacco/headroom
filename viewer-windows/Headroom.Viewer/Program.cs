@@ -47,6 +47,8 @@ public static class Program
         return w;
     }
 
+    public static bool AnySessionActive => Windows.Any(w => w.SessionActive);
+
     /// <summary>Restart WebView2 so newly pinned certificates apply; the requesting window reloads at <paramref name="url"/>.</summary>
     public static async Task RestartBrowserAsync(ViewerWindow requester, string url)
     {
