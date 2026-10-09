@@ -86,7 +86,12 @@ public static class WebHost
                 if (p == "/") { ctx.Request.Path = "/trust"; }
             }
 
-            if (ctx.Request.Path.StartsWithSegments("/api"))
+            if (ctx.Request.Path.StartsWithSegments("/api/admin"))
+            {
+                // Never CORS here (and no successful preflight): see AdminAllowed.
+                h["Cache-Control"] = "no-store";
+            }
+            else if (ctx.Request.Path.StartsWithSegments("/api"))
             {
                 h["Cache-Control"] = "no-store";
                 h["Access-Control-Allow-Origin"] = "*";
@@ -174,7 +179,7 @@ public static class WebHost
 
         // ------------------------------------------------------------------ admin (loopback only)
         var admin = app.MapGroup("/api/admin").AddEndpointFilter(async (efc, next) =>
-            IsLoopback(efc.HttpContext) ? await next(efc) : Results.Json(new { error = "admin API is only available on the host itself" }, statusCode: 403));
+            AdminAllowed(efc.HttpContext) ? await next(efc) : Results.Json(new { error = "admin API is only available on the host itself" }, statusCode: 403));
 
         admin.MapGet("/status", () =>
         {
@@ -315,6 +320,24 @@ public static class WebHost
     // ---------------------------------------------------------------------- helpers
 
     public static bool IsLoopback(HttpContext ctx) => ctx.Connection.RemoteIpAddress is { } ip && IPAddress.IsLoopback(ip);
+
+    /// <summary>
+    /// The admin API is for this PC's own settings window, CLI and browser — not for web pages. A loopback peer
+    /// isn't enough: any page open in a local browser can send requests to 127.0.0.1. So also require a loopback
+    /// Host header (defeats DNS rebinding) and no foreign Origin / cross-site Sec-Fetch-Site (defeats cross-site
+    /// requests, including "simple" text/plain POSTs that need no CORS preflight). /api/admin never sends CORS headers.
+    /// </summary>
+    public static bool AdminAllowed(HttpContext ctx)
+    {
+        if (!IsLoopback(ctx)) return false;
+        static bool IsLoopbackName(string h) => h.Trim('[', ']').ToLowerInvariant() is "localhost" or "127.0.0.1" or "::1";
+        if (!IsLoopbackName(ctx.Request.Host.Host)) return false;
+        var origin = ctx.Request.Headers.Origin.ToString();
+        if (origin.Length > 0 && !(Uri.TryCreate(origin, UriKind.Absolute, out var o) && IsLoopbackName(o.Host))) return false;
+        var site = ctx.Request.Headers["Sec-Fetch-Site"].ToString();
+        if (site.Length > 0 && site is not ("same-origin" or "none")) return false;
+        return true;
+    }
 
     public static PairedDevice? Authenticate(HttpContext ctx)
     {
