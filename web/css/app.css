@@ -100,6 +100,8 @@ label.field { display: block; margin: 12px 0 4px; font-size: 14px; color: var(--
 .dlg h2 { margin: 0 0 6px; font-size: 19px; }
 .dlg .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; flex-wrap: wrap; }
 .dlg .error { color: var(--bad); font-size: 14px; min-height: 20px; margin-top: 8px; }
+.callout { border-left: 3px solid var(--accent); background: var(--bg-elev2); border-radius: 8px; padding: 8px 12px; margin: 10px 0 14px; }
+.mono { font-family: var(--mono); letter-spacing: .02em; }
 .seg { display: flex; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 3px; gap: 3px; }
 .seg button { flex: 1; border: 0; background: transparent; min-height: 34px; padding: 6px 8px; font-size: 14px; }
 .seg button[aria-pressed="true"] { background: var(--bg-elev2); color: var(--fg); box-shadow: 0 1px 2px rgba(0,0,0,.3); }

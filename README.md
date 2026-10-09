@@ -143,9 +143,16 @@ Browsers only decode video in hardware over HTTPS, so each device must trust the
   3. Turn on Settings → General → About → Certificate Trust Settings → Headroom Local CA.
   4. Then open `https://<computer-ip>:7443/`.
 
-Then **pair**: in Headroom Server → Pair a device, scan the QR code with the phone's camera, or type the
-one-time code (the password works too). Finally, in Safari tap **Share → Add to Home Screen** to get a
-full-screen app.
+Then install the app and pair:
+1. In Safari, open the computer's `https://` address and tap **Share → Add to Home Screen**.
+2. Open **Headroom** from your Home Screen. It finds the computer and asks to pair: enter the one-time code
+   from Headroom Server → Pair a device (the password works too).
+
+Pair *inside* the Home Screen app: iOS gives it its own storage, separate from Safari's, so a pairing made in
+Safari doesn't carry over. Scanning the pairing QR code with the camera pairs Safari instead; that's handy if
+you'd rather not install the app, and Safari shows the code to type into the app if you change your mind.
+
+Sound needs iOS 26 or later (Safari's WebCodecs audio); on older versions everything else works, silently.
 
 Tip: in the iPhone's Settings → Apps → Safari (or the home-screen app), allow "Paste from Other Apps" to
 avoid paste prompts.

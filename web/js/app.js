@@ -66,7 +66,7 @@ function renderHome() {
   const hint = [];
   if (!secure) hint.push('Not a secure connection: video needs HTTPS.');
   else if (!hasWebCodecs) hint.push('This browser lacks WebCodecs (needs Safari 16.4+, Chrome/Edge 94+, Firefox 130+).');
-  if (isIOS && !isStandalone) hint.push('Tip: Share → Add to Home Screen for a full-screen app.');
+  if (isIOS && !isStandalone) hint.push('Tip: Share → Add to Home Screen for a full-screen app (it keeps its own list of computers, so pair inside it).');
   if (nativeViewer) hint.push(isMac
     ? 'Tip: ⌘Tab, ⌘Space and other system shortcuts go to the remote computer while its window is focused.'
     : 'Tip: Win, Alt+Tab and PrtScn go to the remote computer while its window is focused. Ctrl+Alt+End sends Ctrl+Alt+Del.');
@@ -197,21 +197,33 @@ async function addHostFlow({ url, info, code, repair } = {}) {
             for (const x of seg.children) x.setAttribute('aria-pressed', String(x === b));
             secretLabel.textContent = v === 'password' ? 'Password' : 'Pairing code';
             secret.type = v === 'password' ? 'password' : 'text';
+            secret.autocomplete = v === 'password' ? 'current-password' : 'one-time-code'; // iOS: no password autofill in the code field
             secret.value = ''; secret.focus();
           };
           return b;
         }));
+      // iOS Safari: a Home Screen app has its own storage, separate from Safari's (WebKit, by design), so a
+      // pairing made here wouldn't carry over to it. Offer to install first and keep the code at hand.
+      const installHint = c => isIOS && !isStandalone && !repair && target === location.origin
+        ? h('div', { class: 'callout small' },
+          h('b', {}, 'Want the full-screen app?'),
+          ' Add it first (Share → Add to Home Screen), open Headroom from your Home Screen and pair there: it keeps its own list of computers.',
+          c ? h('div', { style: { marginTop: '6px' } }, 'Your code: ', h('b', { class: 'mono' }, `${c.slice(0, 5)}-${c.slice(5)}`), ' (single use, valid 10 minutes)') : null)
+        : null;
       const form = h('form', {},
         h('h2', {}, repair ? `Pair again with ${hi.name}` : `Pair with ${hi.name}`),
         h('p', { class: 'muted small' }, hostInfo.paired
-          ? 'Use the password set on the computer, or a one-time code from "headroom pair".'
-          : 'This computer has no password yet: use the pairing code shown in its Headroom window.'),
+          ? 'Use the password set on the computer, or a one-time code from Headroom Server → Pair a device.'
+          : 'This computer has no password yet: use a one-time code from Headroom Server → Pair a device.'),
+        installHint(code),
         seg, secretLabel, secret, totpWrap,
         h('label', { class: 'field' }, 'This device\'s name'), devName, err,
         h('div', { class: 'actions' },
           h('button', { type: 'button', onclick: () => done() }, 'Cancel'),
           h('button', { type: 'submit', class: 'primary' }, 'Pair')));
-      if (!hostInfo.paired) { method = 'code'; seg.children[1].click(); }
+      // No password on the host: only codes work. (Already in code mode with a code from the QR link? Keep it:
+      // switching clears the field.)
+      if (!hostInfo.paired && method !== 'code') seg.children[1].click();
       form.addEventListener('submit', async e => {
         e.preventDefault();
         err.textContent = '';
