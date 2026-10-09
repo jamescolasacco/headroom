@@ -49,7 +49,7 @@ public static class FileApi
             var path = AuthService.RedeemEphemeral(t, "download", out var deviceId);
             if (path == null) return Results.Json(new { error = "link expired" }, statusCode: 401);
             // The device may have been made view-only since the link was minted.
-            if (ConfigStore.Current.Devices.FirstOrDefault(d => d.Id == deviceId) is not { ViewOnly: false })
+            if (AuthService.DeviceStatus(deviceId) is not { } status || status.viewOnly)
                 return Results.Json(new { error = "view-only device" }, statusCode: 403);
             if (!File.Exists(path)) return Results.NotFound();
             Log.Info("files", $"download {path} -> {ctx.Connection.RemoteIpAddress}");

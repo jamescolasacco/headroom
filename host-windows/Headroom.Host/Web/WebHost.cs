@@ -204,7 +204,8 @@ public static class WebHost
                 logDir = Paths.LogDir,
                 caThumbprint = certs.CaCertificate.Thumbprint,
                 serverKeyFingerprint = certs.ServerKeyFingerprint,
-                settings = new { c.Video, c.Audio, c.Permissions, c.LockOnDisconnect, c.DisplayName },
+                account = AccountService.Shared.Status,
+                settings = new { c.Video, c.Audio, c.Permissions, c.LockOnDisconnect, c.NotifyOnConnect, c.DisplayName },
             }, ConfigStore.JsonOptions);
         });
         admin.MapPost("/password", async (HttpContext ctx) =>
@@ -272,12 +273,29 @@ public static class WebHost
             ConfigStore.Update(c => { var d = c.Devices.FirstOrDefault(x => x.Id == id); if (d != null) d.ViewOnly = viewOnly; });
             return Results.Json(new { ok = true });
         });
+        // Headroom account: the password goes to the account server only; this PC keeps its own credential there.
+        admin.MapPost("/account/join", async (HttpContext ctx) =>
+        {
+            var body = await ReadJson(ctx);
+            var (ok, username, error, message) = await Task.Run(() =>
+                AccountService.Shared.Join(Str(body, "server"), Str(body, "username"), Str(body, "password"), Str(body, "totp")));
+            if (ok) return Results.Json(new { ok = true, username });
+            int status = error is "bad-credentials" or "totp-required" or "bad-totp" ? 401 : 400;
+            return Results.Json(new { error, message = message ?? error }, statusCode: status);
+        });
+        admin.MapPost("/account/leave", async () =>
+        {
+            await Task.Run(() => AccountService.Shared.Leave());
+            return Results.Json(new { ok = true });
+        });
+        admin.MapPost("/account/sync", async () => Results.Json(new { ok = await Task.Run(() => AccountService.Shared.Sync()) }));
         admin.MapPost("/settings", async (HttpContext ctx) =>
         {
             var body = await ReadJson(ctx);
             ConfigStore.Update(c =>
             {
                 if (body.TryGetProperty("lockOnDisconnect", out var l)) c.LockOnDisconnect = l.GetBoolean();
+                if (body.TryGetProperty("notifyOnConnect", out var nc)) c.NotifyOnConnect = nc.GetBoolean();
                 if (body.TryGetProperty("maxFps", out var f)) c.Video.MaxFps = Math.Clamp(f.GetInt32(), 10, 240);
                 if (body.TryGetProperty("maxBitrateKbps", out var b)) c.Video.MaxBitrateKbps = Math.Clamp(b.GetInt32(), 1000, 200000);
                 if (body.TryGetProperty("encoder", out var e) && e.GetString() is "auto" or "hardware" or "software") c.Video.Encoder = e.GetString()!;

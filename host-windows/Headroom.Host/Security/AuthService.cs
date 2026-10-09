@@ -184,6 +184,18 @@ public static class AuthService
         }
         if (match == null)
         {
+            // A device of this computer's account? (If not yet known, it may have signed in moments ago: check in.)
+            var acct = Services.AccountService.Shared.DeviceForHash(hash);
+            if (acct == null && Services.AccountService.Shared.RefreshForUnknownToken()) acct = Services.AccountService.Shared.DeviceForHash(hash);
+            if (acct != null)
+            {
+                // Account devices are managed (and their last-seen kept) by the account server.
+                return new PairedDevice
+                {
+                    Id = Services.AccountService.LocalId(acct.Id), Name = acct.Name, TokenHash = acct.TokenHash,
+                    Created = DateTimeOffset.UtcNow, LastAddress = ip?.ToString(), ViewOnly = acct.ViewOnly,
+                };
+            }
             RecordFailure(ip);
             return null;
         }
@@ -227,9 +239,18 @@ public static class AuthService
         deviceId = null;
         if (token == null || !EphemeralTokens.TryRemove(token, out var e)) return null;
         if (e.Expires < DateTime.UtcNow || e.Purpose != purpose) return null;
-        if (ConfigStore.Current.Devices.All(d => d.Id != e.DeviceId)) return null;
+        if (DeviceStatus(e.DeviceId) == null) return null;
         deviceId = e.DeviceId;
         return e.Value;
+    }
+
+    /// <summary>Whether a device (paired here, or an account device) still exists, and if it's view-only.</summary>
+    public static (bool viewOnly, bool account)? DeviceStatus(string? id)
+    {
+        if (id == null) return null;
+        if (ConfigStore.Current.Devices.FirstOrDefault(d => d.Id == id) is { } d) return (d.ViewOnly, false);
+        if (id.StartsWith("account:", StringComparison.Ordinal) && Services.AccountService.Shared.Device(id[8..]) is { } a) return (a.ViewOnly, true);
+        return null;
     }
 
     public static string HashToken(string token) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
