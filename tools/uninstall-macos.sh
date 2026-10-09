@@ -9,12 +9,10 @@ set -euo pipefail
 PURGE=0
 [ "${1:-}" = "--purge" ] && PURGE=1
 
-for name in "Headroom Server" "Headroom Viewer"; do
-  osascript -e "tell application \"$name\" to quit" >/dev/null 2>&1 || true
+# SIGTERM quits each app (Headroom Server's engine exits with it).
+for exe in HeadroomServer HeadroomViewer; do
+  if pgrep -x "$exe" >/dev/null; then pkill -x "$exe"; sleep 1; fi
 done
-pkill -x HeadroomServer 2>/dev/null || true
-pkill -x HeadroomViewer 2>/dev/null || true
-sleep 1
 
 for dir in /Applications "$HOME/Applications"; do
   for name in "Headroom Server" "Headroom Viewer"; do
