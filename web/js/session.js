@@ -216,8 +216,11 @@ export class Session {
     c.addEventListener('fatal', e => {
       const m = e.detail;
       if (m.code === 'unauthorized') {
-        this._overlay('Not paired', m.message || 'This device is no longer paired with the computer.', false, [
-          { label: 'Pair again', primary: true, onClick: () => { this.stop(); this.onUnauthorized?.(this.host); } },
+        const acct = this.host.account;
+        this._overlay(acct ? 'No access' : 'Not paired', acct
+          ? 'This computer doesn\'t accept this device right now (it may have left the account, or this device was removed).'
+          : m.message || 'This device is no longer paired with the computer.', false, [
+          { label: acct ? 'Refresh account' : 'Pair again', primary: true, onClick: () => { this.stop(); this.onUnauthorized?.(this.host); } },
           { label: 'Back', onClick: () => this.stop() },
         ]);
       } else if (m.code === 'rate-limited') {

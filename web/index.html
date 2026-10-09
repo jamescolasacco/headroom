@@ -26,14 +26,17 @@
         <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="6" width="26" height="17" rx="3.5" fill="none" stroke="currentColor" stroke-width="2.4"/><path d="M11 27h10" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M10 14.5l4 4 8-8" fill="none" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <h1>Headroom</h1>
       </div>
+      <button class="account-chip" id="account-chip" type="button" hidden></button>
       <button class="icon-btn" id="btn-app-settings" title="Settings" aria-label="Settings"><svg viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg></button>
     </header>
     <div id="host-list" class="host-list" aria-live="polite"></div>
     <div id="home-empty" class="empty" hidden>
       <p class="empty-title">No computers yet</p>
-      <p class="muted">Install Headroom Server on a Windows PC or a Mac, then add it here with its address and password or pairing code.</p>
+      <p class="muted">Install Headroom Server on a Windows PC or a Mac. Then sign in to your Headroom account, or add the computer by its address with a password or pairing code.</p>
+      <p class="muted small" id="home-empty-text"></p>
     </div>
-    <button class="primary wide" id="btn-add-host">Add computer</button>
+    <button class="primary wide" id="btn-sign-in" hidden>Sign in to your account</button>
+    <button class="wide" id="btn-add-host">Add computer</button>
     <p class="muted small center" id="home-hint"></p>
   </section>
 

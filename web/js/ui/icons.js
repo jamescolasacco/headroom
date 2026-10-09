@@ -1,6 +1,7 @@
 // Inline SVG path data (24x24, stroke icons).
 export const I = {
   close: '<path d="M18 6 6 18M6 6l12 12"/>',
+  user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
   monitor: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
   keyboard: '<rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/>',
   keys: '<path d="M4 7h4v4H4zM10 7h4v4h-4zM16 7h4v4h-4zM7 13h10v4H7z"/>',
