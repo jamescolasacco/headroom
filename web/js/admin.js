@@ -1,10 +1,14 @@
 // Headroom Server settings window. Runs on the host (loopback-only /api/admin) — inside the tray app's
-// WebView2 window, or in any browser at http://localhost:7080/admin.html.
+// WebView2 window (Windows), the menu-bar app's WKWebView window (Mac), or any browser at
+// http://localhost:7080/admin.html.
 import { h, svg } from './ui/dom.js';
 import { QrCode } from './qr.js';
+import { bridge } from './platform.js';
 
-const native = window.chrome?.webview || null;   // present when hosted by HeadroomServer.exe
-const postNative = msg => native?.postMessage(msg);
+const native = bridge;   // present when hosted by Headroom Server's own window
+const postNative = msg => native?.post(msg);
+const mac = () => st?.host?.os === 'macos';
+const thisPc = () => (mac() ? 'this Mac' : 'this PC');
 
 const ICON = {
   status: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
@@ -16,6 +20,7 @@ const ICON = {
   connection: '<path d="M5 12.55a11 11 0 0 1 14 0M1.42 9a16 16 0 0 1 21.16 0M8.53 16.11a6 6 0 0 1 6.95 0M12 20h.01"/>',
   about: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
+  warn: '<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0ZM12 9v4M12 17h.01"/>',
   live: '<rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/><circle cx="12" cy="10.5" r="2.5"/>',
   down: '<circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6M9 9l6 6"/>',
 };
@@ -74,7 +79,7 @@ function renderOffline(message) {
   c.replaceChildren(h('section', {},
     h('div', { class: 'card' }, h('div', { class: 'hero down' }, h('div', { class: 'ring' }, svg(ICON.down, 28)),
       h('div', {}, h('div', { class: 'title' }, 'The Headroom server isn\'t running'),
-        h('div', { class: 'muted small' }, native ? 'Start it from the tray icon menu, or restart the Headroom service.' : `This page talks to the server on this PC (${message}).`))),
+        h('div', { class: 'muted small' }, native ? 'Start it here, or from the Headroom icon in the menu bar / notification area.' : `This page talks to the Headroom server on this computer (${message}).`))),
       native ? h('div', { class: 'row', style: { marginTop: '14px' } }, h('button', { class: 'primary', onclick: () => postNative({ cmd: 'startServer' }) }, 'Start server')) : null)));
 }
 
@@ -127,15 +132,19 @@ function preferredUrl() {
 // ------------------------------------------------------------------ views
 function viewStatus() {
   const n = st.sessions.length;
+  const perms = st.permissions;
+  const missing = mac() && perms && (!perms.screenRecording || !perms.accessibility);
   const hero = h('div', { class: `hero ${n ? 'live' : 'ready'}` },
     h('div', { class: 'ring' }, svg(n ? ICON.live : ICON.check, 28)),
     h('div', { class: 'grow' },
       h('div', { class: 'title' }, n ? `${n} viewer${n > 1 ? 's' : ''} connected` : 'Ready for connections'),
       h('div', { class: 'row', style: { marginTop: '6px' } },
-        st.elevated ? h('span', { class: 'badge ok' }, 'Service mode') : h('span', { class: 'badge warn' }, 'User mode'),
+        mac() ? null : st.elevated ? h('span', { class: 'badge ok' }, 'Service mode') : h('span', { class: 'badge warn' }, 'User mode'),
+        missing ? h('span', { class: 'badge warn' }, 'Needs permission') : null,
+        st.testPattern ? h('span', { class: 'badge warn' }, 'Test pattern') : null,
         h('span', { class: 'badge' }, `${st.devices.length} paired device${st.devices.length === 1 ? '' : 's'}`),
         st.tailscale ? h('span', { class: 'badge ok' }, 'Tailscale') : null)));
-  const modeTip = st.elevated ? null : h('p', { class: 'small muted', style: { marginTop: '12px' } },
+  const modeTip = st.elevated || mac() ? null : h('p', { class: 'small muted', style: { marginTop: '12px' } },
     st.serviceInstalled
       ? 'The Headroom service is installed but this window is talking to a user-mode server. Stop it so the service can take over.'
       : 'In user mode, UAC prompts and the lock screen can\'t be shown or controlled. Install service mode (run install.ps1 as administrator) for full unattended access.');
@@ -149,12 +158,34 @@ function viewStatus() {
     copyBtn(u))));
 
   return h('section', {},
-    h('h2', {}, 'Status'), h('p', { class: 'lead' }, 'Headroom lets your other devices see and control this PC.'),
+    h('h2', {}, 'Status'), h('p', { class: 'lead' }, `Headroom lets your other devices see and control ${thisPc()}.`),
     h('div', { class: 'card' }, hero, modeTip),
+    mac() ? permissionsCard() : null,
     h('div', { class: 'card' }, h('div', { class: 'row' }, h('h3', { class: 'grow', style: { margin: 0 } }, 'Connected viewers'),
       n > 1 ? h('button', { class: 'sm danger', type: 'button', onclick: () => post('/sessions/disconnect-all').then(refresh) }, 'Disconnect everyone') : null), viewers),
     h('div', { class: 'card' }, h('h3', {}, 'Connect from another device'), addrs,
       h('p', { class: 'small muted' }, 'New device? Use “Pair a device” to get a code or scan a QR code.')));
+}
+
+/** Mac: the two privacy permissions, with shortcuts to grant them. */
+function permissionsCard() {
+  const p = st.permissions || {};
+  const item = (ok, title, sub, kind, url) => h('div', { class: 'li' },
+    h('div', { class: 'main' }, h('div', { class: 't' }, title, ' ', h('span', { class: `badge ${ok ? 'ok' : 'warn'}` }, ok ? 'Allowed' : 'Not allowed')),
+      h('div', { class: 's' }, sub)),
+    ok ? null : h('button', { class: 'sm', type: 'button', onclick: () => post('/permissions/request', { kind }).then(refresh) }, 'Ask macOS'),
+    ok ? null : h('button', { class: 'sm primary', type: 'button', onclick: () => openSettings(url) }, 'Open System Settings'));
+  return h('div', { class: 'card' }, h('h3', {}, 'Permissions'),
+    h('div', { class: 'list' },
+      item(p.screenRecording, 'Screen Recording', 'Lets viewers see the screen and hear its sound.', 'screen', p.screenRecordingUrl),
+      item(p.accessibility, 'Accessibility', 'Lets viewers control the mouse and keyboard.', 'accessibility', p.accessibilityUrl)),
+    p.screenRecording && p.accessibility ? null : h('p', { class: 'small muted' },
+      'Turn on Headroom Server in each list (System Settings → Privacy & Security). macOS applies Screen Recording after Headroom Server restarts.'));
+}
+
+function openSettings(url) {
+  if (native) postNative({ cmd: 'openUrl', url });
+  else location.href = url;
 }
 
 function viewPair() {
@@ -194,7 +225,7 @@ function viewPair() {
       ? h('p', { class: 'small' }, 'If the device uses Tailscale, nothing to set up — the pairing QR above opens your tailnet address with a real certificate.')
       : null,
     trustUrl ? h('div', { class: 'pair-grid' }, qrBox(trustUrl), h('div', {},
-      h('p', { class: 'small' }, 'On your home network, the device must trust this PC\'s certificate once:'),
+      h('p', { class: 'small' }, `On your home network, the device must trust ${thisPc()}'s certificate once:`),
       h('ol', { class: 'steps small' },
         h('li', {}, 'Scan this code (opens ', h('span', { class: 'mono' }, trustUrl), ' in Safari).'),
         h('li', {}, 'Download the profile, then install it in Settings → General → VPN & Device Management.'),
@@ -223,7 +254,7 @@ function viewDevices() {
       } }, 'Revoke'));
   }) : [h('div', { class: 'empty' }, 'No devices yet. Pair one from “Pair a device”.')];
   return h('section', {}, h('h2', {}, 'Devices'),
-    h('p', { class: 'lead' }, 'Everything that can connect to this PC. View-only devices can watch but not control.'),
+    h('p', { class: 'lead' }, `Everything that can connect to ${thisPc()}. View-only devices can watch but not control.`),
     h('div', { class: 'card' }, h('div', { class: 'list' }, ...rows)));
 }
 
@@ -269,7 +300,8 @@ function viewSecurity() {
     h('div', { class: 'card' }, h('h3', {}, st.hasPassword ? 'Change password' : 'Set a password'), pwForm),
     totpCard,
     h('div', { class: 'card' },
-      switchRow('Lock this PC when the last viewer disconnects', 'So nobody walks up to an unlocked screen after a remote session.', st.settings.lockOnDisconnect, v => saveSettings({ lockOnDisconnect: v }))));
+      switchRow(`Lock ${thisPc()} when the last viewer disconnects`, 'So nobody walks up to an unlocked screen after a remote session.', st.settings.lockOnDisconnect, v => saveSettings({ lockOnDisconnect: v })),
+      switchRow('Notify when someone connects', 'Shows a notification on this computer whenever a viewer connects.', st.settings.notifyOnConnect !== false, v => saveSettings({ notifyOnConnect: v }))));
 }
 
 function viewFeatures() {
@@ -278,8 +310,8 @@ function viewFeatures() {
     h('div', { class: 'card' },
       switchRow('Remote control', 'Off = every device is view-only (watch, no mouse or keyboard).', p.input, v => saveSettings({ input: v })),
       switchRow('Clipboard sync', 'Copy on one side, paste on the other (text).', p.clipboard, v => saveSettings({ clipboard: v })),
-      switchRow('File transfer', 'Browse, download and upload files on this PC.', p.fileTransfer, v => saveSettings({ fileTransfer: v })),
-      switchRow('Sound', 'Stream this PC\'s audio to the viewer.', st.settings.audio.enabled, v => saveSettings({ audio: v }))));
+      switchRow('File transfer', `Browse, download and upload files on ${thisPc()}.`, p.fileTransfer, v => saveSettings({ fileTransfer: v })),
+      switchRow('Sound', `Stream ${thisPc()}'s audio to the viewer.`, st.settings.audio.enabled, v => saveSettings({ audio: v }))));
 }
 
 function viewQuality() {
@@ -293,30 +325,32 @@ function viewQuality() {
   const row = (title, sub, control) => h('div', { class: 'switch-row' }, h('div', { class: 'main' }, h('div', { class: 't' }, title), h('div', { class: 's' }, sub)), control);
   return h('section', {}, h('h2', {}, 'Quality'), h('p', { class: 'lead' }, 'Upper limits. Each viewer adapts below these automatically based on its connection.'),
     h('div', { class: 'card' },
-      row('Encoder', 'Hardware uses your graphics card (fastest). Software works everywhere.', sel(v.encoder, [['auto', 'Automatic'], ['hardware', 'Hardware only'], ['software', 'Software']], x => saveSettings({ encoder: x }))),
+      row('Encoder', mac() ? 'Hardware uses the Mac\'s built-in video encoder (fastest). Software works everywhere.' : 'Hardware uses your graphics card (fastest). Software works everywhere.', sel(v.encoder, [['auto', 'Automatic'], ['hardware', 'Hardware only'], ['software', 'Software']], x => saveSettings({ encoder: x }))),
       row('Maximum frame rate', 'Higher is smoother but uses more bandwidth.', sel(v.maxFps, [[30, '30 fps'], [60, '60 fps'], [120, '120 fps'], [144, '144 fps'], [240, '240 fps']], x => saveSettings({ maxFps: +x }))),
       row('Maximum bitrate', 'Caps bandwidth per viewer.', sel(v.maxBitrateKbps, [[10000, '10 Mb/s'], [20000, '20 Mb/s'], [40000, '40 Mb/s'], [80000, '80 Mb/s'], [150000, '150 Mb/s']], x => saveSettings({ maxBitrateKbps: +x })))));
 }
 
 function viewConnection() {
   const thumb = st.caThumbprint.replace(/(.{4})/g, '$1 ').trim();
-  return h('section', {}, h('h2', {}, 'Connection'), h('p', { class: 'lead' }, 'How devices reach this PC.'),
+  return h('section', {}, h('h2', {}, 'Connection'), h('p', { class: 'lead' }, `How devices reach ${thisPc()}.`),
     h('div', { class: 'card' }, h('h3', {}, 'Tailscale'),
       st.tailscale
         ? h('p', { class: 'small' }, h('span', { class: 'badge ok' }, 'Ready'), ' ', h('span', { class: 'mono' }, `https://${st.tailscale}:${st.port}/`), ' works from anywhere your devices are signed into Tailscale.')
-        : h('p', { class: 'small muted' }, 'Not detected. For access away from home with no port forwarding: install Tailscale on this PC and your devices, then enable MagicDNS and HTTPS Certificates in the Tailscale admin console. Headroom picks it up automatically within a few minutes.')),
-    h('div', { class: 'card' }, h('h3', {}, 'This PC\'s certificate'),
+        : h('p', { class: 'small muted' }, `Not detected. For access away from home with no port forwarding: install Tailscale on ${thisPc()} and your devices, then enable MagicDNS and HTTPS Certificates in the Tailscale admin console. Headroom picks it up automatically within a few minutes.`)),
+    h('div', { class: 'card' }, h('h3', {}, mac() ? 'This Mac\'s certificate' : 'This PC\'s certificate'),
       h('div', { class: 'kv' },
         h('div', { class: 'k' }, 'HTTPS port'), h('div', { class: 'mono' }, String(st.port)),
         h('div', { class: 'k' }, 'Setup page (HTTP)'), h('div', { class: 'mono' }, st.lanAddresses.map(a => `http://${a}:${st.httpPort}/`).join('  ') || '—'),
         h('div', { class: 'k' }, 'Server key fingerprint'), h('div', { class: 'mono' }, st.serverKeyFingerprint || '—'),
         h('div', { class: 'k' }, 'CA fingerprint (iPhone/Mac)'), h('div', { class: 'mono' }, thumb)),
-      h('p', { class: 'small muted', style: { marginTop: '10px' } }, 'Headroom Viewer on Windows asks you to confirm the server key fingerprint the first time it connects. iPhones and Macs trust this PC by installing its certificate (CA) instead.'),
+      h('p', { class: 'small muted', style: { marginTop: '10px' } }, `Headroom Viewer (Windows and Mac) asks you to confirm the server key fingerprint the first time it connects. Browsers on iPhones and Macs trust ${thisPc()} by installing its certificate (CA) instead.`),
       h('div', { class: 'row', style: { marginTop: '12px' } },
         h('a', { href: '/headroom-ca.crt', download: 'headroom-ca.crt' }, 'Download certificate'),
         h('a', { href: '/headroom-ca.mobileconfig' }, 'iPhone/iPad profile'))),
     h('div', { class: 'card' }, h('h3', {}, 'Firewall'),
-      h('p', { class: 'small muted' }, 'Service mode adds a Windows Firewall rule for private and domain networks. On public Wi-Fi, Headroom stays unreachable unless you use Tailscale.')));
+      h('p', { class: 'small muted' }, mac()
+        ? 'If the macOS firewall is on (System Settings → Network → Firewall), allow incoming connections for Headroom Server when macOS asks. Headroom never forwards ports on your router: from outside your network, use Tailscale.'
+        : 'Service mode adds a Windows Firewall rule for private and domain networks. On public Wi-Fi, Headroom stays unreachable unless you use Tailscale.')));
 }
 
 function viewAbout() {
@@ -328,7 +362,7 @@ function viewAbout() {
       h('div', { class: 'row' }, name, h('button', { type: 'button', onclick: async () => { await saveSettings({ displayName: name.value }); m.className = 'msg ok'; m.textContent = 'Saved.'; } }, 'Save')), m),
     h('div', { class: 'card' }, h('div', { class: 'kv' },
       h('div', { class: 'k' }, 'Version'), h('div', {}, st.host.version),
-      h('div', { class: 'k' }, 'Mode'), h('div', {}, st.elevated ? 'Service (SYSTEM)' : 'User'),
+      h('div', { class: 'k' }, 'Mode'), h('div', {}, mac() ? 'Menu bar app (runs while you\'re logged in)' : st.elevated ? 'Service (SYSTEM)' : 'User'),
       h('div', { class: 'k' }, 'Host ID'), h('div', { class: 'mono' }, st.host.id),
       h('div', { class: 'k' }, 'Data folder'), h('div', { class: 'row' }, h('span', { class: 'mono' }, st.dataDir), openBtn('Open', st.dataDir)),
       h('div', { class: 'k' }, 'Logs'), h('div', { class: 'row' }, h('span', { class: 'mono' }, st.logDir), openBtn('Open', st.logDir)))));
@@ -344,6 +378,6 @@ function go(id) {
 const fromHash = location.hash.slice(1);
 if (SECTIONS.some(([id]) => id === fromHash)) current = fromHash;
 window.addEventListener('hashchange', () => go(location.hash.slice(1)));
-native?.addEventListener('message', e => { if (e.data?.cmd === 'navigate') go(e.data.section); });
+native?.on(m => { if (m?.cmd === 'navigate') go(m.section); });
 refresh();
 pollTimer = setInterval(() => { if (current === 'status' || current === 'devices') refresh(); else api('/status').then(s => { st = s; renderNav(); postNative({ cmd: 'status', viewers: st.sessions.length, names: st.sessions.map(x => x.device) }); }).catch(() => renderOffline('not reachable')); }, 2000);
