@@ -29,6 +29,33 @@ public sealed class HostConfig
     public bool LockOnDisconnect { get; set; }
     /// <summary>Show a Windows toast/tray notice when someone connects.</summary>
     public bool NotifyOnConnect { get; set; } = true;
+
+    /// <summary>Membership in a Headroom account (account-server/), if joined.</summary>
+    public AccountLink? Account { get; set; }
+}
+
+/// <summary>
+/// This computer's link to an account: its own credential there (not the account password) and the last device
+/// list it received, so it keeps working through a short account-server outage.
+/// </summary>
+public sealed class AccountLink
+{
+    public string Server { get; set; } = "";
+    public string Username { get; set; } = "";
+    public string AccountId { get; set; } = "";
+    public string DeviceId { get; set; } = "";
+    public string Token { get; set; } = "";
+    public List<AccountDevice> Devices { get; set; } = new();
+}
+
+/// <summary>A device signed in to the account, as the account server describes it to this computer.</summary>
+public sealed record AccountDevice
+{
+    public string Id { get; init; } = "";
+    public string Name { get; init; } = "";
+    /// <summary>SHA-256 (uppercase hex) of the token this device presents to this computer.</summary>
+    public string TokenHash { get; init; } = "";
+    public bool ViewOnly { get; init; }
 }
 
 public sealed class PasswordRecord

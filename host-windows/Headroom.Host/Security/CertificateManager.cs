@@ -198,6 +198,18 @@ public sealed class CertificateManager
         return key;
     }
 
+    /// <summary>Base64 SHA-256 of the server certificate's SubjectPublicKeyInfo: the pin Headroom Viewer stores
+    /// (and the account server hands to signed-in viewers).</summary>
+    public string ServerSpkiPin
+    {
+        get
+        {
+            X509Certificate2 cert;
+            lock (_gate) cert = _server!;
+            return Convert.ToBase64String(SHA256.HashData(cert.PublicKey.ExportSubjectPublicKeyInfo()));
+        }
+    }
+
     /// <summary>SHA-256 of the server certificate's public key — what Headroom Viewer pins and displays.</summary>
     public string ServerKeyFingerprint
     {

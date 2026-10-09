@@ -108,6 +108,7 @@ public static class Program
             return 2;
         }
 
+        AccountService.Shared.Start(certs);
         if (banner) PrintBanner(certs);
         else Log.Info("main", $"agent running in session {Process.GetCurrentProcess().SessionId} as {(Input.InputInjector.IsSystem ? "SYSTEM" : Environment.UserName)}");
         app.WaitForShutdown();
