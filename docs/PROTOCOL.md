@@ -1,7 +1,8 @@
 # Headroom wire protocol (v1)
 
-This is the contract between a **host** (Windows today, macOS next) and the **web client**. Any host
-that speaks it works with the same client.
+This is the contract between a **host** (Windows: `host-windows/`, macOS: `host-macos/`) and the **web
+client**. Any host that speaks it works with the same client; `tools/protocol-check.mjs` exercises a host
+end to end without a browser.
 
 Transport: one WebSocket at `wss://<host>:7443/ws` (`ws://` only on loopback). Text frames carry
 JSON control messages, and binary frames carry media and input. Binary layouts are little-endian.
@@ -22,6 +23,13 @@ JSON control messages, and binary frames carry media and input. Binary layouts a
      "limits": { "maxFps": 60, "maxBitrateKbps": 40000 }, "elevated": false, "hostTimeUs": 123 }
    ```
    Error codes are `unauthorized`, `rate-limited` (with `retryAfter` in seconds) and `bad-request`.
+
+   `host.os` is `windows` or `macos`; the client adapts keyboard profiles, the shortcuts menu and the extra-keys
+   bar to it. Monitor fields per host:
+   - Windows: `id` is the GDI device name (`\\.\DISPLAY1`); `x`/`y`/`width`/`height` are virtual-desktop pixels.
+   - macOS: `id` is the CGDirectDisplayID as a string (`"1"`); `x`/`y` are the display's global position in
+     *points* (macOS has no pixel space spanning displays of different densities); `width`/`height` are the
+     pixels captured (a scaled Retina mode's backing size); `scale` is pixels per point. `elevated` is always false.
 3. The client starts or changes the stream with `start`. It can send `start` again at any time to switch
    monitor, fps or resolution:
    ```json
@@ -88,20 +96,22 @@ The host sends the cursor separately so the client can draw it locally with no l
 | `0x10` | `[f32 nx][f32 ny]` | absolute pointer move, normalized 0..1 across the streamed monitor |
 | `0x11` | `[i16 dx][i16 dy]` | relative move (pointer lock) |
 | `0x12` | `[u8 button][u8 down]` | buttons: 0 left, 1 middle, 2 right, 3 back, 4 forward |
-| `0x13` | `[i16 dx][i16 dy]` | wheel in Windows units (120 = one notch; fractions allowed). +dy scrolls up, +dx scrolls right |
-| `0x14` | `[u8 flags: 1=down][u8 len][ASCII code]` | a key, as a W3C `KeyboardEvent.code` (positional; the host's layout applies) |
+| `0x13` | `[i16 dx][i16 dy]` | wheel in Windows units (120 = one notch; fractions allowed). +dy scrolls up, +dx scrolls right. A macOS host turns this into continuous pixel scrolling (units ÷ 1.2 — the client maps ~100 px of scrolling to 120 units) |
+| `0x14` | `[u8 flags: 1=down][u8 len][ASCII code]` | a key, as a W3C `KeyboardEvent.code` (positional; the host's layout applies). Windows maps codes to set-1 scancodes, macOS to virtual key codes (PC-only keys as Apple maps a PC keyboard: Insert → Help, PrintScreen/ScrollLock/Pause → F13/F14/F15; `MetaLeft` is ⌘) |
 
 JSON input messages:
 - `{"t":"text","s":"…"}` types text layout-independently (Unicode injection). It is used for soft
   keyboards, dictation, IME and "type clipboard".
-- `{"t":"locks","caps":bool,"num":bool}` syncs Caps Lock and Num Lock state.
+- `{"t":"locks","caps":bool,"num":bool}` syncs Caps Lock and Num Lock state (a Mac has no Num Lock: caps only).
 - `{"t":"release"}` releases everything this viewer holds. The client sends it on blur or hide; the host
   also does it on disconnect.
 - `{"t":"special","action":"cad"|"lock"|"taskmgr"}` sends Ctrl+Alt+Del (SAS, service mode only), locks
-  the workstation, or opens Task Manager.
+  the workstation, or opens Task Manager. On macOS: `cad` opens Force Quit Applications (⌥⌘Esc), `lock` locks
+  the screen, `taskmgr` opens Activity Monitor.
 
 Keyboard *translation* happens client-side. The Mac profile maps Cmd+C to Ctrl+C, Cmd alone to Win, and
-so on. The host only ever sees plain key codes.
+so on (Mac viewer, Windows host); for a macOS host keys pass through, or Ctrl and Win swap for a PC viewer.
+The host only ever sees plain key codes.
 
 ## 5. Other messages
 
@@ -113,7 +123,8 @@ so on. The host only ever sees plain key codes.
 - **Files**: `{"t":"file-token","path":"…","id":"…"}` makes the host reply with `file-token` and a
   2-minute single-use `token` for `GET /api/files/download?t=`.
 - **Host → client**:
-  - `status`, with `capture`: `ok` | `secure-desktop` | `unavailable` | `starting`
+  - `status`, with `capture`: `ok` | `secure-desktop` | `unavailable` | `starting`, and an optional `detail`
+    (e.g. a macOS host without the Screen Recording permission reports `unavailable` with instructions)
   - `stats`, with `fps`, `kbps`, `targetKbps`, `encodeMs`, `frameRttMs` and `minRttMs`
   - `notice`, a message for the user
   - `monitors`, the monitor list
@@ -131,7 +142,9 @@ so on. The host only ever sees plain key codes.
 | POST | `/api/files/upload?dir=&name=` | Bearer | raw body; saved under a non-clashing name |
 | GET | `/api/files/download?t=` | ephemeral token | file download |
 | GET | `/headroom-ca.crt`, `/headroom-ca.mobileconfig` | none | local CA for device trust |
-| * | `/api/admin/*` | loopback only | password, pairing codes, devices, settings |
+| * | `/api/admin/*` | loopback only: loopback peer *and* loopback `Host`, no foreign `Origin`, `Sec-Fetch-Site` same-origin/none (so web pages can't use it); never CORS | password, pairing codes, devices, settings; on macOS also `permissions` in `/status` and `POST /permissions/request {"kind":"screen"\|"accessibility"}` |
+
+The WebSocket upgrade is accepted on any request of a keep-alive connection, not only the first.
 
 CORS on `/api/*` is `*` because auth uses bearer tokens, not cookies. The host also answers Chrome's
 Private Network Access preflight. Failed authentication is rate-limited per IP: 5 free attempts, then
