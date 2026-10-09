@@ -21,18 +21,46 @@ export const hasWebCodecs = typeof VideoDecoder !== 'undefined';
 export const hasAudioDecoder = typeof AudioDecoder !== 'undefined';
 export const secure = window.isSecureContext;
 
-/** Running inside Headroom Viewer for Windows (WebView2 shell serving the bundled client). */
-export const nativeViewer = !!window.chrome?.webview && location.hostname === 'app.headroom.local';
+/**
+ * Message bridge to a native shell: WebView2 on Windows (chrome.webview), WKWebView on macOS
+ * (webkit.messageHandlers.headroom, with replies dispatched as 'headroom-native' events). Null in a browser.
+ */
+export const bridge = (() => {
+  const wv2 = window.chrome?.webview;
+  if (wv2) {
+    return {
+      post: msg => wv2.postMessage(msg),
+      on: handler => {
+        const fn = e => handler(e.data);
+        wv2.addEventListener('message', fn);
+        return () => wv2.removeEventListener('message', fn);
+      },
+    };
+  }
+  const wk = window.webkit?.messageHandlers?.headroom;
+  if (wk) {
+    return {
+      post: msg => wk.postMessage(msg),
+      on: handler => {
+        const fn = e => handler(e.detail);
+        window.addEventListener('headroom-native', fn);
+        return () => window.removeEventListener('headroom-native', fn);
+      },
+    };
+  }
+  return null;
+})();
+
+/** Running inside Headroom Viewer (Windows WebView2 or Mac WKWebView shell serving the bundled client). */
+export const nativeViewer = !!bridge && location.hostname === 'app.headroom.local';
 
 export function postNative(msg) {
-  if (nativeViewer) window.chrome.webview.postMessage(msg);
+  if (nativeViewer) bridge.post(msg);
 }
 
 export function onNative(handler) {
   if (!nativeViewer) return () => { };
-  const fn = e => handler(e.data);
-  window.chrome.webview.addEventListener('message', fn);
-  return () => window.chrome.webview.removeEventListener('message', fn);
+  return bridge.on(handler);
 }
 
 export function deviceLabel() {

@@ -1,6 +1,6 @@
-// Extra-keys bar (Esc, Tab, Ctrl, Alt, Win, arrows, F-keys...) with sticky modifiers:
+// Extra-keys bar (Esc, Tab, Ctrl, Alt, Win/⌘, arrows, F-keys...) with sticky modifiers:
 //   tap = one-shot (applies to the next key or click), tap again = lock, tap a locked one = release.
-import { isApple } from '../platform.js';
+// Labels follow the host: a Mac host gets control/option/⌘ and Force Quit instead of Ctrl+Alt+Del.
 
 export class StickyModifiers extends EventTarget {
   constructor(keyboard) {
@@ -53,9 +53,9 @@ const KEYS = [
   { label: 'esc', code: 'Escape' },
   { label: 'tab', code: 'Tab' },
   { sep: true },
-  { label: 'ctrl', code: 'ControlLeft', mod: true },
-  { label: 'alt', code: 'AltLeft', mod: true },
-  { label: 'win', code: 'MetaLeft', mod: true, title: 'Windows key' },
+  { label: 'ctrl', mac: 'control', code: 'ControlLeft', mod: true },
+  { label: 'alt', mac: 'option', code: 'AltLeft', mod: true },
+  { label: 'win', mac: '⌘ cmd', code: 'MetaLeft', mod: true, title: 'Windows key', macTitle: 'Command key' },
   { label: 'shift', code: 'ShiftLeft', mod: true },
   { sep: true },
   { label: '←', code: 'ArrowLeft', repeat: true },
@@ -69,8 +69,8 @@ const KEYS = [
   { sep: true },
   ...Array.from({ length: 12 }, (_, i) => ({ label: `F${i + 1}`, code: `F${i + 1}` })),
   { sep: true },
-  { label: 'ins', code: 'Insert' }, { label: 'prtsc', code: 'PrintScreen' },
-  { label: 'ctrl+alt+del', action: 'cad', wide: true },
+  { label: 'ins', code: 'Insert', pcOnly: true }, { label: 'prtsc', code: 'PrintScreen', pcOnly: true },
+  { label: 'ctrl+alt+del', mac: 'force quit', action: 'cad', wide: true, macTitle: 'Force Quit Applications (⌥⌘Esc)' },
 ];
 
 export class ExtraKeysBar {
@@ -81,6 +81,7 @@ export class ExtraKeysBar {
     this.conn = conn;
     this.onLayout = onLayout;
     this.visible = false;
+    this.macHost = false;
     this._render();
     mods.addEventListener('change', () => this._sync());
     const vv = window.visualViewport;
@@ -88,15 +89,26 @@ export class ExtraKeysBar {
     vv?.addEventListener('scroll', () => this.position());
   }
 
+  /** Re-label for the host's platform ('macos' | 'windows'). */
+  setHost(os) {
+    const mac = os === 'macos';
+    if (mac === this.macHost) return;
+    this.macHost = mac;
+    this._render();
+    this._sync();
+  }
+
   _render() {
     this.el.replaceChildren();
     for (const k of KEYS) {
       if (k.sep) { const s = document.createElement('span'); s.className = 'xk-sep'; this.el.append(s); continue; }
+      if (k.pcOnly && this.macHost) continue;
       const b = document.createElement('button');
       b.type = 'button';
       b.className = 'xk' + (k.mod ? ' mod' : '') + (k.wide ? ' wide' : '');
-      b.textContent = k.code === 'MetaLeft' && isApple ? 'win' : k.label;
-      if (k.title) b.title = k.title;
+      b.textContent = this.macHost && k.mac ? k.mac : k.label;
+      const title = this.macHost && k.macTitle ? k.macTitle : k.title;
+      if (title) b.title = title;
       if (k.code) b.dataset.code = k.code;
       // Keep focus on the hidden input so the iOS keyboard stays up while tapping bar keys.
       b.addEventListener('pointerdown', e => { e.preventDefault(); this._press(k, b); });

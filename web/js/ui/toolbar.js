@@ -82,14 +82,23 @@ export class Toolbar {
     const b = (label, action, title) => h('button', { type: 'button', title: title || label, onclick: () => { s.special(action); closeSheet(); } }, label);
     this._sheet(el => {
       el.append(h('h3', {}, 'Send keys'));
-      el.append(h('div', { class: 'grid' },
-        b('Ctrl+Alt+Del', 'cad'), b('Task Manager', 'taskmgr', 'Ctrl+Shift+Esc'), b('Lock', 'lock', 'Lock the remote computer'),
-        b('Start (Win)', 'win'), b('Alt+Tab', 'alttab'), b('Task View', 'wintab', 'Win+Tab'),
-        b('Show desktop', 'desktop', 'Win+D'), b('Explorer', 'explorer', 'Win+E'), b('Run…', 'run', 'Win+R'),
-        b('Settings', 'settings', 'Win+I'), b('Snip', 'snip', 'Win+Shift+S'), b('PrtScn', 'prtsc'),
-        b('Close app', 'altf4', 'Alt+F4'), b('Esc', 'esc'), b('Ctrl+Esc', 'ctrlesc')));
-      if (!s.elevated) el.append(h('p', { class: 'muted small', style: { padding: '0 12px 6px' } },
-        'Ctrl+Alt+Del and the lock/UAC screens need Headroom installed as a service on the host.'));
+      if (s.macHost) {
+        el.append(h('div', { class: 'grid' },
+          b('Force Quit…', 'cad', '⌥⌘Esc'), b('Activity Monitor', 'taskmgr'), b('Lock screen', 'lock', '⌃⌘Q'),
+          b('App switcher', 'cmdtab', '⌘Tab'), b('Spotlight', 'spotlight', '⌘Space'), b('Mission Control', 'mission', '⌃↑'),
+          b('App windows', 'appwindows', '⌃↓'), b('Screenshot', 'shot', '⇧⌘3'), b('Screenshot area', 'shotarea', '⇧⌘4'),
+          b('Screenshot tools', 'shottools', '⇧⌘5'), b('Close window', 'closewin', '⌘W'), b('Quit app', 'quit', '⌘Q'),
+          b('Hide app', 'hide', '⌘H'), b('Minimize', 'minimize', '⌘M'), b('Emoji', 'emoji', '⌃⌘Space'), b('Esc', 'esc')));
+      } else {
+        el.append(h('div', { class: 'grid' },
+          b('Ctrl+Alt+Del', 'cad'), b('Task Manager', 'taskmgr', 'Ctrl+Shift+Esc'), b('Lock', 'lock', 'Lock the remote computer'),
+          b('Start (Win)', 'win'), b('Alt+Tab', 'alttab'), b('Task View', 'wintab', 'Win+Tab'),
+          b('Show desktop', 'desktop', 'Win+D'), b('Explorer', 'explorer', 'Win+E'), b('Run…', 'run', 'Win+R'),
+          b('Settings', 'settings', 'Win+I'), b('Snip', 'snip', 'Win+Shift+S'), b('PrtScn', 'prtsc'),
+          b('Close app', 'altf4', 'Alt+F4'), b('Esc', 'esc'), b('Ctrl+Esc', 'ctrlesc')));
+        if (!s.elevated) el.append(h('p', { class: 'muted small', style: { padding: '0 12px 6px' } },
+          'Ctrl+Alt+Del and the lock/UAC screens need Headroom installed as a service on the host.'));
+      }
       el.append(h('h3', {}, 'Type text'));
       const ta = h('textarea', { class: 'local-input', placeholder: 'Text to type on the remote (useful at login screens)…' });
       el.append(h('div', { class: 'row' }, ta, h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px' } },
@@ -146,7 +155,7 @@ export class Toolbar {
       render();
     };
     const render = () => {
-      pathEl.textContent = state.path || 'This PC';
+      pathEl.textContent = state.path || (s.macHost ? 'This Mac' : 'This PC');
       const rows = [];
       if (state.error) rows.push(h('p', { class: 'small', style: { color: 'var(--bad)', padding: '8px 12px' } }, state.error));
       if (state.path) rows.push(sheetItem(h('span', { class: 'file-row' }, svg(I.folderUp, 20), '..', ''), { onClick: () => load(state.parent || '') }));
@@ -217,15 +226,26 @@ export class Toolbar {
           { value: 'trackpad', label: 'Trackpad' }, { value: 'touch', label: 'Direct touch' },
         ], s.inputMode, v => s.setPref('inputMode', v))));
       }
-      el.append(row('Keyboard', segmented([
-        { value: 'auto', label: 'Auto' },
-        { value: 'mac', label: 'Mac shortcuts' },
-        { value: 'pc', label: 'PC' },
-        { value: 'cmdctrl', label: '⌘ = Ctrl' },
-      ], p.keyboardProfile, v => s.setPref('keyboardProfile', v))));
-      el.append(h('p', { class: 'muted small', style: { padding: '0 12px' } },
-        isApple ? 'Mac shortcuts: ⌘C/V/X/Z/A/S/F… act as Ctrl, ⌘Q closes, ⌘ alone opens Start, ⌥←/→ jump words.' : 'PC: keys are sent exactly as pressed.',
-        !hasKeyboardLock && !isTouchPrimary ? ' Tip: in Chrome/Edge full screen, Alt+Tab and the Windows key go to the remote too.' : ''));
+      if (s.macHost) {
+        el.append(row('Keyboard', segmented([
+          { value: 'auto', label: 'Auto' },
+          { value: 'pc', label: 'As pressed' },
+          { value: 'cmdctrl', label: 'Ctrl = ⌘' },
+        ], p.keyboardProfile === 'mac' ? 'pc' : p.keyboardProfile, v => s.setPref('keyboardProfile', v))));
+        el.append(h('p', { class: 'muted small', style: { padding: '0 12px' } },
+          isApple ? 'Keys go to the Mac as pressed: ⌘ is ⌘, ⌥ is ⌥.' : 'Ctrl = ⌘: Ctrl+C/V/Z… act as ⌘C/V/Z on the Mac, and the Windows key is Control.',
+          ' System shortcuts like ⌘Tab and ⌘Space can\'t be captured by a browser tab: use the Shortcuts menu, or Headroom Viewer.'));
+      } else {
+        el.append(row('Keyboard', segmented([
+          { value: 'auto', label: 'Auto' },
+          { value: 'mac', label: 'Mac shortcuts' },
+          { value: 'pc', label: 'PC' },
+          { value: 'cmdctrl', label: '⌘ = Ctrl' },
+        ], p.keyboardProfile, v => s.setPref('keyboardProfile', v))));
+        el.append(h('p', { class: 'muted small', style: { padding: '0 12px' } },
+          isApple ? 'Mac shortcuts: ⌘C/V/X/Z/A/S/F… act as Ctrl, ⌘Q closes, ⌘ alone opens Start, ⌥←/→ jump words.' : 'PC: keys are sent exactly as pressed.',
+          !hasKeyboardLock && !isTouchPrimary ? ' Tip: in Chrome/Edge full screen, Alt+Tab and the Windows key go to the remote too.' : ''));
+      }
       el.append(row('Frame rate', segmented([
         { value: 30, label: '30' }, { value: 60, label: '60' }, { value: 120, label: '120' }, { value: 144, label: '144' },
       ], p.maxFps, v => s.setPref('maxFps', v))));

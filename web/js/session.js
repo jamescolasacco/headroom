@@ -72,7 +72,7 @@ export class Session {
       softKeyboardHandles: e => this.softkbd?.handles(e),
     });
     this.mods.keyboard = this.keyboard;
-    this.keyboard.setProfile(this.prefs.keyboardProfile);
+    this.keyboard.setProfile(this.prefs.keyboardProfile, this.hostOs);
 
     this.mouse = new MouseInput({
       conn: this.conn, viewport: this.viewport, cursor: this.cursor, layer, mods: this.mods, keyboard: this.keyboard,
@@ -85,6 +85,7 @@ export class Session {
       keyboard: this.keyboard, mods: this.mods, conn: this.conn,
       onLayout: px => this.viewport.setInsetBottom(px),
     });
+    this.extraKeys.setHost(this.hostOs);
     this.softkbd.addEventListener('change', () => {
       if (this.softkbd.open) this.extraKeys.show();
       this.toolbar?.refresh();
@@ -114,7 +115,8 @@ export class Session {
     this.audio.setEnabled(this.prefs.audio);
     if (!isTouchPrimary) sink.focus({ preventScroll: true });
     this._overlay('Connecting…', this.host.url.replace(/^https?:\/\//, ''), true);
-    // Headroom Viewer (Windows): its keyboard hook captures Win/Alt+Tab/PrtScn while a session is up.
+    // Headroom Viewer for Windows: its keyboard hook captures Win/Alt+Tab/PrtScn while a session is up. (The Mac
+    // viewer switches the system shortcuts off instead, so ⌘Tab and friends arrive as ordinary key events.)
     this._offNative = onNative(m => {
       if (m?.type === 'nativeKey') this.keyboard.nativeKey(m.code, m.down);
     });
@@ -124,6 +126,10 @@ export class Session {
     this._requestWakeLock();
     touchHost(this.host.id, { lastConnected: Date.now() });
   }
+
+  /** 'windows' | 'macos': from the host's welcome, else what was stored when it was paired. */
+  get hostOs() { return this.hostInfo?.os || this.host.os || 'windows'; }
+  get macHost() { return this.hostOs === 'macos'; }
 
   get inputMode() {
     const m = this.prefs.inputMode;
@@ -136,7 +142,7 @@ export class Session {
     savePrefs(this.host.id, { [key]: value });
     switch (key) {
       case 'inputMode': this.touch.setMode(this.inputMode); break;
-      case 'keyboardProfile': this.keyboard.setProfile(value); break;
+      case 'keyboardProfile': this.keyboard.setProfile(value, this.hostOs); break;
       case 'scaling': this.viewport.setMode(value); break;
       case 'audio':
         if (value) this.audio.unlock();
@@ -158,6 +164,10 @@ export class Session {
       this.monitors = w.monitors || [];
       this.permissions = w.permissions || this.permissions;
       this.elevated = w.elevated;
+      this.hostInfo = w.host;
+      if (w.host?.os && w.host.os !== this.host.os) { this.host.os = w.host.os; touchHost(this.host.id, { os: w.host.os }); }
+      this.keyboard.setProfile(this.prefs.keyboardProfile, this.hostOs);
+      this.extraKeys.setHost(this.hostOs);
       if (!this.monitors.some(m => m.id === this.monitorId)) this.monitorId = (this.monitors.find(m => m.primary) || this.monitors[0])?.id;
       this.sendStart();
       this.toolbar.refresh();
@@ -192,7 +202,8 @@ export class Session {
     c.addEventListener('status', e => {
       const s = e.detail;
       if (s.capture === 'secure-desktop') {
-        this._overlay('Secure desktop', s.elevated
+        if (this.macHost) this._overlay('Screen locked', s.detail || 'The Mac is showing its lock screen.', true);
+        else this._overlay('Secure desktop', s.elevated
           ? 'Switching to the Windows secure desktop…'
           : 'A UAC prompt or the lock screen is showing. Windows only lets Headroom see it when running as a service (headroom service install).',
           !!s.elevated);
@@ -385,7 +396,10 @@ export class Session {
     switch (action) {
       case 'cad': this.conn.sendJson({ t: 'special', action: 'cad' }); break;
       case 'lock': this.conn.sendJson({ t: 'special', action: 'lock' }); break;
-      case 'taskmgr': this.keyboard.chord(['ControlLeft', 'ShiftLeft', 'Escape']); break;
+      case 'taskmgr':
+        if (this.macHost) this.conn.sendJson({ t: 'special', action: 'taskmgr' }); // opens Activity Monitor
+        else this.keyboard.chord(['ControlLeft', 'ShiftLeft', 'Escape']);
+        break;
       case 'win': this.keyboard.tap('MetaLeft'); break;
       case 'alttab': this.keyboard.chord(['AltLeft', 'Tab']); break;
       case 'wintab': this.keyboard.chord(['MetaLeft', 'Tab']); break;
@@ -398,6 +412,19 @@ export class Session {
       case 'prtsc': this.keyboard.tap('PrintScreen'); break;
       case 'esc': this.keyboard.tap('Escape'); break;
       case 'ctrlesc': this.keyboard.chord(['ControlLeft', 'Escape']); break;
+      // Mac hosts ('cad' = Force Quit, 'lock', 'taskmgr' = Activity Monitor are handled by the host).
+      case 'cmdtab': this.keyboard.chord(['MetaLeft', 'Tab']); break;
+      case 'spotlight': this.keyboard.chord(['MetaLeft', 'Space']); break;
+      case 'mission': this.keyboard.chord(['ControlLeft', 'ArrowUp']); break;
+      case 'appwindows': this.keyboard.chord(['ControlLeft', 'ArrowDown']); break;
+      case 'shot': this.keyboard.chord(['MetaLeft', 'ShiftLeft', 'Digit3']); break;
+      case 'shotarea': this.keyboard.chord(['MetaLeft', 'ShiftLeft', 'Digit4']); break;
+      case 'shottools': this.keyboard.chord(['MetaLeft', 'ShiftLeft', 'Digit5']); break;
+      case 'closewin': this.keyboard.chord(['MetaLeft', 'KeyW']); break;
+      case 'quit': this.keyboard.chord(['MetaLeft', 'KeyQ']); break;
+      case 'hide': this.keyboard.chord(['MetaLeft', 'KeyH']); break;
+      case 'minimize': this.keyboard.chord(['MetaLeft', 'KeyM']); break;
+      case 'emoji': this.keyboard.chord(['ControlLeft', 'MetaLeft', 'Space']); break;
     }
   }
 
