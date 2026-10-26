@@ -10,6 +10,8 @@ Get-Process HeadroomViewer -ErrorAction SilentlyContinue | Stop-Process -Force
 New-Item -ItemType Directory -Force -Path $dst | Out-Null
 robocopy $src $dst /MIR /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "copy failed (robocopy exit $LASTEXITCODE)" }
+# Downloaded as a zip, every file carries the "from the internet" mark: clear it on the installed copy.
+Get-ChildItem -Path $dst -Recurse -File | Unblock-File
 
 $shell = New-Object -ComObject WScript.Shell
 foreach ($lnk in @(
