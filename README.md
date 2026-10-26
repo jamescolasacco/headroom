@@ -15,6 +15,23 @@ Like VNC Server + VNC Viewer, every device gets the half it needs:
 The same web client also runs in any modern browser, served by each Headroom Server (and by the optional
 account server).
 
+## Install
+
+**Mac** (macOS 13+, Apple silicon or Intel): paste into Terminal:
+```bash
+curl -fsSL https://github.com/jamescolasacco/headroom/releases/latest/download/get-macos.sh | bash
+```
+It installs Headroom Server and Headroom Viewer into /Applications and starts Headroom Server; allow Screen
+Recording and Accessibility when asked.
+
+**Windows** (10/11, x64): download the Server and Viewer zips from the
+[latest release](https://github.com/jamescolasacco/headroom/releases/latest), extract, and run `install.ps1`
+(Server, as administrator) or `install-viewer.ps1` (Viewer).
+
+**iPhone / iPad:** nothing to download, see [Connecting from your iPhone / iPad](#connecting-from-your-iphone--ipad).
+
+To build from source instead, see [Build](#build).
+
 ## What you get
 
 | | |
