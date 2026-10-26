@@ -280,3 +280,7 @@ epochs, acks, pings and stats, and validates the received H.264 with ffprobe. It
 - Signed and notarized Mac builds (stable permissions across updates), and a Windows/Mac installer UI.
 - A virtual display sized to the iPad, HEVC / 4:4:4 "sharp text" mode, and WebTransport for lossy
   networks.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
