@@ -1,8 +1,8 @@
 # Builds self-contained Windows releases (no .NET install needed on the target PC):
 #   dist\Headroom        Headroom Server — engine (service) + tray app, installed with install.ps1 (admin)
 #   dist\HeadroomViewer  Headroom Viewer — installed per-user with install-viewer.ps1 (no admin)
-#   powershell -ExecutionPolicy Bypass -File tools\publish.ps1 [-Only server|viewer]
-param([string]$Runtime = "win-x64", [ValidateSet("", "server", "viewer")][string]$Only = "")
+#   powershell -ExecutionPolicy Bypass -File tools\publish.ps1 [-Only server|viewer] [-Version 1.2.3]
+param([string]$Runtime = "win-x64", [ValidateSet("", "server", "viewer")][string]$Only = "", [string]$Version = "")
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 
@@ -13,9 +13,12 @@ if (-not $dotnet) { throw "The .NET 10 SDK is required to build (https://dot.net
 $env:DOTNET_CLI_TELEMETRY_OPTOUT = "1"
 $env:DOTNET_NOLOGO = "1"
 
+$versionArgs = @()
+if ($Version) { $versionArgs = @("-p:Version=$Version") }
+
 function Publish($project, $out, $label) {
     & $dotnet publish (Join-Path $root $project) -c Release -r $Runtime --self-contained true -o $out `
-        -p:PublishReadyToRun=true -p:DebugType=none -p:GenerateDocumentationFile=false
+        -p:PublishReadyToRun=true -p:DebugType=none -p:GenerateDocumentationFile=false @versionArgs
     if ($LASTEXITCODE -ne 0) { throw "publish failed ($label)" }
 }
 
