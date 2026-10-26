@@ -4,7 +4,7 @@ name: Build
 
 on:
   push:
-    branches: [master, macos]
+    branches: [master]
     tags: ['v*']
   pull_request:
   workflow_dispatch:
@@ -91,30 +91,31 @@ jobs:
           Compress-Archive -Path dist/Headroom -DestinationPath dist/release/Headroom-Server-Windows-x64.zip
           Compress-Archive -Path dist/HeadroomViewer -DestinationPath dist/release/Headroom-Viewer-Windows-x64.zip
           Get-ChildItem dist/release | Format-Table Name, Length
-      - name: Start the host and an account server
+      - name: Accounts check and protocol check
+        # One step: on Windows runners, processes started in a step end with it.
         shell: pwsh
         run: |
           $t = $env:RUNNER_TEMP
           $env:DATA_DIR = "$t\accounts"; $env:PORT = '8780'; $env:BIND = '127.0.0.1'
-          Start-Process node -ArgumentList 'account-server/server.mjs' -RedirectStandardOutput "$t\accounts.log" -RedirectStandardError "$t\accounts.err"
+          $acct = Start-Process node -ArgumentList 'account-server/server.mjs' -PassThru -RedirectStandardOutput "$t\accounts.log" -RedirectStandardError "$t\accounts.err"
           $env:HEADROOM_BIND = 'loopback'
-          Start-Process dist\Headroom\headroom.exe -ArgumentList 'run', "--data=$t\host" -RedirectStandardOutput "$t\host.out" -RedirectStandardError "$t\host.err"
-          for ($i = 0; $i -lt 90; $i++) {
-            try { Invoke-RestMethod http://127.0.0.1:7080/api/info | Out-Null; Invoke-RestMethod http://127.0.0.1:8780/api/info | Out-Null; exit 0 } catch { Start-Sleep 1 }
+          $hostProc = Start-Process dist\Headroom\headroom.exe -ArgumentList 'run', "--data=$t\host" -PassThru -RedirectStandardOutput "$t\host.out" -RedirectStandardError "$t\host.err"
+          $up = $false
+          for ($i = 0; $i -lt 90 -and -not $up; $i++) {
+            try { Invoke-RestMethod http://127.0.0.1:7080/api/info | Out-Null; Invoke-RestMethod http://127.0.0.1:8780/api/info | Out-Null; $up = $true } catch { Start-Sleep 1 }
           }
-          Write-Host "the host or the account server didn't start"
-          Get-Content "$t\host.out", "$t\host.err", "$t\accounts.log", "$t\accounts.err" -ErrorAction SilentlyContinue
-          exit 1
-      - name: Accounts check
-        run: node tools/account-check.mjs --account=http://127.0.0.1:8780 --username=ci-test --password=ci-password-123 --register
-      - name: Protocol check
-        # A hosted runner may have no desktop to capture; this shows how far the stream gets without blocking.
-        continue-on-error: true
-        run: node tools/protocol-check.mjs --url=http://127.0.0.1:7080 --seconds=4 --out=${{ runner.temp }}/check.h264
-      - name: Host log
-        if: always()
-        shell: pwsh
-        run: Get-Content "$env:RUNNER_TEMP\host.out", "$env:RUNNER_TEMP\host.err" -Tail 60 -ErrorAction SilentlyContinue
+          $code = 1
+          if ($up) {
+            node tools/account-check.mjs --account=http://127.0.0.1:8780 --username=ci-test --password=ci-password-123 --register
+            $code = $LASTEXITCODE
+            # A hosted runner may have no desktop to capture: this shows how far the stream gets, without failing the build.
+            node tools/protocol-check.mjs --url=http://127.0.0.1:7080 --seconds=4 --out="$t\check.h264"
+            Write-Host "protocol-check exit code: $LASTEXITCODE (informational)"
+          } else { Write-Host "the host or the account server didn't start" }
+          Write-Host "`n--- host log"; Get-Content "$t\host.out", "$t\host.err" -Tail 80 -ErrorAction SilentlyContinue
+          Write-Host "`n--- account server log"; Get-Content "$t\accounts.log", "$t\accounts.err" -Tail 30 -ErrorAction SilentlyContinue
+          Stop-Process -Id $hostProc.Id, $acct.Id -Force -ErrorAction SilentlyContinue
+          exit $code
       - uses: actions/upload-artifact@v4
         with:
           name: windows
