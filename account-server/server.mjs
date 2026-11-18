@@ -10,12 +10,17 @@
 // account's devices as (id, name, token hash). Each signed-in device gets one token *per computer*, derived as
 // HMAC(server key, device|computer|epoch): a computer only ever sees hashes, and a token is useless on any other
 // computer. Revoking a device removes its hashes at the next check-in (20 s), and computers drop its sessions.
+//
+// Relay (docs/RELAY.md): computers also keep an outbound connection here, so browsers anywhere reach them at
+// /r/<Headroom ID>/… without port forwarding, Tailscale or installing certificates. Only session paths are
+// forwarded (/ws, /api/info, /api/me, /api/files/*); the computer still authenticates every session itself.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
 import path from 'node:path';
 import readline from 'node:readline';
+import { Duplex } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 const VERSION = '0.1.0';
@@ -31,6 +36,7 @@ const WEB_ROOT = (() => {
 })();
 const SIGNUP = env.SIGNUP || 'first';          // first (only while no account exists) | open | closed
 const NAME = env.NAME || 'Headroom';
+const RELAY = env.RELAY !== 'off';            // on (default) | off
 const TRUST_PROXY = env.TRUST_PROXY === '1';   // behind a reverse proxy: take the client IP from X-Forwarded-For
 const HEARTBEAT_S = 20;
 const ONLINE_S = 70;                           // a computer counts as online if it checked in this recently
@@ -219,10 +225,181 @@ function serveStatic(req, res) {
   return true;
 }
 
+// ------------------------------------------------------------------------------------------------- relay
+
+/** What a viewer may reach through the relay: sessions and their file transfers. Never pairing or settings. */
+const RELAYED_PATHS = /^\/(ws|api\/info|api\/me|api\/files\/(list|download|upload|mkdir))$/;
+const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'proxy-authorization', 'te', 'trailer', 'upgrade', 'host']);
+const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+const MAX_FRAME = 16 * 1024 * 1024;
+
+/** "123456789", unique among this server's computers; shown as 123 456 789. */
+function newRelayId(taken) {
+  for (;;) {
+    const id = String(100_000_000 + crypto.randomInt(900_000_000));
+    if (!taken(id)) return id;
+  }
+}
+
+function rawResponse(socket, status, reason, headers = {}, body = '') {
+  const lines = [`HTTP/1.1 ${status} ${reason}`, 'Connection: close', ...Object.entries(headers).map(([k, v]) => `${k}: ${v}`)];
+  if (body) lines.push(`Content-Type: application/json`, `Content-Length: ${Buffer.byteLength(body)}`);
+  socket.end(lines.join('\r\n') + '\r\n\r\n' + body);
+}
+
+/**
+ * The server end of a WebSocket from a computer (control or tunnel). Links between computers and the relay are
+ * WebSockets so that reverse proxies and tunnels (Caddy, nginx, Cloudflare) pass them like any other. As a stream,
+ * binary messages carry raw bytes (a tunnel's HTTP traffic); text messages are JSON ('text' events).
+ */
+class WsLink extends Duplex {
+  constructor(socket, head) {
+    super({ allowHalfOpen: false });
+    this.socket = socket;
+    this.buf = head?.length ? Buffer.from(head) : Buffer.alloc(0);
+    this.lastHeard = Date.now();
+    socket.setNoDelay(true);
+    socket.on('data', d => { this.lastHeard = Date.now(); this.buf = this.buf.length ? Buffer.concat([this.buf, d]) : d; this.parse(); });
+    socket.on('end', () => socket.destroy());
+    socket.on('error', () => socket.destroy());
+    socket.on('close', () => { this.push(null); this.destroy(); });
+    if (this.buf.length) setImmediate(() => this.parse());
+  }
+
+  parse() {
+    for (;;) {
+      const b = this.buf;
+      if (b.length < 2) return;
+      const op = b[0] & 0x0f, masked = b[1] & 0x80;
+      let len = b[1] & 0x7f, off = 2;
+      if (len === 126) { if (b.length < 4) return; len = b.readUInt16BE(2); off = 4; }
+      else if (len === 127) {
+        if (b.length < 10) return;
+        const big = b.readBigUInt64BE(2);
+        if (big > BigInt(MAX_FRAME)) { this.socket.destroy(); return; }
+        len = Number(big); off = 10;
+      }
+      if (!masked) { this.socket.destroy(); return; } // a client must mask (RFC 6455 §5.1)
+      if (b.length < off + 4 + len) return;
+      const mask = b.subarray(off, off + 4);
+      const payload = Buffer.from(b.subarray(off + 4, off + 4 + len));
+      for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i & 3];
+      this.buf = b.subarray(off + 4 + len);
+      if (op === 0x2 || op === 0x0) { if (payload.length && !this.push(payload)) this.socket.pause(); }
+      else if (op === 0x1) this.emit('text', payload.toString('utf8'));
+      else if (op === 0x9) this.frame(0xa, payload);
+      else if (op === 0x8) { this.frame(0x8, Buffer.alloc(0)); this.socket.end(); return; }
+    }
+  }
+
+  frame(op, payload) {
+    if (this.socket.destroyed) return true;
+    const n = payload.length;
+    let head;
+    if (n < 126) head = Buffer.from([0x80 | op, n]);
+    else if (n < 65536) { head = Buffer.alloc(4); head[0] = 0x80 | op; head[1] = 126; head.writeUInt16BE(n, 2); }
+    else { head = Buffer.alloc(10); head[0] = 0x80 | op; head[1] = 127; head.writeBigUInt64BE(BigInt(n), 2); }
+    this.socket.write(head);
+    return this.socket.write(payload);
+  }
+
+  sendText(s) { this.frame(0x1, Buffer.from(s)); }
+  ping() { this.frame(0x9, Buffer.alloc(0)); }
+  _read() { this.socket.resume(); }
+  _write(chunk, enc, cb) { if (this.frame(0x2, chunk)) cb(); else this.socket.once('drain', () => cb()); }
+  _final(cb) { this.frame(0x8, Buffer.alloc(0)); this.socket.end(); cb(); }
+  _destroy(err, cb) { this.socket.destroy(); cb(err); }
+}
+
+/** Completes a computer's WebSocket handshake; null (after answering) if it isn't one. */
+function acceptWebSocket(req, socket, head) {
+  const key = req.headers['sec-websocket-key'];
+  if (String(req.headers.upgrade || '').toLowerCase() !== 'websocket' || !key) {
+    rawResponse(socket, 400, 'Bad Request', {}, '{"error":"websocket expected"}');
+    return null;
+  }
+  const accept = crypto.createHash('sha1').update(key + WS_GUID).digest('base64');
+  socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+  return new WsLink(socket, head);
+}
+
+/**
+ * Each connected computer holds a control WebSocket. To reach it, the relay sends {"t":"open"}; the computer
+ * opens a tunnel WebSocket to /api/relay/tunnel/<nonce>, and that carries one viewer connection's raw bytes
+ * (an HTTP request, or a WebSocket session) exactly as if the viewer had connected to the computer.
+ */
+export class Relay {
+  constructor() {
+    this.hosts = new Map();    // relayId -> { link, computerId, name, since, tunnels }
+    this.pending = new Map();  // nonce -> { relayId, resolve }
+  }
+
+  online(relayId) { return !!relayId && this.hosts.has(relayId); }
+
+  attach(relayId, computerId, name, link) {
+    const old = this.hosts.get(relayId);
+    if (old) old.link.destroy(); // reconnected (e.g. after a network change): the newest connection wins
+    const h = { link, computerId, name, since: Date.now(), tunnels: 0 };
+    this.hosts.set(relayId, h);
+    link.socket.setKeepAlive(true, 15_000);
+    link.resume(); // nothing flows on the control link's byte stream
+    const ping = setInterval(() => {
+      if (Date.now() - link.lastHeard > 75_000) { link.destroy(); return; }
+      link.ping();
+    }, 25_000);
+    ping.unref();
+    link.on('close', () => {
+      clearInterval(ping);
+      if (this.hosts.get(relayId) === h) { this.hosts.delete(relayId); log(`relay: '${name}' (${relayId}) disconnected`); }
+    });
+    link.on('error', () => link.destroy());
+    link.sendText(JSON.stringify({ t: 'hello', relayId, ping: 25 }));
+    log(`relay: '${name}' (${relayId}) connected`);
+  }
+
+  detachComputer(computerId) {
+    for (const h of this.hosts.values()) if (h.computerId === computerId) h.link.destroy();
+  }
+
+  /** Asks the computer for a tunnel; resolves with it (a duplex byte stream). */
+  openTunnel(relayId, clientIp, timeoutMs = 10_000) {
+    const h = this.hosts.get(relayId);
+    if (!h) return Promise.reject(Object.assign(new Error('offline'), { status: 503 }));
+    if (h.tunnels >= 64) return Promise.reject(Object.assign(new Error('busy'), { status: 503 }));
+    const nonce = crypto.randomBytes(18).toString('base64url');
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(nonce);
+        reject(Object.assign(new Error('the computer didn\'t answer'), { status: 504 }));
+      }, timeoutMs);
+      this.pending.set(nonce, {
+        resolve: link => {
+          clearTimeout(timer);
+          h.tunnels++;
+          link.once('close', () => { h.tunnels--; });
+          link.on('error', () => link.destroy());
+          resolve(link);
+        },
+      });
+      h.link.sendText(JSON.stringify({ t: 'open', id: nonce, client: clientIp }));
+    });
+  }
+
+  /** The computer's end of a tunnel arrived. */
+  acceptTunnel(nonce, req, socket, head) {
+    const p = this.pending.get(nonce);
+    if (!p) { rawResponse(socket, 404, 'Not Found'); return; }
+    this.pending.delete(nonce);
+    const link = acceptWebSocket(req, socket, head);
+    if (link) p.resolve(link);
+  }
+}
+
 // ------------------------------------------------------------------------------------------------- the API
 
 export function createApp({ store, now = () => Date.now() }) {
   const limiter = new Limiter();
+  const relay = new Relay();
   const pendingTotp = new Map(); // accountId -> secret awaiting verification
 
   const signupOpen = () => SIGNUP === 'open' || (SIGNUP === 'first' && store.data.accounts.length === 0);
@@ -262,7 +439,9 @@ export function createApp({ store, now = () => Date.now() }) {
     const seen = c.lastSeen ? Date.parse(c.lastSeen) : 0;
     return {
       id: c.id, hostId: c.hostId, name: c.name, os: c.os, osVersion: c.osVersion, version: c.version,
-      urls: c.urls || [], tailscale: c.tailscale || null, online: now() - seen < ONLINE_S * 1000, lastSeen: c.lastSeen,
+      urls: c.urls || [], tailscale: c.tailscale || null, lastSeen: c.lastSeen,
+      online: now() - seen < ONLINE_S * 1000 || relay.online(c.relayId),
+      relayId: RELAY ? c.relayId || null : null, relayOnline: RELAY && relay.online(c.relayId),
       spki: c.spki || null, fingerprint: c.fingerprint || null, ca: c.ca || null,
       token: computerToken(store, viewer, c), viewOnly: !!viewer.viewOnly,
     };
@@ -270,7 +449,10 @@ export function createApp({ store, now = () => Date.now() }) {
 
   function removeDevice(dev) {
     store.data.devices = store.data.devices.filter(d => d.id !== dev.id);
-    if (dev.kind === 'computer') store.data.computers = store.data.computers.filter(c => c.id !== dev.id);
+    if (dev.kind === 'computer') {
+      store.data.computers = store.data.computers.filter(c => c.id !== dev.id);
+      relay.detachComputer(dev.id);
+    }
   }
 
   async function login(req, body, kind) {
@@ -294,7 +476,7 @@ export function createApp({ store, now = () => Date.now() }) {
   }
 
   const routes = {
-    'GET /api/info': () => ({ service: 'headroom-account-server', name: NAME, version: VERSION, signup: signupOpen(), firstAccount: store.data.accounts.length === 0 }),
+    'GET /api/info': () => ({ service: 'headroom-account-server', name: NAME, version: VERSION, signup: signupOpen(), firstAccount: store.data.accounts.length === 0, relay: RELAY }),
 
     'POST /api/account/register': async (req) => {
       if (!signupOpen()) fail(403, 'signup-closed', { message: 'New accounts are created by the administrator of this server.' });
@@ -419,10 +601,128 @@ export function createApp({ store, now = () => Date.now() }) {
     }],
   ];
 
-  return async function handle(req, res) {
+  // ----------------------------------------------------------------------------------------------- relay
+
+  /** The computer behind /r/<relayId>/…, or an error to answer with. */
+  function relayTarget(url) {
+    const m = /^\/r\/(\d{9})(\/.*)?$/.exec(url.pathname);
+    if (!m) return null;
+    const [, relayId, rest = '/'] = m;
+    if (!RELAY) return { error: [404, 'relay-off'] };
+    if (!RELAYED_PATHS.test(rest)) return { error: [403, 'not-relayed', 'Only sessions and file transfers go through the relay.'] };
+    if (!relay.online(relayId)) {
+      const known = store.data.computers.some(c => c.relayId === relayId);
+      return { error: known ? [503, 'offline', 'That computer isn\'t connected right now.'] : [404, 'unknown-id', 'No computer has that ID.'] };
+    }
+    return { relayId, path: rest + url.search };
+  }
+
+  /** Request headers as the computer should see them: hop-by-hop ones dropped, the viewer's address added. */
+  function forwardHeaders(req, ip) {
+    const out = {};
+    for (let i = 0; i < req.rawHeaders.length; i += 2) {
+      const k = req.rawHeaders[i], lk = k.toLowerCase();
+      if (HOP_BY_HOP.has(lk) || lk.startsWith('x-headroom-')) continue;
+      out[k] = req.rawHeaders[i + 1];
+    }
+    out['X-Headroom-Client'] = ip;
+    return out;
+  }
+
+  async function proxyRequest(req, res, target) {
+    const ip = clientIp(req);
+    let tunnel;
+    try {
+      tunnel = await relay.openTunnel(target.relayId, ip);
+    } catch (e) {
+      const body = JSON.stringify({ error: e.status === 504 ? 'timeout' : 'offline', message: e.message });
+      res.writeHead(e.status || 502, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(body);
+      return;
+    }
+    const preq = http.request({
+      createConnection: () => tunnel, setHost: false, // no agent: then Node uses createConnection
+      method: req.method, path: target.path, headers: { Host: 'relay', ...forwardHeaders(req, ip), Connection: 'close' },
+    });
+    preq.on('response', pres => {
+      const h = {};
+      for (const [k, v] of Object.entries(pres.headers)) if (!HOP_BY_HOP.has(k) && k !== 'transfer-encoding') h[k] = v;
+      res.writeHead(pres.statusCode, h);
+      pres.pipe(res);
+    });
+    preq.on('error', e => {
+      if (process.env.RELAY_DEBUG) console.error('relay proxy error', e);
+      if (!res.headersSent) { res.writeHead(502, { 'Content-Type': 'application/json' }); res.end('{"error":"relay"}'); } else res.destroy();
+    });
+    res.on('close', () => tunnel.destroy());
+    req.pipe(preq);
+  }
+
+  /** HTTP upgrades: computers' control and tunnel connections, and viewers' WebSockets to /r/<id>/ws. */
+  async function upgrade(req, socket, head) {
+    socket.on('error', () => socket.destroy());
+    const url = new URL(req.url, 'http://x');
+    const proto = String(req.headers.upgrade || '').toLowerCase();
+    try {
+      if (url.pathname === '/api/relay/control') {
+        if (!RELAY) return rawResponse(socket, 404, 'Not Found', {}, '{"error":"relay-off"}');
+        const { dev, account } = authenticate(req, 'computer');
+        let c = store.computer(dev.id);
+        if (!c) { c = { id: dev.id, accountId: account.id, name: dev.name }; store.data.computers.push(c); }
+        c.hostId ||= str(req.headers['x-headroom-host-id'], 64) || undefined;
+        if (!c.relayId) {
+          // Like an AnyDesk ID, a computer keeps its Headroom ID if it leaves the account and joins again.
+          const key = c.hostId && `${account.id}:${c.hostId}`;
+          const known = key && store.data.relayIds?.[key];
+          const taken = id => store.data.computers.some(x => x !== c && x.relayId === id);
+          c.relayId = known && !taken(known) ? known : newRelayId(taken);
+          if (key) (store.data.relayIds ||= {})[key] = c.relayId;
+          store.save();
+        }
+        const link = acceptWebSocket(req, socket, head);
+        if (link) relay.attach(c.relayId, c.id, c.name || dev.name, link);
+        return;
+      }
+      const tm = /^\/api\/relay\/tunnel\/([\w-]{20,40})$/.exec(url.pathname);
+      if (tm) return relay.acceptTunnel(tm[1], req, socket, head);
+      const target = relayTarget(url);
+      if (target && proto === 'websocket') {
+        if (target.error) return rawResponse(socket, target.error[0], 'Error', {}, JSON.stringify({ error: target.error[1] }));
+        const ip = clientIp(req);
+        const tunnel = await relay.openTunnel(target.relayId, ip).catch(e => { rawResponse(socket, e.status || 502, 'Unavailable'); return null; });
+        if (!tunnel) return;
+        const lines = [`GET ${target.path} HTTP/1.1`, 'Host: relay', 'Connection: Upgrade', 'Upgrade: websocket'];
+        for (const [k, v] of Object.entries(forwardHeaders(req, ip))) lines.push(`${k}: ${v}`);
+        tunnel.write(lines.join('\r\n') + '\r\n\r\n');
+        if (head?.length) tunnel.write(head);
+        socket.setNoDelay(true);
+        socket.pipe(tunnel).pipe(socket);
+        const close = () => { socket.destroy(); tunnel.destroy(); };
+        for (const s2 of [socket, tunnel]) { s2.on('close', close); s2.on('end', close); s2.on('error', close); }
+        return;
+      }
+      rawResponse(socket, 404, 'Not Found');
+    } catch (e) {
+      const status = e instanceof HttpError ? e.status : 500;
+      if (status === 500) console.error(e);
+      rawResponse(socket, status, 'Error', {}, JSON.stringify(e instanceof HttpError ? e.body : { error: 'server error' }));
+    }
+  }
+
+  async function handle(req, res) {
     const url = new URL(req.url, 'http://x');
     const headers = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY' };
     for (const [k, v] of Object.entries(headers)) res.setHeader(k, v);
+    const target = relayTarget(url);
+    if (target) {
+      if (target.error) {
+        const [status, error, message] = target.error;
+        res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ error, message }));
+        return;
+      }
+      return proxyRequest(req, res, target);
+    }
     if (url.pathname.startsWith('/api/')) {
       // Bearer tokens, no cookies: any origin may call the API (the web app is often served by a computer).
       res.setHeader('Cache-Control', 'no-store');
@@ -453,7 +753,11 @@ export function createApp({ store, now = () => Date.now() }) {
     if ((req.method === 'GET' || req.method === 'HEAD') && serveStatic(req, res)) return;
     res.writeHead(404, { 'Content-Type': 'text/plain' });
     res.end('not found');
-  };
+  }
+
+  handle.upgrade = upgrade;
+  handle.relay = relay;
+  return handle;
 }
 
 // An existing hash to verify against when the username doesn't exist, so timing doesn't reveal accounts.
@@ -533,12 +837,14 @@ async function main() {
   const server = tls
     ? https.createServer({ cert: fs.readFileSync(env.TLS_CERT), key: fs.readFileSync(env.TLS_KEY) }, handler)
     : http.createServer(handler);
+  server.on('upgrade', handler.upgrade);
   server.headersTimeout = 20_000;
-  server.requestTimeout = 30_000;
+  server.requestTimeout = 0; // relayed uploads and downloads can take a while; headersTimeout still guards slow clients
   server.listen(PORT, BIND, () => {
     log(`Headroom Account Server ${VERSION} on ${tls ? 'https' : 'http'}://${BIND}:${PORT}/ — data ${DATA_DIR}${WEB_ROOT ? `, web app ${WEB_ROOT}` : ''}`);
     log(`sign-up: ${SIGNUP === 'first' ? (store.data.accounts.length ? 'closed (an account exists; use add-user)' : 'open for the first account') : SIGNUP}`);
     if (!tls) log('serving plain HTTP: put it behind HTTPS (a reverse proxy, or TLS_CERT/TLS_KEY) before using it beyond this machine');
+    log(`relay: ${RELAY ? 'on — computers in an account are reachable at /r/<Headroom ID>/' : 'off'}`);
   });
   const stop = () => { store.save(); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 2000).unref(); };
   process.on('SIGINT', stop);
