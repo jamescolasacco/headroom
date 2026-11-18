@@ -57,6 +57,8 @@ jobs:
           echo "the host or the account server didn't start"; cat "$RUNNER_TEMP/host.log" "$RUNNER_TEMP/accounts.log"; exit 1
       - name: Accounts check
         run: node tools/account-check.mjs --account=http://127.0.0.1:8780 --username=ci-test --password=ci-password-123 --register
+      - name: Relay and remote support check
+        run: node tools/relay-check.mjs --account=http://127.0.0.1:8780 --username=ci-test --password=ci-password-123
       - name: Protocol check
         run: node tools/protocol-check.mjs --url=http://127.0.0.1:7080 --seconds=4 --out="$RUNNER_TEMP/check.h264"
       - name: Host log
@@ -91,7 +93,7 @@ jobs:
           Compress-Archive -Path dist/Headroom -DestinationPath dist/release/Headroom-Server-Windows-x64.zip
           Compress-Archive -Path dist/HeadroomViewer -DestinationPath dist/release/Headroom-Viewer-Windows-x64.zip
           Get-ChildItem dist/release | Format-Table Name, Length
-      - name: Accounts check and protocol check
+      - name: Accounts, relay and protocol checks
         # One step: on Windows runners, processes started in a step end with it.
         shell: pwsh
         run: |
@@ -108,6 +110,10 @@ jobs:
           if ($up) {
             node tools/account-check.mjs --account=http://127.0.0.1:8780 --username=ci-test --password=ci-password-123 --register
             $code = $LASTEXITCODE
+            # Video can't stream on a runner without a desktop, so the relay check's streaming step is informational
+            # here; everything else in it must pass.
+            node tools/relay-check.mjs --account=http://127.0.0.1:8780 --username=ci-test --password=ci-password-123 --frames=0
+            if ($LASTEXITCODE -ne 0) { $code = $LASTEXITCODE }
             # A hosted runner may have no desktop to capture: this shows how far the stream gets, without failing the build.
             node tools/protocol-check.mjs --url=http://127.0.0.1:7080 --seconds=4 --out="$t\check.h264"
             Write-Host "protocol-check exit code: $LASTEXITCODE (informational)"
