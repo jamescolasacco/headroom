@@ -243,7 +243,8 @@ function newRelayId(taken) {
 
 function rawResponse(socket, status, reason, headers = {}, body = '') {
   const lines = [`HTTP/1.1 ${status} ${reason}`, 'Connection: close', ...Object.entries(headers).map(([k, v]) => `${k}: ${v}`)];
-  if (body) lines.push(`Content-Type: application/json`, `Content-Length: ${Buffer.byteLength(body)}`);
+  // Always a length, even for no body: proxies (cloudflared, nginx) treat a length-less answer as broken (502).
+  lines.push(...(body ? ['Content-Type: application/json'] : []), `Content-Length: ${Buffer.byteLength(body)}`);
   socket.end(lines.join('\r\n') + '\r\n\r\n' + body);
 }
 
