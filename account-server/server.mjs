@@ -1309,7 +1309,8 @@ async function main() {
     log(`Headroom Account Server ${VERSION} on ${tls ? 'https' : 'http'}://${BIND}:${PORT}/ — data ${DATA_DIR}${WEB_ROOT ? `, web app ${WEB_ROOT}` : ''}`);
     log(`sign-up: ${SIGNUP}; email: ${RESEND_API_KEY && EMAIL_FROM ? `Resend, from ${EMAIL_FROM}` : DEV_MAIL ? 'testing mailbox (DEV_MAIL=1)' : 'NOT CONFIGURED (set RESEND_API_KEY and EMAIL_FROM): codes are only written to this log'}`);
     log(`human check: ${TURNSTILE_SECRET && TURNSTILE_SITEKEY ? 'Cloudflare Turnstile' : 'off (set TURNSTILE_SITEKEY and TURNSTILE_SECRET)'}`);
-    if (!tls) log('serving plain HTTP: put it behind HTTPS (a reverse proxy, or TLS_CERT/TLS_KEY) before using it beyond this machine');
+    // Only worth saying when it's reachable directly: on loopback it sits behind a tunnel or proxy that adds HTTPS.
+    if (!tls && !['127.0.0.1', 'localhost', '::1'].includes(BIND)) log('serving plain HTTP: put it behind HTTPS (a reverse proxy, or TLS_CERT/TLS_KEY) before using it beyond this machine');
     log(`relay: ${RELAY ? 'on' : 'off'}`);
   });
   const pidFile = path.join(DATA_DIR, 'server.pid');
