@@ -103,10 +103,13 @@ All bodies are JSON. `Authorization: Bearer <token>` where noted. Errors: `{"err
 | GET | `/api/account/devices` | viewer | `{devices: [{id, kind, name, platform, created, lastSeen, lastAddress, viewOnly, current, online}]}` |
 | POST | `/api/account/devices/:id` | viewer | `{viewOnly?, name?}` |
 | DELETE | `/api/account/devices/:id` | viewer | remove a device or computer |
-| GET | `/api/account/computers` | viewer | `{computers: [{id, hostId, name, os, osVersion, version, urls, tailscale, online, lastSeen, spki, fingerprint, ca, token, viewOnly}]}` |
+| GET | `/api/account/computers` | viewer | `{computers: [{id, hostId, name, os, osVersion, version, urls, tailscale, online, lastSeen, spki, fingerprint, ca, token, viewOnly, relayId, relayOnline}]}` |
 | POST | `/api/account/password` | viewer | `{current, password}` |
 | POST | `/api/account/totp/setup` | viewer | → `{secret, uri}`; `/totp/enable {code}`; `/totp/disable {password}` |
 | POST | `/api/computer/heartbeat` | computer | `{hostId, name, os, osVersion, version, urls, tailscale, spki, fingerprint, ca}` → `{computerId, account, devices: [{id, name, tokenHash, viewOnly}], interval}` |
+
+The relay's endpoints (`/api/relay/control`, `/api/relay/tunnel/<nonce>`, `/r/<Headroom ID>/…`) are described in
+[RELAY.md](RELAY.md).
 
 On a Headroom host, the settings page uses the loopback-only admin API: `POST /api/admin/account/join
 {server, username, password, totp?}`, `POST /api/admin/account/leave`, `POST /api/admin/account/sync`, and

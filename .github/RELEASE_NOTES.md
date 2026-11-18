@@ -1,5 +1,16 @@
 Self-hosted remote desktop for your own computers: **Headroom Server** on the computer you want to reach, **Headroom Viewer** (or the iPhone/iPad web app) on the device you use. Pair devices one by one, or run your own small account server and sign in once.
 
+## New in 0.2: from anywhere, and remote support
+
+- **Any browser, any network.** Your account server is now also a relay: computers keep an outbound connection
+  to it, so you can reach them from anywhere with no port forwarding, VPN or certificate install. Direct
+  connections are still used whenever they work.
+- **Remote support, AnyDesk-style.** Headroom Server → Remote support shows the computer's 9-digit Headroom ID and a
+  one-time code. The helper opens your account server's address in any browser, chooses **Connect with an ID**,
+  and you click **Accept**, **View only** or **Decline**.
+- Put the account server on the internet with Cloudflare Tunnel, Tailscale Funnel or a small VPS:
+  [docs/RELAY.md](https://github.com/jamescolasacco/headroom/blob/master/docs/RELAY.md).
+
 ## Install
 
 ### Mac (macOS 13 or later, Apple silicon and Intel)
@@ -28,6 +39,6 @@ No download: open your computer's Headroom address in Safari, then Share → Add
 ## Connecting
 
 - **Pairing:** Headroom Server → Pair a device shows a one-time code. In Headroom Viewer, add the computer by its address and enter the code.
-- **Accounts (optional):** run `node account-server/server.mjs` from the source (Node 20+) or its Docker image, put it behind HTTPS, join each computer in Headroom Server → Settings → Account, and sign in on your devices. See [docs/ACCOUNTS.md](https://github.com/jamescolasacco/headroom/blob/master/docs/ACCOUNTS.md).
+- **Accounts and relay (optional):** run `node account-server/server.mjs` from the source (Node 20+; on a Mac, `tools/install-account-server-macos.sh` keeps it running) or its Docker image, put it behind HTTPS, join each computer in Headroom Server → Settings → Account, and sign in on your devices. See [docs/ACCOUNTS.md](https://github.com/jamescolasacco/headroom/blob/master/docs/ACCOUNTS.md) and [docs/RELAY.md](https://github.com/jamescolasacco/headroom/blob/master/docs/RELAY.md).
 
 `SHA256SUMS.txt` lists the checksums of every download.

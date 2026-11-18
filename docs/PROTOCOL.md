@@ -24,6 +24,10 @@ JSON control messages, and binary frames carry media and input. Binary layouts a
    ```
    Error codes are `unauthorized`, `rate-limited` (with `retryAfter` in seconds) and `bad-request`.
 
+   Remote support ([RELAY.md](RELAY.md)): instead of `token`, `hello` may carry `"support": {"code", "name"}`. The
+   host may first send `{"t":"pending","message"}` while it asks the person at the computer, then `welcome` (with
+   `"resumeToken"` and `"support": true`, used as `token` to reconnect) or an error: `bad-code` or `declined`.
+
    `host.os` is `windows` or `macos`; the client adapts keyboard profiles, the shortcuts menu and the extra-keys
    bar to it. Monitor fields per host:
    - Windows: `id` is the GDI device name (`\\.\DISPLAY1`); `x`/`y`/`width`/`height` are virtual-desktop pixels.
@@ -37,7 +41,8 @@ JSON control messages, and binary frames carry media and input. Binary layouts a
      "maxWidth": 0, "maxHeight": 0, "audio": true }
    ```
 
-Tokens come from pairing (`POST /api/pair`, see §6) and are never placed in URLs.
+Tokens come from pairing (`POST /api/pair`, see §6), an account ([ACCOUNTS.md](ACCOUNTS.md)) or a support
+session, and are never placed in URLs. Through the relay, the same protocol runs under `https://<relay>/r/<Headroom ID>/`.
 
 ## 2. Video
 

@@ -48,7 +48,9 @@ To build from source instead, see [Build](#build).
 | **Audio** | System audio as Opus (Windows: WASAPI loopback; Mac: ScreenCaptureKit + AudioToolbox's encoder), with roughly 40 ms of buffering. |
 | **Displays** | Pick or cycle monitors (Ctrl+Alt+Shift+1…9 / ←→). Fit, 1:1 or Fill scaling, a resolution cap (native/1440p/1080p/720p/"this screen"), and frame-rate and bandwidth limits. |
 | **Service mode** (Windows) | Runs as a Windows service, so it works **at the sign-in screen, lock screen and UAC prompts**, starts before anyone logs in, and supports **real Ctrl+Alt+Del**. On a Mac, Headroom Server runs in your session (start it at login); the login window after a restart isn't reachable yet. |
-| **Accounts** (optional) | Your own account server (one Node.js process or Docker container): sign in once with username, password and optional two-factor, and every computer in the account is listed and connects without pairing. Remove a device once and it loses access everywhere within seconds. Traffic still goes directly to each computer. |
+| **Accounts** (optional) | Your own account server (one Node.js process or Docker container): sign in once with username, password and optional two-factor, and every computer in the account is listed and connects without pairing. Remove a device once and it loses access everywhere within seconds. |
+| **From anywhere, in any browser** | The account server is also a relay: computers keep an outbound connection to it, so you reach them from any browser on any network, with no port forwarding, VPN or certificate install. Direct connections are still used whenever they work. |
+| **Remote support** | AnyDesk-style: the computer shows its 9-digit **Headroom ID** and a one-time code; a helper with neither account nor app types both into a browser, and you **Accept / View only / Decline**. |
 | **Security** | TLS everywhere. Devices pair once (password, optional TOTP, or a one-time code) or sign in to an account; after that only a revocable 256-bit token is used, made for that one computer. Brute-force protection, view-only devices, loopback-only admin page, optional lock-on-disconnect. |
 | **Resilience** | Auto-reconnect with backoff, recovery when the app returns from the background (iOS), keep-awake during sessions, and a decoder watchdog that falls back to software decoding. |
 
@@ -196,6 +198,20 @@ Pairing works computer by computer. With an account, each device signs in once a
 Tap your account name to remove devices, make one view-only, turn on two-factor sign-in or change the password.
 Pairing keeps working alongside. Details and the trust model: [docs/ACCOUNTS.md](docs/ACCOUNTS.md).
 
+## From anywhere, and remote support
+
+Put the account server on the internet with HTTPS (Cloudflare Tunnel, Tailscale Funnel or a small VPS; see
+[docs/RELAY.md](docs/RELAY.md)) and join your computers to it at that address. Then:
+
+- **Reach your own computers** from any browser: open the account server's address, sign in, click a computer.
+  When there's no direct path, the session goes through the relay.
+- **Get help (or help someone), AnyDesk-style:** on the computer, Headroom Server → **Remote support** →
+  *Create a code*. Give the helper the 9-digit **Headroom ID** and the 6-digit code (or the link shown). They open
+  the account server's address, choose **Connect with an ID**, and you click **Accept** (or *View only*) when
+  Headroom asks. The code works once; disconnecting the session ends it for good.
+
+To keep the account server running on a Mac: `tools/install-account-server-macos.sh` (needs Node.js 20+).
+
 ## Keyboard shortcuts in a session
 
 | Keys | Action |
@@ -262,6 +278,7 @@ web/                          the client (vanilla ES modules, no build step), al
 account-server/               optional account server (Node.js, no dependencies): accounts, devices, per-computer keys
 docs/PROTOCOL.md              wire protocol (the contract for other hosts)
 docs/ACCOUNTS.md              accounts: setup, trust model, API
+docs/RELAY.md                 the relay, remote support codes, putting the account server on the internet
 tools/                        publish / install / uninstall scripts (Windows .ps1, macOS .sh), icon generator,
                               protocol-check.mjs (headless end-to-end test of any host)
 ```
