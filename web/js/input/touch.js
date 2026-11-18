@@ -11,12 +11,11 @@
 //   tap  click there       hold+release  right click      drag  left-drag (pans instead when zoomed)
 //   tap, touch+drag  left-drag (even when zoomed)        2-finger slide scroll, pinch zoom, 3-finger tap keyboard
 //
-// Tap, then touch and drag: one press-and-drag, as on a laptop's trackpad. A click and then a press on the same
-// spot would be a double-click to the computer (a file opens instead of moving, a window zooms instead of
-// following), so a tap's click waits TAP_DRAG_MS (trackpad mode; direct mode while zoomed), and a second touch near
-// it that drags takes its place. When the click has already gone out (a slower second touch, or a hold first), the
-// drag's press starts a few points along the drag from it, past where the computer would count a double click.
-// A quick second tap is a double click; a second touch held a moment that never drags adds nothing.
+// Tap, then touch and drag: one press-and-drag, as on a laptop's trackpad. A tap's click goes out the moment the
+// finger lifts: nothing waits to see what comes next. A press right after a click, on the same spot, is a double
+// click to the computer (a file opens instead of moving, a window zooms instead of following), so a drag's press
+// that soon starts a few points along the drag, past where the computer counts a double click. A quick second tap
+// is a double click; a second touch held a moment that never drags adds nothing.
 import * as P from '../protocol.js';
 
 const SLOP = 9;              // px before a touch counts as movement
@@ -24,8 +23,7 @@ const TAP_MS = 280;
 const HOLD_MS = 450;
 const DOUBLE_TAP_MS = 320;
 const DOUBLE_TAP_PX = 36;
-const TAP_DRAG_MS = 250;     // how long a tap's click waits for a second touch that drags (see the top)
-const DRAG_AFTER_TAP_MS = 350; // trackpad mode: a second touch this soon after a tap can still make it a drag
+const DRAG_AFTER_TAP_MS = 350; // trackpad mode: a touch this soon after a tap that drags is a press-and-drag
 // A drag's press this soon after a left click, and nearer to it than this many of the computer's points, starts
 // that far from it instead (see the top): past a Mac's 5 points and Windows' 2 pixels for a double-click.
 const CLICK_APART_MS = 1000, CLICK_APART_PT = 6;
@@ -42,8 +40,7 @@ export class TouchInput {
     this.mode = 'trackpad';
     this.touches = new Map();
     this.g = null;                   // current gesture state
-    this.lastTap = null;             // { t, x, y, nx, ny }
-    this.pending = null;             // a tap's click, waiting TAP_DRAG_MS: { tx, ty (where the finger was), timer }
+    this.lastTap = null;             // { t, x, y }: when and where (on the screen here) the last tap was
     this.lastPress = null;           // the last left press sent: { t, nx, ny }
     this.cursor = { nx: 0.5, ny: 0.5 };
     this.cursorLocalAt = 0;
@@ -141,28 +138,6 @@ export class TouchInput {
     this.ctx.ripple(x, y, kind);
   }
 
-  /** A left click, shown now (x, y) but sent TAP_DRAG_MS later unless a second touch (tx, ty) turns it into a drag. */
-  _deferClick(x, y, tx, ty) {
-    this.ctx.ripple(x, y, 'left');
-    this.pending = { tx, ty, timer: setTimeout(() => this._flushClick(), TAP_DRAG_MS) };
-  }
-
-  /** The waiting click goes out now (it was a click after all). */
-  _flushClick() {
-    const p = this.pending;
-    if (!p) return;
-    clearTimeout(p.timer);
-    this.pending = null;
-    this._button(0, true);
-    this._button(0, false);
-  }
-
-  /** The waiting click never happens: it became the start of a drag. */
-  _dropClick() {
-    if (this.pending) clearTimeout(this.pending.timer);
-    this.pending = null;
-  }
-
   _cursorClient() {
     const p = this.ctx.viewport.fromRemote(this.cursor.nx, this.cursor.ny);
     return p;
@@ -203,25 +178,14 @@ export class TouchInput {
         const n = this.ctx.cursor.normalized;
         if (n.nx || n.ny) this.cursor = n;
       }
-      // Right after a tap: this touch decides what the tap was (a drag starts here, or a double click), so its
-      // click keeps waiting; a touch somewhere else means it was just a click.
-      let armedDrag = false;
+      // Right after a tap, a touch near it that drags is a press-and-drag (its press: see _pressToDrag).
       const near = this.mode === 'trackpad' ? 120 : DOUBLE_TAP_PX;
-      if (this.pending) {
-        const p = this.pending;
-        if (Math.hypot(e.clientX - p.tx, e.clientY - p.ty) < near) {
-          clearTimeout(p.timer);
-          armedDrag = true;
-        } else this._flushClick();
-      } else if (this.lastTap && now - this.lastTap.t < (this.mode === 'trackpad' ? DRAG_AFTER_TAP_MS : DOUBLE_TAP_MS)) {
-        // The tap's click already went out: a drag from here is still a drag (see _pressToDrag).
-        armedDrag = Math.hypot(e.clientX - this.lastTap.x, e.clientY - this.lastTap.y) < near;
-      }
+      const armedDrag = !!this.lastTap && now - this.lastTap.t < (this.mode === 'trackpad' ? DRAG_AFTER_TAP_MS : DOUBLE_TAP_MS)
+        && Math.hypot(e.clientX - this.lastTap.x, e.clientY - this.lastTap.y) < near;
       this.g = { kind: 'pending', fingers: 1, start: now, armedDrag, moved: false, holdFired: false, lastX: e.clientX, lastY: e.clientY };
       this.g.holdTimer = setTimeout(() => this._hold(), HOLD_MS);
     } else if (this.g) {
       clearTimeout(this.g.holdTimer);
-      this._flushClick(); // a tap, then two fingers: the tap was a click
       if (this.g.kind === 'drag' || this.g.kind === 'holddrag') {
         // A second finger during a drag: finish the drag first.
         if (this.buttonDown) this._button(0, false);
@@ -261,8 +225,7 @@ export class TouchInput {
         clearTimeout(g.holdTimer);
         g.moved = true;
         if (g.holdFired || g.armedDrag) {
-          this._dropClick(); // tap, then touch and drag: one press-and-drag, not a click and a double-click
-          g.kind = 'holddrag';
+          g.kind = 'holddrag'; // hold, then drag; or tap, then touch and drag
           if (this.mode === 'touch') { const r = v.toRemote(t.sx, t.sy); this._moveTo(r.nx, r.ny); }
           this._pressToDrag(now, t.x - t.sx, t.y - t.sy);
         } else if (this.mode === 'trackpad') {
@@ -375,8 +338,7 @@ export class TouchInput {
     switch (g.kind) {
       case 'pending': {
         if (g.holdFired && g.armedDrag) {
-          // A tap, then a hold that never dragged: just the tap's click.
-          this._flushClick();
+          // A tap, then a hold that never dragged: the tap's click was all.
           this.lastTap = null;
           return;
         }
@@ -388,42 +350,26 @@ export class TouchInput {
           this.lastTap = null;
           return;
         }
-        if (dur > TAP_MS + 200) { this._flushClick(); return; }
+        if (dur > TAP_MS + 200) return;
         if (g.armedDrag && dur > TAP_MS) {
-          // A tap, then a touch held a moment that never dragged: just the tap's click, not a slow double click.
-          this._flushClick();
+          // A tap, then a touch held a moment that never dragged: the tap's click was all, not a slow double click.
           this.lastTap = null;
           return;
         }
         if (this.mode === 'trackpad') {
           const p = this._cursorClient();
-          if (g.armedDrag && this.pending) {
-            // Tap, tap: the first click now, then this one, so the computer sees a double click.
-            this._flushClick();
-            this._click(0, p.x, p.y, 'left');
-            this.lastTap = null;
-            return;
-          }
-          this._deferClick(p.x, p.y, t.sx, t.sy);
-          this.lastTap = { t: now, x: t.sx, y: t.sy };
+          this._click(0, p.x, p.y, 'left');
+          // Tap, tap: the computer counts the double click. A touch right after that just moves the pointer.
+          this.lastTap = g.armedDrag ? null : { t: now, x: t.sx, y: t.sy };
         } else {
           // Direct: a second tap near the first reuses its position so double-clicks register.
           let x = t.sx, y = t.sy;
           if (this.lastTap && now - this.lastTap.t < DOUBLE_TAP_MS && Math.hypot(x - this.lastTap.x, y - this.lastTap.y) < DOUBLE_TAP_PX) {
             x = this.lastTap.x; y = this.lastTap.y;
           }
-          if (g.armedDrag && this.pending) {
-            // Zoomed in, tap, tap: the first click now, then this one (the pointer is still where the first went).
-            this._flushClick();
-            this._click(0, x, y, 'left');
-            this.lastTap = { t: now, x, y };
-            return;
-          }
           const r = this.ctx.viewport.toRemote(x, y);
           this._moveTo(r.nx, r.ny);
-          // Zoomed in, a plain drag pans, so a tap's click waits for a possible tap-and-drag; otherwise it's instant.
-          if (this.ctx.viewport.zoomed) this._deferClick(x, y, x, y);
-          else this._click(0, x, y, 'left');
+          this._click(0, x, y, 'left');
           this.lastTap = { t: now, x, y };
         }
         return;
@@ -479,13 +425,11 @@ export class TouchInput {
     if (this.touches.size === 0) {
       if (this.g) clearTimeout(this.g.holdTimer);
       this.g = null;
-      this._flushClick(); // the system took the touch over: an earlier tap was still a click
       this._release();
     }
   }
 
   _release() {
-    this._dropClick();
     if (this.buttonDown) this._button(0, false);
     this.touches.clear();
     this._stopInertia();
