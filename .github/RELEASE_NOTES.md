@@ -1,5 +1,14 @@
 Remote desktop for your own computers, and quick help with a code: **Headroom Server** on the computer you want to reach; **Headroom Viewer**, any browser, or an iPhone/iPad on the device you use.
 
+## New in 0.4.3: download, install, and it keeps itself up to date
+
+- **Real installers.** On a Mac, open **Headroom-macOS.dmg** and drag both apps to Applications. On Windows, run **Headroom-Server-Setup.exe** and **Headroom-Viewer-Setup.exe**. No Terminal, no PowerShell.
+- **It updates itself.** Headroom Server and Headroom Viewer check for a new version every few hours and download it in the background. When it's ready they tell you (a notification, the menu-bar or tray menu, and the window); **Restart to update** swaps it in and opens it again in a few seconds. Nothing restarts on its own, so a computer you're reaching from far away never drops out from under you.
+- **Permissions stay put.** Every Mac build is now signed with Headroom's own certificate, so macOS keeps Screen Recording and Accessibility (and Little Snitch keeps its rules) across updates.
+- **Only real updates get in.** An update is installed only if its checksums are signed with Headroom's certificate, every file matches, and on a Mac the new app carries the same signature. On Windows, Headroom Server's update asks for administrator permission once (it replaces Program Files and restarts the service).
+
+**Already have 0.4.2?** Install 0.4.3 once from below (0.4.2 can't update itself). On a Mac, macOS asks for Screen Recording and Accessibility one last time, because the signature changes to Headroom's certificate; after that, updates keep them.
+
 ## New in 0.4.2: lit screens
 
 - **A look of its own.** Your computers are screens now: each one glows in its own colour while it's online and goes dark while it's off. Warm light only ever means a person is connected or asking; red means stop. A computer keeps its colour everywhere: in your list, in the session toolbar, for a guest connecting to it and in its own Headroom Server window. See [DESIGN.md](https://github.com/jamescolasacco/headroom/blob/master/DESIGN.md).
@@ -37,25 +46,22 @@ Updating on a Mac: the apps aren't notarized, so macOS asks for **Screen Recordi
 
 ### Mac (macOS 13 or later, Apple silicon and Intel)
 
-Paste this into Terminal:
+1. Download **Headroom-macOS.dmg** below and open it.
+2. Drag **Headroom Server** and **Headroom Viewer** onto **Applications**.
+3. Open **Headroom Server** from Applications. The first time, macOS says it can't check it (Headroom isn't notarized by Apple): click **Done**, open **System Settings → Privacy & Security**, scroll down to *"Headroom Server" was blocked*, click **Open Anyway** and confirm. Headroom Viewer asks the same the first time you open it.
+4. Allow **Screen Recording** and **Accessibility** when Headroom Server asks, sign in under **Account**, and turn on **Start at login** in **Settings**.
 
-```bash
-curl -fsSL https://github.com/jamescolasacco/headroom/releases/latest/download/get-macos.sh | bash
-```
-
-That installs Headroom Server and Headroom Viewer into /Applications and starts Headroom Server in the menu bar. Allow **Screen Recording** and **Accessibility** when it asks. To install only the viewer, add `-s -- --only viewer` after `bash`.
-
-Prefer to download it yourself? Get **Headroom-macOS.zip** below, unzip it, then run `bash install.sh` in Terminal from that folder. The apps aren't notarized by Apple, so opening them straight from a downloaded zip makes macOS refuse; `install.sh` clears that flag on the installed copies.
+From then on, both update themselves. (Terminal fans: `curl -fsSL https://github.com/jamescolasacco/headroom/releases/latest/download/get-macos.sh | bash` installs both without the Open Anyway step.)
 
 ### Windows 10/11 (x64)
 
-- **Headroom Server:** download **Headroom-Server-Windows-x64.zip**, extract it, then in that folder run `powershell -ExecutionPolicy Bypass -File install.ps1` (it asks for administrator rights). It installs a service, so the lock screen, sign-in screen, UAC prompts and Ctrl+Alt+Del work remotely.
-- **Headroom Viewer:** download **Headroom-Viewer-Windows-x64.zip**, extract it, then run `powershell -ExecutionPolicy Bypass -File install-viewer.ps1` (no administrator rights needed).
+- **Headroom Server** (the PC you want to reach): download **Headroom-Server-Setup.exe** and run it. It installs a service, so the lock screen, sign-in screen, UAC prompts and Ctrl+Alt+Del work remotely, and puts Headroom Server in the notification area.
+- **Headroom Viewer** (where you connect from): download **Headroom-Viewer-Setup.exe** and run it (no administrator rights needed).
 
-The builds aren't code-signed, so SmartScreen may warn: choose **More info → Run anyway**.
+The installers aren't code-signed, so Windows may say it protected your PC: choose **More info → Run anyway**. Both update themselves afterwards. The .zip files hold the same apps for installing by hand (`install.ps1`, `install-viewer.ps1`).
 
 ### iPhone / iPad, or any browser
 
 Nothing to install: open https://relay.colasac.co. In Safari, Share → Add to Home Screen gives a full-screen app.
 
-`SHA256SUMS.txt` lists the checksums of every download.
+`SHA256SUMS.txt` lists the checksums of every download; `SHA256SUMS.txt.sig` is their signature with Headroom's certificate (`assets/headroom-signing.cer` in the repository).
