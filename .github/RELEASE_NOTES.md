@@ -1,5 +1,17 @@
 Remote desktop for your own computers, and quick help with a code: **Headroom Server** on the computer you want to reach; **Headroom Viewer**, any browser, or an iPhone/iPad on the device you use.
 
+## New in 0.4.2: lit screens
+
+- **A look of its own.** Your computers are screens now: each one glows in its own colour while it's online and goes dark while it's off. Warm light only ever means a person is connected or asking; red means stop. A computer keeps its colour everywhere: in your list, in the session toolbar, for a guest connecting to it and in its own Headroom Server window. See [DESIGN.md](https://github.com/jamescolasacco/headroom/blob/master/DESIGN.md).
+- **Tap a screen to go in.** The screen you tap grows into the session and shrinks back into its tile when you leave. While it connects, it wakes up in that computer's light, with **Cancel**.
+- **Codes on a lit screen:** "Got a code?" on the website is a screen you type the code into, and Headroom Server shows your code big on this computer's own screen, with the QR code beside it.
+- **Know which computer you're on:** the session toolbar shows its little lit screen and its name.
+- **New passwords are typed twice** when you create an account, reset a forgotten password or change it, so a typo can't lock you out. The account server's `add-user` and `reset-password` commands ask twice too.
+- **New icon and type** for the apps, the menu bar and tray, and the website (Funnel Display and Funnel Sans).
+- **Smaller fixes:** "Password changed" stays shown after the lists reload, and after a guest session you're back on the code box.
+
+Updating on a Mac: the apps aren't notarized, so macOS asks for **Screen Recording** and **Accessibility** again after an update, and firewalls such as Little Snitch see it as a new app to allow.
+
 ## New in 0.4.1: a new look, and everything easier to use
 
 - **A new look** for the website and Headroom Server's window: a quiet studio console at night, warm paper by day, and type designed so codes can't be misread (0/O, 1/l/I). Colour now only means something: green is ready, amber means a person is connected or asking, red is stop. See [DESIGN.md](https://github.com/jamescolasacco/headroom/blob/master/DESIGN.md).
