@@ -6,9 +6,13 @@
 #   tools/build-macos.sh [--only server|viewer] [--universal] [--debug]
 #
 # Signing: ad-hoc by default. macOS ties Screen Recording / Accessibility grants to the code signature, and an
-# ad-hoc signature changes with every build — so after rebuilding, macOS asks again. For a stable identity set
-# HEADROOM_SIGN_IDENTITY to a code-signing certificate's name (a "Developer ID Application: …" certificate, or a
-# self-signed one created in Keychain Access → Certificate Assistant → Create a Certificate… → Code Signing).
+# ad-hoc signature changes with every build — so after rebuilding (or updating), macOS asks again. For a stable
+# identity set HEADROOM_SIGN_IDENTITY to a code-signing identity's name or SHA-1 hash: Headroom's own self-signed
+# one (tools/make-signing-cert.sh; the release workflow signs with it) or a "Developer ID Application: …" one.
+#
+# Updates: the apps check https://github.com/$HEADROOM_UPDATE_REPO/releases/latest (default jamescolasacco/headroom),
+# and when assets/headroom-signing.cer exists (or HEADROOM_SIGNING_CERT points at one) they carry it and install
+# only releases signed with it.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -31,6 +35,13 @@ DIST="$ROOT/dist"
 mkdir -p "$DIST"
 ICON="$ROOT/assets/macos/AppIcon.icns"
 [ -f "$ICON" ] || python3 "$ROOT/tools/make_icons.py" --macos
+UPDATE_REPO="${HEADROOM_UPDATE_REPO:-jamescolasacco/headroom}"
+SIGNING_CERT="${HEADROOM_SIGNING_CERT:-$ROOT/assets/headroom-signing.cer}"
+
+# The certificate updates must be signed with, inside the app (when there is one).
+add_cert() { # app
+  if [ -f "$SIGNING_CERT" ]; then cp "$SIGNING_CERT" "$1/Contents/Resources/update-signing.cer"; fi
+}
 
 # Builds products of a package; echoes the directory holding the binaries (lipo'd for --universal).
 build() {
@@ -80,7 +91,9 @@ plist() { # file, then key/value pairs (values starting with ! are raw plist)
 sign() { # path...
   local id="${HEADROOM_SIGN_IDENTITY:--}"
   local opts=(--force --timestamp=none --sign "$id")
-  [ "$id" != "-" ] && opts=(--force --options runtime --timestamp --sign "$id")
+  # A Developer ID signature is notarizable: hardened runtime and a secure timestamp. Ad-hoc and self-signed ones
+  # (Headroom's own certificate) need neither.
+  if [[ "$id" == "Developer ID"* ]]; then opts=(--force --options runtime --timestamp --sign "$id"); fi
   codesign "${opts[@]}" "$@"
 }
 
@@ -110,7 +123,9 @@ if [ "$ONLY" != "viewer" ]; then
     NSHighResolutionCapable '!<true/>' \
     NSPrincipalClass NSApplication \
     NSLocalNetworkUsageDescription "Headroom Server checks in with your Headroom account server when it's on this network." \
-    NSHumanReadableCopyright "Headroom — self-hosted remote desktop"
+    NSHumanReadableCopyright "Headroom — self-hosted remote desktop" \
+    HeadroomUpdateRepo "$UPDATE_REPO"
+  add_cert "$APP"
   xattr -cr "$APP"
   sign "$APP/Contents/MacOS/headroom"
   sign "$APP"
@@ -144,7 +159,9 @@ if [ "$ONLY" != "server" ]; then
     NSHighResolutionCapable '!<true/>' \
     NSPrincipalClass NSApplication \
     NSLocalNetworkUsageDescription "Headroom Viewer connects to your computers on this network." \
-    NSHumanReadableCopyright "Headroom — self-hosted remote desktop"
+    NSHumanReadableCopyright "Headroom — self-hosted remote desktop" \
+    HeadroomUpdateRepo "$UPDATE_REPO"
+  add_cert "$APP"
   xattr -cr "$APP"
   sign "$APP"
   codesign --verify --strict "$APP"

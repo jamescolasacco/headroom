@@ -61,10 +61,51 @@ jobs:
             host-macos/.build
             viewer-macos/.build
           key: spm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('host-macos/Package.resolved', 'host-macos/Package.swift', 'viewer-macos/Package.swift') }}
+      - name: Signing certificate
+        # Headroom's own certificate (tools/make-signing-cert.sh): every build signed by the same key, so macOS keeps
+        # Screen Recording and Accessibility across updates. Without the secrets the signature is ad-hoc; a tag build
+        # then fails if the repository has a certificate, because the apps would refuse that release.
+        env:
+          P12: ${{ secrets.MACOS_SIGN_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
+        run: |
+          if [ -z "$P12" ]; then
+            if [[ "$GITHUB_REF" == refs/tags/v* && -f assets/headroom-signing.cer ]]; then
+              echo "::error::MACOS_SIGN_P12 isn't set, but assets/headroom-signing.cer exists: run tools/make-signing-cert.sh"; exit 1
+            fi
+            echo "No signing certificate: ad-hoc signature (macOS asks for its permissions again after each update)."
+            exit 0
+          fi
+          KC="$RUNNER_TEMP/headroom-signing.keychain-db"
+          KCPW="$(openssl rand -hex 24)"
+          security create-keychain -p "$KCPW" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KCPW" "$KC"
+          (umask 077; printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/signing.p12")
+          security import "$RUNNER_TEMP/signing.p12" -k "$KC" -P "$P12_PASSWORD" -T /usr/bin/codesign > /dev/null
+          rm -f "$RUNNER_TEMP/signing.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KCPW" "$KC" > /dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          # A self-signed certificate isn't trusted by macOS, so codesign takes it by its SHA-1.
+          ID="$(security find-identity -p codesigning "$KC" | awk '/\)/ {print $2; exit}')"
+          [ -n "$ID" ] || { echo "::error::MACOS_SIGN_P12 holds no code-signing identity"; exit 1; }
+          if [ -f assets/headroom-signing.cer ]; then
+            want="$(openssl x509 -inform DER -in assets/headroom-signing.cer -noout -fingerprint -sha1 | cut -d= -f2 | tr -d :)"
+            [ "$want" = "$ID" ] || { echo "::error::MACOS_SIGN_P12 isn't the certificate in assets/headroom-signing.cer"; exit 1; }
+          fi
+          echo "HEADROOM_SIGN_IDENTITY=$ID" >> "$GITHUB_ENV"
+          echo "Signing with the certificate $ID"
       - name: Build Headroom Server and Headroom Viewer
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then export HEADROOM_VERSION="${GITHUB_REF_NAME#v}"; fi
           tools/build-macos.sh --universal
+      - name: Check the signatures
+        if: env.HEADROOM_SIGN_IDENTITY != ''
+        run: |
+          for app in "dist/Headroom Server.app" "dist/Headroom Viewer.app"; do
+            codesign -dr - "$app" 2>&1 | tee /dev/stderr | grep -q 'certificate root = H"' || { echo "::error::$app isn't signed with the certificate"; exit 1; }
+            if [ -f assets/headroom-signing.cer ]; then cmp "$app/Contents/Resources/update-signing.cer" assets/headroom-signing.cer; fi
+          done
       - name: Package
         run: tools/package-macos.sh
       - name: Start the host (test pattern) and an account server
@@ -167,9 +208,29 @@ jobs:
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
+          P12: ${{ secrets.MACOS_SIGN_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
         run: |
           cd release
+          # What the apps' updaters read first: the version, and which download is whose.
+          printf '{"version":"%s","mac":"Headroom-macOS.zip","windowsServer":"Headroom-Server-Windows-x64.zip","windowsViewer":"Headroom-Viewer-Windows-x64.zip","release":"https://github.com/%s/releases/tag/%s"}\n' \
+            "${GITHUB_REF_NAME#v}" "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" > update.json
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
+          if [ -n "$P12" ]; then
+            # Signed with Headroom's certificate: the apps install only releases whose checksums carry this signature.
+            (umask 077; printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/signing.p12")
+            (umask 077; openssl pkcs12 -in "$RUNNER_TEMP/signing.p12" -nocerts -nodes -passin env:P12_PASSWORD -out "$RUNNER_TEMP/key.pem")
+            openssl pkcs12 -in "$RUNNER_TEMP/signing.p12" -clcerts -nokeys -passin env:P12_PASSWORD | openssl x509 -outform DER -out "$RUNNER_TEMP/cert.der"
+            if [ -f ../assets/headroom-signing.cer ] && ! cmp -s "$RUNNER_TEMP/cert.der" ../assets/headroom-signing.cer; then
+              echo "::error::MACOS_SIGN_P12 isn't the certificate in assets/headroom-signing.cer"; exit 1
+            fi
+            openssl dgst -sha256 -sign "$RUNNER_TEMP/key.pem" -out SHA256SUMS.txt.sig SHA256SUMS.txt
+            openssl x509 -inform DER -in "$RUNNER_TEMP/cert.der" -pubkey -noout > "$RUNNER_TEMP/pub.pem"
+            openssl dgst -sha256 -verify "$RUNNER_TEMP/pub.pem" -signature SHA256SUMS.txt.sig SHA256SUMS.txt
+            rm -f "$RUNNER_TEMP/key.pem" "$RUNNER_TEMP/signing.p12"
+          elif [ -f ../assets/headroom-signing.cer ]; then
+            echo "::error::MACOS_SIGN_P12 isn't set, but assets/headroom-signing.cer exists: the apps would refuse this release"; exit 1
+          fi
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "Headroom ${GITHUB_REF_NAME#v}" \
             --notes-file ../.github/RELEASE_NOTES.md *
