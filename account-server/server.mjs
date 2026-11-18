@@ -24,7 +24,7 @@ import readline from 'node:readline';
 import { Duplex } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
-const VERSION = '0.4.0';
+const VERSION = '0.4.1';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const env = process.env;
 const PORT = Number(env.PORT || 8780);
@@ -297,6 +297,7 @@ const TYPES = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml',
   '.png': 'image/png', '.ico': 'image/x-icon', '.wasm': 'application/wasm', '.txt': 'text/plain; charset=utf-8',
+  '.woff2': 'font/woff2',
 };
 
 function serveStatic(req, res) {
@@ -790,6 +791,25 @@ export function createApp({ store, now = () => Date.now(), mail = sendMail }) {
       const account = store.accountByEmail(email);
       if (account && !account.disabled) startCode(`reset:${account.id}`, email, 'Your Headroom password reset code', 'Use this code to choose a new password.');
       return { ok: true }; // the same whether or not the account exists
+    },
+
+    // "Send a new code": only for a sign-up or reset from the last 15 minutes (which passed the human check), at
+    // most 3 times; the earlier code stops working. The same answer whether or not anything was sent.
+    'POST /api/account/resend': async (req) => {
+      const body = await readJson(req);
+      const email = normalizeEmail(body.email);
+      if (!validEmail(email)) fail(400, 'bad-email', { message: 'Enter a valid email address.' });
+      throttle(req, ...mailKeys(req, email));
+      const reset = body.kind === 'reset';
+      const account = reset ? store.accountByEmail(email) : null;
+      const key = reset ? account && `reset:${account.id}` : `signup:${email}`;
+      const p = key && pending.get(key);
+      if (p && p.expires > now() && (p.resends || 0) < 3) {
+        limiter.note(...mailKeys(req, email));
+        if (reset) startCode(key, email, 'Your Headroom password reset code', 'Use this code to choose a new password.', { resends: (p.resends || 0) + 1 });
+        else startCode(key, email, 'Your Headroom sign-up code', 'Finish creating your Headroom account with this code.', { resends: (p.resends || 0) + 1 });
+      }
+      return { ok: true };
     },
 
     'POST /api/account/reset': async (req) => {

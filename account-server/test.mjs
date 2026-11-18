@@ -63,6 +63,18 @@ await test('sign-up emails a code; nothing is stored until it is entered', async
   assert.match(codeFor(SAM), /^\d{6}$/);
   assert.equal(store.data.accounts.length, 0);
 });
+await test('"send a new code" replaces the code, only while one is waiting, at most 3 times', async () => {
+  const first = codeFor(SAM);
+  assert.equal((await call('POST', '/api/account/resend', { email: SAM, kind: 'signup' })).status, 200);
+  const second = codeFor(SAM);
+  assert.match(second, /^\d{6}$/);
+  if (second !== first) assert.equal((await call('POST', '/api/account/verify', { email: SAM, code: first, password: PW })).body.error, 'bad-code');
+  for (let i = 0; i < 3; i++) await call('POST', '/api/account/resend', { email: SAM, kind: 'signup' });
+  assert.equal(inbox.get(SAM).length, 4); // the first code and 3 resends, no more
+  const before = inbox.get('nobody@example.com')?.length || 0;
+  assert.equal((await call('POST', '/api/account/resend', { email: 'nobody@example.com', kind: 'signup' })).status, 200);
+  assert.equal((inbox.get('nobody@example.com')?.length || 0), before);
+});
 await test('a wrong code is refused', async () => {
   const wrong = codeFor(SAM) === '000000' ? '111111' : '000000';
   assert.equal((await call('POST', '/api/account/verify', { email: SAM, code: wrong, password: PW })).body.error, 'bad-code');
