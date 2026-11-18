@@ -34,6 +34,7 @@ let shownKey = '';        // what the drawn section was drawn from (redraw only 
 let notes = {};           // section -> { ok, text }: results of the last action, kept across redraws
 let codeError = '';
 let loginItem = null;     // Start at login (native window only): true/false, or null when unknown
+let update = null;        // the app's updater (native window only): { phase, current, version, progress, message, checkedAt }
 const choices = {};       // request id -> { files, clipboard }: kept while the page redraws
 let knownRequests = null; // request and session ids seen at the last poll (null before the first)
 let knownSessions = null;
@@ -86,10 +87,10 @@ function viewKey() {
   const requests = (s.support?.requests || []).map(r => [r.id, r.name, r.address, r.country]);
   const perms = s.permissions ? [s.permissions.screenRecording, s.permissions.accessibility] : null;
   switch (current) {
-    case 'home': return stable(['home', sessions, requests, s.account?.email, s.relay?.state, perms, s.testPattern, s.host.name, notes.request]);
+    case 'home': return stable(['home', sessions, requests, s.account?.email, s.relay?.state, perms, s.testPattern, s.host.name, notes.request, update?.phase === 'ready' && update.version]);
     case 'connect': return stable(['connect', s.relay?.state, s.relay?.error, s.support?.code?.code, requests, codeError, notes.request]);
     case 'account': return stable(['account', s.account?.email, s.account?.error, s.settings.displayName, s.host.machine, notes.account, notes.rename]);
-    default: return stable(['settings', s.settings, perms, loginItem, s.dataDir, s.logDir, s.host.version]);
+    default: return stable(['settings', s.settings, perms, loginItem, s.dataDir, s.logDir, s.host.version, update && [update.phase, update.version, update.message]]);
   }
 }
 
@@ -381,10 +382,47 @@ function viewHome() {
   return h('section', {}, h('h2', { tabindex: '-1' }, 'Home'),
     note('request'),
     requestsCard(),
+    updateBanner(),
     hero,
     n ? h('div', { class: 'card' }, h('h3', {}, 'Connected now'), h('ul', { class: 'list' }, ...st.sessions.map(sessionRow))) : null,
     missing ? permissionsCard() : null,
     next);
+}
+
+// ------------------------------------------------------------------ updates
+
+const installUpdate = () => postNative({ cmd: 'installUpdate' }); // the app asks first if someone is connected
+
+/** A downloaded update, waiting for a restart. Not warm (nobody is here) and not red (nothing is wrong): lit. */
+function updateBanner() {
+  if (update?.phase !== 'ready') return null;
+  return h('div', { class: 'update-banner' },
+    h('span', { class: 'dot online', 'aria-hidden': 'true' }),
+    h('div', { class: 'grow' },
+      h('p', { class: 't' }, `Headroom ${update.version} is ready`),
+      h('p', { class: 's' }, 'Restart Headroom Server to finish updating. It\'s back in a few seconds, with your settings and permissions.')),
+    h('button', { class: 'sm primary', type: 'button', 'data-key': 'update:install', onclick: installUpdate }, 'Restart to update'));
+}
+
+/** Settings → About: where updates are, and the one thing to do about it. */
+function updateRow() {
+  if (!native || !update) return [];
+  const u = update;
+  const pct = `${Math.round((u.progress || 0) * 100)}%`;
+  const status = u.phase === 'checking' ? 'Checking for updates…'
+    : u.phase === 'downloading' ? h('span', {}, `Downloading ${u.version}… `, h('span', { 'data-update-progress': '' }, pct))
+      : u.phase === 'ready' ? `${u.version} is downloaded and ready to install.`
+        : u.phase === 'current' ? h('span', {}, 'Up to date. Checked ', agoEl(u.checkedAt), '.')
+          : u.phase === 'failed' ? h('span', { class: 'stop-text' }, u.message || 'Couldn\'t check for updates.')
+            : 'Checks for updates every few hours.';
+  const busyNow = u.phase === 'checking' || u.phase === 'downloading';
+  const button = u.phase === 'ready'
+    ? h('button', { class: 'sm primary', type: 'button', 'data-key': 'update:install-about', onclick: installUpdate }, 'Restart to update')
+    : h('button', {
+      class: 'sm', type: 'button', 'data-key': 'update:check', 'aria-disabled': busyNow ? 'true' : null,
+      onclick: e => { if (e.currentTarget.getAttribute('aria-disabled') !== 'true') postNative({ cmd: 'checkUpdate' }); },
+    }, u.phase === 'failed' ? 'Try again' : 'Check now');
+  return [h('dt', { class: 'k' }, 'Updates'), h('dd', { class: 'row' }, h('span', { class: 'grow' }, status), button)];
 }
 
 // ------------------------------------------------------------------ Let someone connect
@@ -561,6 +599,7 @@ function viewSettings() {
     mac() ? permissionsCard() : null,
     h('div', { class: 'card' }, h('h3', {}, 'About'), h('dl', { class: 'kv' },
       h('dt', { class: 'k' }, 'Version'), h('dd', {}, st.host.version),
+      ...updateRow(),
       h('dt', { class: 'k' }, 'Data folder'), h('dd', { class: 'row' }, h('span', { class: 'mono path' }, st.dataDir), openBtn('Open', st.dataDir, 'data')),
       h('dt', { class: 'k' }, 'Logs'), h('dd', { class: 'row' }, h('span', { class: 'mono path' }, st.logDir), openBtn('Open', st.logDir, 'logs')))));
 }
@@ -586,7 +625,22 @@ window.addEventListener('hashchange', () => go(location.hash.slice(1)));
 native?.on(m => {
   if (m?.cmd === 'navigate') go(m.section, { focus: true });
   if (m?.cmd === 'loginItem') { loginItem = !!m.enabled; if (st && current === 'settings') refresh({ force: true }); }
+  if (m?.cmd === 'update') {
+    const was = update;
+    update = m;
+    if (m.phase === 'ready' && was?.phase !== 'ready') announce(`Headroom ${m.version} is ready. Restart Headroom Server to update.`);
+    if (m.phase === 'failed' && was?.phase === 'checking') announce(m.message || 'Couldn\'t check for updates.');
+    if (!st) return;
+    // Only the download moved on: change the number, don't redraw.
+    if (was && was.phase === m.phase && was.version === m.version && was.message === m.message && m.phase === 'downloading') {
+      for (const el of document.querySelectorAll('[data-update-progress]')) el.textContent = `${Math.round((m.progress || 0) * 100)}%`;
+      return;
+    }
+    const key = viewKey();
+    if (key !== shownKey) render(key);
+  }
 });
 postNative({ cmd: 'getLoginItem' });
+postNative({ cmd: 'getUpdate' });
 refresh().then(() => { document.title = `${SECTIONS.find(([s]) => s === current)[1]} — Headroom Server`; });
 setInterval(refresh, 2000);

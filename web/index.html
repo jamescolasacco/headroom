@@ -31,6 +31,12 @@
       </div>
       <button class="account-chip" id="account-chip" type="button" hidden></button>
     </header>
+    <!-- Headroom Viewer only: a downloaded update waiting for a restart -->
+    <div id="update-banner" class="update-banner" hidden>
+      <span class="dot online" aria-hidden="true"></span>
+      <div class="grow"><p class="t" id="update-title"></p><p class="s">It closes and opens again in a few seconds.</p></div>
+      <button type="button" class="small-btn primary" id="btn-update">Restart to update</button>
+    </div>
     <!-- signed out: a guest code, or your account -->
     <div id="signed-out" class="welcome" hidden>
       <div>

@@ -5,7 +5,7 @@ import { h, svg, dialog, toast, announce, field, busy, nextId, plural } from './
 import { I } from './ui/icons.js';
 import { lightOf } from './ui/light.js';
 import { qrSvg } from './qr.js';
-import { deviceLabel, platformId, secure, hasWebCodecs, isStandalone, isIOS, isMac, nativeViewer, postNative } from './platform.js';
+import { deviceLabel, platformId, secure, hasWebCodecs, isStandalone, isIOS, isMac, nativeViewer, postNative, onNative } from './platform.js';
 import * as Account from './account.js';
 import { DEFAULT_ACCOUNT_SERVER, DOWNLOAD_URL } from './config.js';
 
@@ -24,6 +24,7 @@ async function main() {
   }
   Account.forgetOldData();
   $('btn-code').addEventListener('click', () => codeFlow());
+  if (nativeViewer) watchForUpdates();
   // Never create history entries: iOS standalone edge-swipe "back" would leave the app.
   const hash = new URLSearchParams(location.hash.slice(1));
   if (location.hash) history.replaceState(null, '', location.pathname);
@@ -70,6 +71,22 @@ async function refreshAccount() {
   if (!session && snapshot() !== before) renderHome();
 }
 const snapshot = () => JSON.stringify([Account.loadAccount()?.error, Account.accountHosts().map(x => [x.id, x.name, x.online, x.relayOnline, x.lastSeen])]);
+
+// ---------------------------------------------------------------------------------------------- updates
+
+/** Headroom Viewer downloads updates by itself; when one is ready, the home screen offers the restart. */
+function watchForUpdates() {
+  $('btn-update').addEventListener('click', () => postNative({ cmd: 'installUpdate' })); // it asks first mid-session
+  onNative(m => {
+    if (m?.cmd !== 'update') return;
+    const ready = m.phase === 'ready';
+    const banner = $('update-banner');
+    if (ready && banner.hidden) announce(`Headroom Viewer ${m.version} is ready. Restart to update.`);
+    $('update-title').textContent = ready ? `Headroom Viewer ${m.version} is ready` : '';
+    banner.hidden = !ready;
+  });
+  postNative({ cmd: 'getUpdate' });
+}
 
 // ---------------------------------------------------------------------------------------------- home
 

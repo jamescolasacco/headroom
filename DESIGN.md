@@ -101,6 +101,11 @@ still uses them; new code uses the names above.
   typed-not-verified, approximate location, the scam warning at full size in `--lamp-wash`, files and clipboard
   unticked, answers in the order **Accept · View only · Decline** (the same in the Mac and Windows prompts), with the
   safe answer, Decline, as the strong button. "No answer in 2 minutes declines."
+- **Updates (`.update-banner`):** a downloaded update waiting for a restart is lit (it's "on"), never warm (nobody is
+  here) or red (nothing is wrong): a panel with a lit LED, "Headroom 0.4.3 is ready", what restarting does, and
+  **Restart to update**. On Headroom Server's Home and the Viewer's home screen; Settings → About says where the
+  updater is (checking, downloading with its percentage, ready, up to date, or why it couldn't). Nothing restarts
+  by itself, and restarting mid-session asks first.
 - **Message bar (`toast()`):** a lit strip (top layer, above dialogs), announced through `#announcer`, pauses while
   hovered or while the tab is hidden; longer messages stay longer.
 - **Dialogs:** solid glass, named by their heading, open on the heading (not the first field), return focus on close.
