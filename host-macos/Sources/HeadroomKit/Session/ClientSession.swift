@@ -619,8 +619,19 @@ public final class ClientSession: WebSocketPeer, VideoSink {
 
     // ------------------------------------------------------------------------------------------- teardown
 
+    /// Ends the session from this side. The viewer hears why first, in words for a person, so it shows
+    /// "Session ended" with the reason instead of trying to reconnect.
     public func disconnect(_ reason: String) {
         Log.info("session", "\(id): disconnect requested (\(reason))")
+        let host = HostInfo.name
+        let message: String
+        switch reason {
+        case "stopped by the person at the computer": message = "The person at \(host) stopped the session."
+        case "host is shutting down": message = "Headroom Server on \(host) was stopped."
+        case "device revoked", "access ended": message = "This sign-in no longer has access to \(host)."
+        default: message = "\(host) ended the session."
+        }
+        sendJson(["t": "error", "code": "ended", "message": message])
         transport?.close(code: .normalClosure, reason: reason)
     }
 

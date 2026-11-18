@@ -72,7 +72,8 @@ public sealed class SupportPrompt : Form
         buttons.Controls.Add(Make("Accept", true, false));
         layout.Controls.Add(buttons);
         Controls.Add(layout);
-        // Esc declines; Enter never accepts by accident (no default button, and the focus starts on Decline).
+        // The safe answer is the strong one: Enter and Esc both decline, and focus starts on Decline.
+        AcceptButton = decline;
         CancelButton = decline;
         Load += (_, _) => ActiveControl = decline;
         FormClosed += (_, _) => { if (!_answered) _ = answer(false, false, false, false); };

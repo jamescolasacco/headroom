@@ -190,6 +190,16 @@ public final class WebSocketTransport: ChannelInboundHandler {
         loop.execute { [weak self] in
             guard let self, let context = self.context, !self.closedSent else { return }
             self.closedSent = true
+            // Whatever is still waiting to be said (why the session ended) goes out before the close frame,
+            // even when video has filled the socket.
+            self.lock.lock()
+            let pending = self.control
+            self.control.removeAll()
+            self.lock.unlock()
+            for item in pending {
+                let buf = context.channel.allocator.buffer(bytes: item.bytes)
+                context.write(self.wrapOutboundOut(WebSocketFrame(fin: true, opcode: item.text ? .text : .binary, data: buf)), promise: nil)
+            }
             var b = context.channel.allocator.buffer(capacity: 2 + reason.utf8.count)
             b.write(webSocketErrorCode: code)
             b.writeString(String(reason.prefix(120)))

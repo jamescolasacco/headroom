@@ -928,11 +928,30 @@ public sealed class ClientSession : IVideoSink
 
     // ------------------------------------------------------------------------------------------- teardown
 
+    /// <summary>
+    /// Ends the session from this side. The viewer hears why first, in words for a person, so it shows
+    /// "Session ended" with the reason instead of trying to reconnect.
+    /// </summary>
     public void Disconnect(string reason)
     {
         Log.Info("session", $"{Id}: disconnect requested ({reason})");
-        _ = CloseAsync(WebSocketCloseStatus.NormalClosure, reason);
-        _cts.Cancel();
+        var host = HostInfo.Name;
+        var message = reason switch
+        {
+            "stopped by the person at the computer" => $"The person at {host} stopped the session.",
+            "host is shutting down" => $"Headroom Server on {host} was stopped.",
+            "device revoked" or "access ended" => $"This sign-in no longer has access to {host}.",
+            _ => $"{host} ended the session.",
+        };
+        Enqueue(new { t = "error", code = "ended", message });
+        _ = Task.Run(async () =>
+        {
+            // Give the send loop a moment to deliver it (it sends control messages before any more video).
+            for (int i = 0; i < 20 && !_control.IsEmpty; i++) await Task.Delay(25);
+            await Task.Delay(50);
+            await CloseAsync(WebSocketCloseStatus.NormalClosure, reason);
+            _cts.Cancel();
+        });
     }
 
     private async Task CloseAsync(WebSocketCloseStatus status, string reason)

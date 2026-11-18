@@ -144,6 +144,8 @@ public final class SupportService {
     public func decide(id: String, accept: Bool, viewOnly: Bool, files: Bool, clipboard: Bool) -> Bool {
         guard let p = take(id) else { return false }
         Log.info("guest", "'\(p.name)' \(accept ? "accepted\(viewOnly ? " (view only)" : "")\(files ? ", files" : "")\(clipboard ? ", clipboard" : "")" : "declined")")
+        // Declining ends the code too, so whoever had it can't ask again with it (make a new one for the right person).
+        if !accept { cancelCode() }
         p.done(accept ? Decision(viewOnly: viewOnly, files: files, clipboard: clipboard) : nil)
         return true
     }

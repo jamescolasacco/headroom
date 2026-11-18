@@ -156,11 +156,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             a.addButton(withTitle: "Decline")
             a.addButton(withTitle: "View Only")
             a.addButton(withTitle: "Accept")
-            a.buttons[0].keyEquivalent = "\u{1b}" // Esc declines; Return does nothing by accident
+            // The safe answer is the strong one: Decline is the default button (Return), and Esc declines too.
+            a.buttons[0].keyEquivalent = "\r"
+            a.buttons[1].keyEquivalent = ""
             a.buttons[2].keyEquivalent = ""
+            let escape = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
+                guard e.keyCode == 53, e.window === a.window else { return e } // 53 = Esc
+                a.buttons[0].performClick(nil)
+                return nil
+            }
             NSApp.activate(ignoringOtherApps: true)
             NSSound(named: "Glass")?.play()
             let answer = a.runModal()
+            if let escape { NSEvent.removeMonitor(escape) }
             self.alertRequest = nil
             let f = files.state == .on, c = clip.state == .on
             switch answer {

@@ -152,6 +152,8 @@ public sealed class SupportService
         Log.Info("guest", $"'{p.Name}' " + (accept
             ? $"accepted{(viewOnly ? " (view only)" : "")}{(files ? ", files" : "")}{(clipboard ? ", clipboard" : "")}"
             : "declined"));
+        // Declining ends the code too, so whoever had it can't ask again with it (make a new one for the right person).
+        if (!accept) CancelCode();
         p.Done.TrySetResult(accept ? new Decision(viewOnly, files, clipboard) : null);
         return true;
     }
