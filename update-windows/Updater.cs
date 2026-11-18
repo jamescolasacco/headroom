@@ -148,7 +148,8 @@ public sealed class Updater : IDisposable
                 "  $exe = Join-Path $dir 'Headroom-Server-Setup.exe'",
                 "  Copy-Item -LiteralPath $src -Destination $exe",
                 "  if ((Get-FileHash -Algorithm SHA256 $exe).Hash -ne $sha) { throw 'The update changed after it was checked.' }",
-                $"  Start-Process -FilePath $exe -ArgumentList '{silent}' -Wait",
+                // WaitForExit, not -Wait: -Wait also waits for what the installer opens (the tray app) to exit.
+                $"  (Start-Process -FilePath $exe -ArgumentList '{silent}' -PassThru).WaitForExit()",
                 "} finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }");
             var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(ps));
             psi = new ProcessStartInfo("powershell.exe", $"-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand {encoded}") { Verb = "runas" };

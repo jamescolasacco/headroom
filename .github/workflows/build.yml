@@ -200,22 +200,26 @@ jobs:
           exit $code
       - name: The installers install (and uninstall)
         shell: pwsh
+        timeout-minutes: 10
         run: |
           $silent = '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
-          Start-Process dist\release\Headroom-Viewer-Setup.exe -ArgumentList $silent -Wait
+          # WaitForExit, not Start-Process -Wait: -Wait also waits for the apps the installers open at the end.
+          function Run($exe) { $p = Start-Process $exe -ArgumentList $silent -PassThru; $p.WaitForExit(); Write-Host "$exe exited $($p.ExitCode)" }
+          Run dist\release\Headroom-Viewer-Setup.exe
           $viewer = Join-Path $env:LOCALAPPDATA 'Programs\Headroom Viewer'
           if (-not (Test-Path "$viewer\HeadroomViewer.exe")) { throw "Headroom Viewer wasn't installed" }
           if (-not (Test-Path "$viewer\update-signing.cer") -and (Test-Path assets\headroom-signing.cer)) { throw "Headroom Viewer has no update-signing.cer" }
           Get-Process HeadroomViewer -ErrorAction SilentlyContinue | Stop-Process -Force
-          Start-Process dist\release\Headroom-Server-Setup.exe -ArgumentList $silent -Wait
+          Run dist\release\Headroom-Server-Setup.exe
           $dst = Join-Path $env:ProgramFiles 'Headroom'
           if (-not (Test-Path "$dst\HeadroomServer.exe")) { throw "Headroom Server wasn't installed" }
           $svc = Get-Service Headroom -ErrorAction Stop
           Write-Host "Headroom service: $($svc.Status), start $($svc.StartType)"
-          Get-Process HeadroomServer -ErrorAction SilentlyContinue | Stop-Process -Force
-          Start-Process "$dst\unins000.exe" -ArgumentList $silent -Wait
-          Start-Process "$viewer\unins000.exe" -ArgumentList $silent -Wait
-          Start-Sleep -Seconds 5
+          Get-Process HeadroomServer, explorer -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          # The uninstallers hand over to a copy of themselves and return at once: give them a moment.
+          Run "$dst\unins000.exe"
+          Run "$viewer\unins000.exe"
+          for ($i = 0; $i -lt 30 -and ((Test-Path $dst) -or (Get-Service Headroom -ErrorAction SilentlyContinue)); $i++) { Start-Sleep 1 }
           Write-Host "after uninstall: service $(if (Get-Service Headroom -ErrorAction SilentlyContinue) { 'still there' } else { 'removed' }), Program Files\Headroom $(if (Test-Path $dst) { 'still there' } else { 'removed' })"
       - uses: actions/upload-artifact@v4
         with:
