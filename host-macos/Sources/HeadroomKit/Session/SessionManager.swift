@@ -17,6 +17,7 @@ public enum SessionManager {
     }
 
     static func register(_ s: ClientSession) {
+        if let id = s.device?.id, id.hasPrefix("support:") { SupportService.shared.sessionStarted(id) }
         lock.lock()
         sessions.append(s)
         if assertion == 0 {
@@ -32,6 +33,7 @@ public enum SessionManager {
     }
 
     static func unregister(_ s: ClientSession) {
+        if let id = s.device?.id, id.hasPrefix("support:") { SupportService.shared.sessionEnded(id) }
         lock.lock()
         sessions.removeAll { $0 === s }
         let last = sessions.isEmpty

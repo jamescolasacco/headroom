@@ -70,7 +70,7 @@ public enum AuthService {
         globalFailures.removeAll { $0 < now.addingTimeInterval(-60) }
     }
 
-    private static func recordFailure(_ ip: String?) {
+    static func recordFailure(_ ip: String?) {
         let key = ip ?? "?"
         lock.lock()
         let now = Date()
@@ -90,7 +90,8 @@ public enum AuthService {
         Log.warn("auth", "failed authentication from \(key) (count \(count))")
     }
 
-    private static func recordSuccess(_ ip: String?) {
+    /// A successful authentication clears the address's failures (it takes valid credentials, so it can't be abused).
+    static func recordSuccess(_ ip: String?) {
         lock.lock(); failures[ip ?? "?"] = nil; lock.unlock()
     }
 
@@ -159,12 +160,15 @@ public enum AuthService {
         var match: PairedDevice?
         for d in ConfigStore.current.devices where Bytes.constantTimeEquals(Array(d.tokenHash.utf8), hash) { match = d }
         if match == nil {
+            // A remote-support session reconnecting with its resume key (checked before the slow path below).
+            if let s = SupportService.shared.device(forHash: hashText) { recordSuccess(ip); return s }
             // A device of this computer's account? (If not yet known, it may have signed in moments ago: check in.)
             var acct = AccountService.shared.device(forHash: hashText)
             if acct == nil, AccountService.shared.refreshForUnknownToken() { acct = AccountService.shared.device(forHash: hashText) }
             if let a = acct {
                 var d = PairedDevice(id: AccountService.localId(a.id), name: a.name, tokenHash: a.tokenHash, created: Date(), lastAddress: ip)
                 d.viewOnly = a.viewOnly
+                recordSuccess(ip)
                 return d // account devices are managed (and their last-seen kept) by the account server
             }
         }
@@ -180,6 +184,7 @@ public enum AuthService {
                 }
             }
         }
+        recordSuccess(ip)
         return found
     }
 
@@ -223,6 +228,7 @@ public enum AuthService {
     public static func deviceStatus(_ id: String) -> (viewOnly: Bool, account: Bool)? {
         if let d = ConfigStore.current.devices.first(where: { $0.id == id }) { return (d.viewOnly, false) }
         if id.hasPrefix("account:"), let a = AccountService.shared.device(id: String(id.dropFirst(8))) { return (a.viewOnly, true) }
+        if id.hasPrefix("support:"), let s = SupportService.shared.device(id: id) { return (s.viewOnly, false) }
         return nil
     }
 

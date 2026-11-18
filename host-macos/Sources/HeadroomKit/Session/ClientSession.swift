@@ -13,7 +13,7 @@ public final class ClientSession: WebSocketPeer, VideoSink {
     public let id = Bytes.base64Url(Bytes.random(6))
     public let connectedAt = Date()
     public private(set) var device: PairedDevice?
-    public var remoteAddress: String { transport?.remoteIP ?? "?" }
+    public var remoteAddress: String { (transport?.remoteIP ?? "?") + (transport?.relayed == true ? " (via relay)" : "") }
 
     private weak var transport: WebSocketTransport?
     private let input = InputContext()
@@ -28,6 +28,8 @@ public final class ClientSession: WebSocketPeer, VideoSink {
     private let clipLock = NSLock()
     private var clipboardSubscribed = false
     private var handshakeDone = false
+    /// A support code was accepted and the person at this computer is being asked: ignore further hellos.
+    private var awaitingApproval = false
     private var closed = false
     private var handshakeTimer: DispatchWorkItem?
     private var tickTimer: DispatchSourceTimer?
@@ -93,18 +95,59 @@ public final class ClientSession: WebSocketPeer, VideoSink {
             transport?.close(code: .policyViolation, reason: "rate limited")
             return
         }
+        if let support = root["support"] as? JSONObject {
+            supportHandshake(support, root: root, ip: ip)
+            return
+        }
         guard let dev = AuthService.validateToken(root.str("token"), ip: ip) else {
             sendJson(["t": "error", "code": "unauthorized", "message": "This device is not paired (or was revoked). Pair again."])
             transport?.close(code: .policyViolation, reason: "unauthorized")
             return
         }
+        completeHandshake(dev, ip: ip)
+    }
+
+    /// Someone with this computer's ID and a one-time support code: check the code, ask the person here, then
+    /// start a session that can resume with the key sent in `welcome`.
+    private func supportHandshake(_ support: JSONObject, root: JSONObject, ip: String?) {
+        guard SupportService.shared.verify(support.str("code") ?? "") else {
+            AuthService.recordFailure(ip)
+            sendJson(["t": "error", "code": "bad-code", "message": "That code is wrong or has expired. Ask for a new one."])
+            transport?.close(code: .policyViolation, reason: "bad code")
+            return
+        }
+        let given = (support.str("name") ?? (root["client"] as? JSONObject)?.str("name") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = given.isEmpty ? "Guest" : String(given.prefix(48))
+        awaitingApproval = true
+        if ConfigStore.current.support.askBeforeAccepting {
+            sendJson(["t": "pending", "message": "Waiting for someone at \(HostInfo.name) to accept…"])
+        }
+        SupportService.shared.requestApproval(name: name, ip: ip) { [weak self] decision in
+            guard let self else { return }
+            self.queue.async {
+                guard !self.closed else { return }
+                guard let decision else {
+                    self.sendJson(["t": "error", "code": "declined", "message": "The person at \(HostInfo.name) didn't accept the connection."])
+                    self.transport?.close(code: .policyViolation, reason: "declined")
+                    return
+                }
+                AuthService.recordSuccess(ip)
+                let (dev, token) = SupportService.shared.startSession(name: name, viewOnly: decision.viewOnly, ip: ip)
+                Log.info("support", "\(self.id): support session for '\(name)' from \(ip ?? "?")")
+                self.completeHandshake(dev, ip: ip, extra: ["resumeToken": token, "support": true])
+            }
+        }
+    }
+
+    private func completeHandshake(_ dev: PairedDevice, ip: String?, extra: JSONObject = [:]) {
+        awaitingApproval = false
         device = dev
         handshakeDone = true
         let cfg = ConfigStore.current
         viewOnly = dev.viewOnly || !cfg.permissions.input
         Log.info("session", "\(id): '\(dev.name)' connected from \(ip ?? "?")")
 
-        sendJson([
+        sendJson(extra.merging([
             "t": "welcome",
             "session": id,
             "host": HostInfo.describe(),
@@ -119,7 +162,7 @@ public final class ClientSession: WebSocketPeer, VideoSink {
             "limits": ["maxFps": cfg.video.maxFps, "maxBitrateKbps": cfg.video.maxBitrateKbps],
             "elevated": false,
             "hostTimeUs": Clock.nowUs,
-        ])
+        ]) { _, new in new })
         if !viewOnly && !Permissions.accessibility {
             sendJson(["t": "notice", "level": "warn", "message": "This Mac hasn't given Headroom the Accessibility permission yet, so your mouse and keyboard can't control it. (System Settings → Privacy & Security → Accessibility)"])
         }
@@ -135,7 +178,7 @@ public final class ClientSession: WebSocketPeer, VideoSink {
             Log.warn("session", "\(id): bad message")
             return
         }
-        if !handshakeDone { handshake(root); return }
+        if !handshakeDone { if !awaitingApproval { handshake(root) }; return }
         handleJson(root)
     }
 
@@ -305,7 +348,7 @@ public final class ClientSession: WebSocketPeer, VideoSink {
     }
 
     /// Viewer runs on this very Mac (loopback or one of our own addresses).
-    private var sameMachine: Bool { NetInterfaces.isLocal(transport?.remoteIP) }
+    private var sameMachine: Bool { transport?.relayed != true && NetInterfaces.isLocal(transport?.remoteIP) }
 
     private func setAudio(_ wanted: Bool) {
         let cfg = ConfigStore.current

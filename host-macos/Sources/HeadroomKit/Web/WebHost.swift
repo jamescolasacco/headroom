@@ -16,16 +16,22 @@ public final class WebHost: HttpApp {
 
     public func beginStreaming(_ req: HttpRequest) -> HttpStreamDecision? {
         guard req.method == .POST, req.path == "/api/files/upload" else { return nil }
-        if !req.isTLS && !req.isLoopback { return .respond(redirectToHttps(req)) }
+        if !req.isTLS && !req.isLoopback && !req.isRelayed { return .respond(redirectToHttps(req)) }
         return FileApi.beginUpload(req)
     }
 
-    public func shouldUpgradeWebSocket(path: String, remoteIP: String?, isTLS: Bool) -> Bool {
-        path == "/ws" && (isTLS || NetInterfaces.isLoopback(remoteIP))
+    public func shouldUpgradeWebSocket(path: String, remoteIP: String?, isTLS: Bool, relayed: Bool) -> Bool {
+        path == "/ws" && (isTLS || relayed || NetInterfaces.isLoopback(remoteIP))
     }
 
-    public func webSocketHandler(remoteIP: String?, isTLS: Bool) -> ChannelHandler {
-        WebSocketTransport(remoteIP: remoteIP, isTLS: isTLS) { ClientSession(transport: $0) }
+    public func webSocketHandler(remoteIP: String?, isTLS: Bool, relayed: Bool) -> ChannelHandler {
+        WebSocketTransport(remoteIP: remoteIP, isTLS: isTLS, relayed: relayed) { ClientSession(transport: $0) }
+    }
+
+    /// Through the relay only sessions and their file transfers: never pairing, settings or the certificate pages
+    /// (the relay forwards nothing else either; this is the second lock).
+    static func relayAllows(_ path: String) -> Bool {
+        path == "/api/info" || path == "/api/me" || ["/api/files/list", "/api/files/download", "/api/files/upload", "/api/files/mkdir"].contains(path)
     }
 
     public func decorate(_ req: HttpRequest, _ resp: inout HttpResponse) {
@@ -56,7 +62,10 @@ public final class WebHost: HttpApp {
 
     public func handle(_ req: HttpRequest) -> HttpResponse {
         var path = req.path
-        if !req.isTLS && !req.isLoopback {
+        if req.isRelayed {
+            if req.method == .OPTIONS, path.hasPrefix("/api") { return .status(.noContent) }
+            guard Self.relayAllows(path) else { return .json(["error": "not-relayed"], status: .forbidden) }
+        } else if !req.isTLS && !req.isLoopback {
             // Plain-HTTP helper port, remote caller: only the CA bootstrap is available.
             guard ["/", "/trust", "/headroom-ca.crt", "/headroom-ca.mobileconfig", "/trust.css"].contains(path) else { return redirectToHttps(req) }
             if path == "/" { path = "/trust" }
@@ -183,7 +192,18 @@ public final class WebHost: HttpApp {
             let code = AuthService.createPairCode(lifetime: 600)
             return .json(["code": code, "expiresInSeconds": 600, "urls": serverUrls().map { "\($0)#pair=\(code)" }])
         case (.POST, "/sessions/disconnect-all"):
+            SupportService.shared.revokeAll()
             for s in SessionManager.active { s.disconnect("disconnected from the host") }
+            return .json(["ok": true])
+        case (.POST, "/support/code"):
+            // Remote support: a one-time code to give, with this computer's Headroom ID, to the person helping.
+            let (code, expires) = SupportService.shared.createCode()
+            var out: JSONObject = ["code": code, "expiresAt": expires]
+            if let relay = RelayService.shared.statusJson["url"] as? String { out["url"] = relay; out["link"] = relay + "&code=" + code }
+            if let id = RelayService.shared.currentId { out["id"] = id }
+            return .json(out)
+        case (.DELETE, "/support/code"):
+            SupportService.shared.cancelCode()
             return .json(["ok": true])
         case (.POST, "/settings"):
             ConfigStore.update { c in
@@ -196,6 +216,8 @@ public final class WebHost: HttpApp {
                 if let v = body.boolIfPresent("fileTransfer") { c.permissions.fileTransfer = v }
                 if let v = body.boolIfPresent("input") { c.permissions.input = v }
                 if let v = body.boolIfPresent("notifyOnConnect") { c.notifyOnConnect = v }
+                if let v = body.boolIfPresent("relayEnabled") { c.relayEnabled = v }
+                if let v = body.boolIfPresent("supportAsk") { c.support.askBeforeAccepting = v }
                 if body["displayName"] != nil {
                     let n = body.str("displayName")?.trimmingCharacters(in: .whitespaces) ?? ""
                     c.displayName = n.isEmpty ? nil : n
@@ -230,8 +252,14 @@ public final class WebHost: HttpApp {
         let parts = sub.split(separator: "/").map(String.init)
         if req.method == .POST, parts.count == 3, parts[0] == "sessions", parts[2] == "disconnect" {
             guard let s = SessionManager.active.first(where: { $0.id == parts[1] }) else { return .status(.notFound) }
+            // A support session ends for good: it may not resume with its key.
+            if let id = s.device?.id, id.hasPrefix("support:") { SupportService.shared.revoke(id) }
             s.disconnect("disconnected from the host")
             return .json(["ok": true])
+        }
+        if req.method == .POST, parts.count == 3, parts[0] == "support", parts[1] == "requests" {
+            let ok = SupportService.shared.decide(id: parts[2], accept: body.bool("accept"), viewOnly: body.bool("viewOnly"))
+            return ok ? .json(["ok": true]) : .json(["error": "That request is no longer waiting."], status: .notFound)
         }
         if parts.count == 2, parts[0] == "devices", req.method == .DELETE {
             let ok = AuthService.revokeDevice(parts[1])
@@ -271,9 +299,12 @@ public final class WebHost: HttpApp {
             "permissions": Permissions.json,
             "testPattern": Displays.testPatternSize != nil,
             "account": AccountService.shared.statusJson as Any?,
+            "relay": RelayService.shared.statusJson,
+            "support": SupportService.shared.statusJson,
             "settings": [
                 "video": c.video.json, "audio": c.audio.json, "permissions": c.permissions.json,
                 "lockOnDisconnect": c.lockOnDisconnect, "displayName": c.displayName as Any?, "notifyOnConnect": c.notifyOnConnect,
+                "relayEnabled": c.relayEnabled, "supportAsk": c.support.askBeforeAccepting,
             ] as JSONObject,
         ]
     }

@@ -41,6 +41,8 @@ public final class WebSocketTransport: ChannelInboundHandler {
 
     public let remoteIP: String?
     public let isTLS: Bool
+    /// Came through the account server's relay.
+    public let relayed: Bool
     /// Serial queue the peer's callbacks run on (keeps the event loop free; preserves message order).
     public let queue: DispatchQueue
     public weak var peer: WebSocketPeer?
@@ -58,9 +60,10 @@ public final class WebSocketTransport: ChannelInboundHandler {
     private var context: ChannelHandlerContext?
     private var loop: EventLoop?
 
-    public init(remoteIP: String?, isTLS: Bool, makePeer: (WebSocketTransport) -> WebSocketPeer) {
+    public init(remoteIP: String?, isTLS: Bool, relayed: Bool = false, makePeer: (WebSocketTransport) -> WebSocketPeer) {
         self.remoteIP = remoteIP
         self.isTLS = isTLS
+        self.relayed = relayed
         queue = DispatchQueue(label: "headroom.session", qos: .userInteractive)
         let p = makePeer(self)
         peer = p

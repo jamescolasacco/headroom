@@ -30,6 +30,9 @@ public struct HostConfig: Codable {
     public var notifyOnConnect = true
     /// Membership in a Headroom account (account-server/), if joined.
     public var account: AccountLink?
+    /// While joined, stay reachable through the account server's relay (browsers anywhere, no port forwarding).
+    public var relayEnabled = true
+    public var support = SupportSettings()
 
     public init() {}
 
@@ -50,6 +53,20 @@ public struct HostConfig: Codable {
         lockOnDisconnect = try c.decodeIfPresent(Bool.self, forKey: .lockOnDisconnect) ?? false
         notifyOnConnect = try c.decodeIfPresent(Bool.self, forKey: .notifyOnConnect) ?? true
         account = try c.decodeIfPresent(AccountLink.self, forKey: .account)
+        relayEnabled = try c.decodeIfPresent(Bool.self, forKey: .relayEnabled) ?? true
+        support = try c.decodeIfPresent(SupportSettings.self, forKey: .support) ?? SupportSettings()
+    }
+}
+
+/// Remote support: someone without an account connects with this computer's Headroom ID and a one-time code.
+public struct SupportSettings: Codable {
+    /// Show Accept / Decline on this computer before a support session starts. Off = the code alone lets them in.
+    public var askBeforeAccepting = true
+
+    public init() {}
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        askBeforeAccepting = try c.decodeIfPresent(Bool.self, forKey: .askBeforeAccepting) ?? true
     }
 }
 
