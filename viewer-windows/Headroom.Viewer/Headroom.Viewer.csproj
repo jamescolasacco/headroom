@@ -29,4 +29,12 @@
     <Content Include="..\..\web\**\*" Exclude="..\..\web\admin.html;..\..\web\js\admin.js;..\..\web\css\admin.css" LinkBase="client" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Updates: the same updater as Headroom Viewer / Headroom Server (update-windows), and the certificate releases
+         must be signed with (when the repository has one: tools/make-signing-cert.sh). -->
+    <Compile Include="..\..\update-windows\Updater.cs" Link="Updater.cs" />
+    <Content Include="..\..\assets\headroom-signing.cer" Link="update-signing.cer" Condition="Exists('..\..\assets\headroom-signing.cer')" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <AssemblyMetadata Include="HeadroomUpdateRepo" Value="$(HeadroomUpdateRepo)" Condition="'$(HeadroomUpdateRepo)' != ''" />
+  </ItemGroup>
+
 </Project>

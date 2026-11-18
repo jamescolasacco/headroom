@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Reflection;
+using Headroom.Update;
 using Microsoft.Win32;
 
 namespace Headroom.Server;
@@ -28,6 +30,8 @@ public sealed class TrayApp : ApplicationContext
     private bool _startingEngine;
     private bool _userStopped;
     private int _offlinePolls;
+    private readonly Updater _updater = new(Updater.App.Server);
+    private string? _announcedUpdate;
 
     public TrayApp(bool showWindow)
     {
@@ -49,6 +53,8 @@ public sealed class TrayApp : ApplicationContext
         _poll.Tick += async (_, _) => await PollAsync();
         _poll.Start();
         _ = PollAsync();
+        _updater.Changed += s => _ui.Post(_ => UpdateChanged(s), null);
+        _updater.Start();
         if (showWindow) ShowWindow("home");
     }
 
@@ -124,6 +130,46 @@ public sealed class TrayApp : ApplicationContext
 
     private void Notify(string title, string text) => _tray.ShowBalloonTip(5000, title, text, ToolTipIcon.None);
 
+    // ------------------------------------------------------------------ updates
+
+    private void UpdateChanged(Updater.State s)
+    {
+        if (_window is { IsDisposed: false }) _window.SendUpdate(s);
+        if (s.Phase != "ready" || s.Version == null || _announcedUpdate == s.Version) return;
+        _announcedUpdate = s.Version;
+        Notify($"Headroom {s.Version} is ready", "Restart Headroom Server to update: from this icon's menu, or in its window. It takes a few seconds.");
+    }
+
+    /// <summary>
+    /// Installs the downloaded update: its installer (one Windows prompt: it replaces Program Files and restarts the
+    /// service) stops this app, replaces everything and starts it again. If someone is connected, ask first.
+    /// </summary>
+    public void RestartToUpdate()
+    {
+        var up = _updater.Now;
+        if (up.Phase != "ready" || up.Version == null) return;
+        if (!_updater.CanInstallHere)
+        {
+            // Not installed with install.ps1 (a folder you run it from): get the release by hand.
+            Process.Start(new ProcessStartInfo(_updater.ReleasesPage) { UseShellExecute = true });
+            return;
+        }
+        if (_status is { Viewers.Count: > 0 } st)
+        {
+            var r = MessageBox.Show($"Updating restarts Headroom Server, which ends the session with {string.Join(", ", st.Viewers.Select(v => v.Device))}. They can connect again once it's back, in a few seconds.\n\nRestart and update to {up.Version}?",
+                "Headroom Server", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            if (r != DialogResult.Yes) return;
+        }
+        if (!_updater.Install(out var error))
+        {
+            // No error: "No" at the Windows prompt, so nothing changed.
+            if (error != null)
+                MessageBox.Show($"Couldn't install the update: {error}\n\nYou can install it by hand from {_updater.ReleasesPage}.", "Headroom Server", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        ExitNow();
+    }
+
     // ------------------------------------------------------------------ guests
 
     private readonly Dictionary<string, SupportPrompt> _prompts = new();
@@ -167,6 +213,9 @@ public sealed class TrayApp : ApplicationContext
             : st.Online ? "Ready — nobody connected" : "Connecting to Headroom…";
         if (header.Length > 80) header = header[..80] + "…";
         m.Items.Add(new ToolStripMenuItem(header) { Enabled = false });
+        var up = _updater.Now;
+        if (up.Phase == "ready" && up.Version != null)
+            m.Items.Add(new ToolStripMenuItem($"Restart to update to {up.Version}", null, (_, _) => RestartToUpdate()));
         m.Items.Add(new ToolStripSeparator());
         m.Items.Add(new ToolStripMenuItem("Open Headroom Server…", null, (_, _) => ShowWindow("home")) { Font = new Font(m.Font, FontStyle.Bold) });
         m.Items.Add(new ToolStripMenuItem("Let Someone Connect…", null, (_, _) => ShowWindow("connect")) { Enabled = st != null });
@@ -194,6 +243,16 @@ public sealed class TrayApp : ApplicationContext
             }) { Enabled = EngineManager.EngineExists && (st == null || _engine.OwnsEngine) });
         }
         m.Items.Add(new ToolStripMenuItem("Start with Windows", null, (_, _) => SetAutostart(!AutostartEnabled)) { Checked = AutostartEnabled });
+        if (up.Phase != "ready")
+        {
+            var label = up.Phase switch
+            {
+                "checking" => "Checking for updates…",
+                "downloading" => $"Downloading update… {(int)(up.Progress * 100)}%",
+                _ => "Check for updates",
+            };
+            m.Items.Add(new ToolStripMenuItem(label, null, (_, _) => _updater.Check(userInitiated: true)) { Enabled = up.Phase is not ("checking" or "downloading") });
+        }
         m.Items.Add(new ToolStripSeparator());
         m.Items.Add(new ToolStripMenuItem("Exit", null, (_, _) => Exit()));
     }
@@ -203,7 +262,7 @@ public sealed class TrayApp : ApplicationContext
         _ui.Post(_ =>
         {
             if (_window == null || _window.IsDisposed)
-                _window = new SettingsWindow(LoadIconLarge(), StartServerFromWindowAsync);
+                _window = new SettingsWindow(LoadIconLarge(), StartServerFromWindowAsync) { Updates = _updater, InstallUpdate = RestartToUpdate };
             _window.Navigate(section);
             if (!_window.Visible) _window.Show();
             if (_window.WindowState == FormWindowState.Minimized) _window.WindowState = FormWindowState.Normal;
@@ -258,7 +317,13 @@ public sealed class TrayApp : ApplicationContext
                 "Headroom Server", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
             if (r != DialogResult.Yes) return;
         }
+        ExitNow();
+    }
+
+    private void ExitNow()
+    {
         _poll.Stop();
+        _updater.Dispose();
         _tray.Visible = false;
         _engine.Dispose(); // stops a user-mode engine; the service (if any) keeps running
         _window?.CloseForExit();

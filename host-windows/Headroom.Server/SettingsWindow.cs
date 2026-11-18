@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using Headroom.Update;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 using Microsoft.Win32;
@@ -19,6 +20,9 @@ public sealed class SettingsWindow : Form
     private bool _onAdminPage;
     private string _pendingSection = "home";
     private bool _reallyClose;
+    /// <summary>The tray app's updater, and its "Restart to update" (which asks first if someone is connected).</summary>
+    public Updater? Updates { get; init; }
+    public Action? InstallUpdate { get; init; }
 
     /// <summary>Close for good (app exit) instead of hiding.</summary>
     public void CloseForExit()
@@ -148,9 +152,24 @@ public sealed class SettingsWindow : Form
                     TrayApp.SetAutostart(root.TryGetProperty("enabled", out var on) && on.ValueKind == JsonValueKind.True);
                     SendLoginItem();
                     break;
+                case "getUpdate":
+                    if (Updates != null) SendUpdate(Updates.Now);
+                    break;
+                case "checkUpdate":
+                    Updates?.Check(userInitiated: true);
+                    break;
+                case "installUpdate":
+                    InstallUpdate?.Invoke();
+                    break;
             }
         }
         catch { }
+    }
+
+    /// <summary>The updater's state, for the page's update line (Settings) and banner (Home).</summary>
+    public void SendUpdate(Updater.State s)
+    {
+        if (_ready && _onAdminPage) _web.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(s.Json));
     }
 
     /// <summary>Tells the page whether Headroom Server starts with Windows (its "Start at login" switch).</summary>

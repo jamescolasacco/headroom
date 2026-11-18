@@ -135,6 +135,15 @@ public sealed class ViewerWindow : Form
             case "trustHost":
                 await TrustHostAsync(root.GetProperty("url").GetString() ?? "");
                 break;
+            case "getUpdate":
+                PostJson(Program.Updates.Now.Json);
+                break;
+            case "checkUpdate":
+                Program.Updates.Check(userInitiated: true);
+                break;
+            case "installUpdate":
+                Program.RestartToUpdate();
+                break;
             case "session":
                 SessionActive = root.TryGetProperty("active", out var a) && a.GetBoolean();
                 SessionHost = root.TryGetProperty("host", out var hn) ? hn.GetString() : null;

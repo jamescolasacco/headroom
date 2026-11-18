@@ -3,12 +3,15 @@
 # Ctrl+Alt+Del work remotely.
 # Run from the published folder (it re-launches itself as administrator):
 #   powershell -ExecutionPolicy Bypass -File .\install.ps1
+# -Update: Headroom Server's updater runs it (elevated, hidden): no pause at the end.
+param([switch]$Update)
 $ErrorActionPreference = "Stop"
 
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "Re-launching as administrator..."
-    Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+    $flags = if ($Update) { " -Update" } else { "" }
+    Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"$flags"
     exit
 }
 
@@ -49,5 +52,7 @@ Start-Process explorer.exe -ArgumentList "`"$(Join-Path $dst 'HeadroomServer.exe
 
 Write-Host ""
 Write-Host "Done. Headroom Server is running as a service and in your notification area."
-Write-Host "Open it from the tray icon (or Start > Headroom Server) to sign in, or to let someone connect with a code."
-Read-Host "Press Enter to close"
+if (-not $Update) {
+    Write-Host "Open it from the tray icon (or Start > Headroom Server) to sign in, or to let someone connect with a code."
+    Read-Host "Press Enter to close"
+}
