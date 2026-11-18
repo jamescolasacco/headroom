@@ -15,6 +15,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private var offlinePolls = 0
     private var pollTimer: Timer?
     private var launchedAtLogin = false
+    /// Support requests already put in front of the user, and the one whose alert is showing.
+    private var askedRequests = Set<String>()
+    private var alertRequest: String?
     private var pendingStart: [(Bool) -> Void] = []
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -99,6 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
         knownViewers = ids
         firstPoll = false
+        askAboutSupportRequests(st.supportRequests)
 
         let needsPermission = !st.screenRecording || !st.accessibility
         statusItem.button?.image = StatusIcon.image(active: !st.viewers.isEmpty, warning: needsPermission && st.viewers.isEmpty)
@@ -108,6 +112,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         default: "Headroom — \(st.viewers.count) viewers connected"
         }
         if wasOffline { settings?.reloadIfOffline() }
+    }
+
+    /// Someone typed this Mac's Headroom ID and support code: Accept, View Only or Decline, like AnyDesk. The alert
+    /// goes away by itself if the request is answered elsewhere (the settings page) or times out.
+    private func askAboutSupportRequests(_ requests: [SupportRequest]) {
+        if let showing = alertRequest, !requests.contains(where: { $0.id == showing }) {
+            NSApp.abortModal()
+            return
+        }
+        guard alertRequest == nil, let r = requests.first(where: { !askedRequests.contains($0.id) }) else { return }
+        askedRequests.insert(r.id)
+        alertRequest = r.id
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let a = NSAlert()
+            a.messageText = "\(r.name) wants to connect to this Mac"
+            a.informativeText = "They entered this Mac's Headroom ID and your support code\(r.address.isEmpty ? "" : " (from \(r.address))"). "
+                + "Accept to let them see and control your screen. You can disconnect them any time from the menu bar."
+            a.alertStyle = .warning
+            a.addButton(withTitle: "Accept")
+            a.addButton(withTitle: "View Only")
+            a.addButton(withTitle: "Decline")
+            NSApp.activate(ignoringOtherApps: true)
+            NSSound(named: "Glass")?.play()
+            let answer = a.runModal()
+            self.alertRequest = nil
+            switch answer {
+            case .alertFirstButtonReturn: self.admin.answerSupport(r.id, accept: true, viewOnly: false)
+            case .alertSecondButtonReturn: self.admin.answerSupport(r.id, accept: true, viewOnly: true)
+            case .alertThirdButtonReturn: self.admin.answerSupport(r.id, accept: false, viewOnly: false)
+            default: break // aborted: answered elsewhere or timed out
+            }
+            self.poll()
+        }
     }
 
     /// Asks for notification permission the first time there is something to say, not at launch.
@@ -150,8 +188,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         let h = NSMenuItem(title: header, action: nil, keyEquivalent: "")
         h.isEnabled = false
         menu.addItem(h)
+        if let id = st?.relayId, id.count == 9 {
+            let a = Array(id)
+            let idItem = NSMenuItem(title: "Headroom ID \(String(a[0..<3])) \(String(a[3..<6])) \(String(a[6..<9]))", action: nil, keyEquivalent: "")
+            idItem.isEnabled = false
+            menu.addItem(idItem)
+        }
         menu.addItem(.separator())
         menu.addItem(item("Open Headroom Server…", #selector(openWindow)))
+        menu.addItem(item("Remote Support…", #selector(openSupport), enabled: st != nil))
         menu.addItem(item("Pair a Device…", #selector(openPair), enabled: st != nil))
 
         let copy = NSMenuItem(title: "Copy Address", action: nil, keyEquivalent: "")
@@ -194,6 +239,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     @objc private func openWindow() { showWindow("status") }
     @objc private func openPair() { showWindow("pair") }
+    @objc private func openSupport() { showWindow("support") }
     @objc private func quit() { NSApp.terminate(nil) }
 
     @objc private func copyAddress(_ sender: NSMenuItem) {

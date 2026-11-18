@@ -6,6 +6,13 @@ struct ViewerInfo: Equatable {
     let address: String
 }
 
+/// Someone with a support code, waiting for Accept / Decline.
+struct SupportRequest: Equatable {
+    let id: String
+    let name: String
+    let address: String
+}
+
 struct ServerStatus {
     let hostName: String
     let version: String
@@ -18,6 +25,9 @@ struct ServerStatus {
     let accessibility: Bool
     let notifyOnConnect: Bool
     let pid: Int32
+    let supportRequests: [SupportRequest]
+    /// Headroom ID while on the account server's relay.
+    let relayId: String?
 }
 
 /// Talks to the running engine's loopback-only admin API (the same one the settings page uses).
@@ -65,12 +75,20 @@ final class AdminClient {
                 screenRecording: perms["screenRecording"] as? Bool ?? false,
                 accessibility: perms["accessibility"] as? Bool ?? false,
                 notifyOnConnect: settings["notifyOnConnect"] as? Bool ?? true,
-                pid: Int32(j["pid"] as? Int ?? 0)))
+                pid: Int32(j["pid"] as? Int ?? 0),
+                supportRequests: ((j["support"] as? [String: Any])?["requests"] as? [[String: Any]] ?? []).map {
+                    SupportRequest(id: $0["id"] as? String ?? "", name: $0["name"] as? String ?? "Someone", address: $0["address"] as? String ?? "")
+                },
+                relayId: (j["relay"] as? [String: Any]).flatMap { $0["state"] as? String == "online" ? $0["id"] as? String : nil }))
         }
     }
 
     func disconnectAll(_ done: @escaping () -> Void = {}) {
         request("POST", "/api/admin/sessions/disconnect-all") { _ in done() }
+    }
+
+    func answerSupport(_ id: String, accept: Bool, viewOnly: Bool) {
+        request("POST", "/api/admin/support/requests/\(id)", body: ["accept": accept, "viewOnly": viewOnly]) { _ in }
     }
 
     func requestPermission(_ kind: String) {
