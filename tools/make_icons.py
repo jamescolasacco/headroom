@@ -1,5 +1,8 @@
 """Rasterises the Headroom icon (same geometry as web/icons/icon.svg) to PNGs, no dependencies.
 
+The mark is a screen with its top edge lit: the "lit screens" look (DESIGN.md). Night plate, an off-white outline,
+an azure band of light with a soft glow, the band's light spilling a little onto the plate.
+
 Shapes are evaluated as signed distance fields at 4x4 supersampling, so edges are antialiased.
 Run: python tools/make_icons.py   (or --macos for just assets/macos/AppIcon.icns)
 """
@@ -26,10 +29,33 @@ def sd_round_rect(px, py, x, y, w, h, r):
     return math.hypot(max(qx, 0), max(qy, 0)) + min(max(qx, qy), 0) - r
 
 
-def sd_segment(px, py, ax, ay, bx, by):
-    pax, pay, bax, bay = px - ax, py - ay, bx - ax, by - ay
-    t = max(0.0, min(1.0, (pax * bax + pay * bay) / (bax * bax + bay * bay)))
-    return math.hypot(pax - bax * t, pay - bay * t)
+# ---- the artwork, in 512-unit design space -------------------------------------------------------------------
+OUTLINE = (84, 138, 344, 236, 46)   # x, y, w, h, corner radius (centre line of the stroke)
+STROKE = 33.0
+BAND = (141, 195, 230, 47, 23.5)
+INK = (0xee, 0xf1, 0xf6)
+GLOW = (0x2b, 0x99, 0xe7)
+LAMP = (0xfa, 0xab, 0x3f)
+
+
+def plate_color(qx, qy):
+    """The night plate: a quiet diagonal from #121722 to #07090d."""
+    t = max(0.0, min(1.0, (qx + qy) / 1024))
+    return [0x12 * (1 - t) + 0x07 * t, 0x17 * (1 - t) + 0x09 * t, 0x22 * (1 - t) + 0x0d * t]
+
+
+def art(qx, qy, col):
+    """Paints the mark over `col` (the plate colour at this point) and returns the result."""
+    d_band = sd_round_rect(qx, qy, *BAND)
+    if d_band > 0:
+        g = 0.5 * math.exp(-d_band / 26.0)  # the band's light spilling onto the plate
+        col = [c * (1 - g) + gc * g for c, gc in zip(col, GLOW)]
+    if abs(sd_round_rect(qx, qy, *OUTLINE)) - STROKE / 2 <= 0:
+        col = list(INK)
+    if d_band <= 0:
+        t = max(0.0, min(1.0, (qy - BAND[1]) / BAND[3]))  # brightest at the top edge
+        col = [0xe2 * (1 - t) + 0x8f * t, 0xf4 * (1 - t) + 0xd2 * t, 0xff * (1 - t) + 0xff * t]
+    return col
 
 
 def ico(path, images):
@@ -65,30 +91,20 @@ def render(size, maskable=False, rounded=True, badge=False):
                 for sx in range(ss):
                     px = (x + (sx + 0.5) / ss) / s
                     py = (y + (sy + 0.5) / ss) / s
-                    # background
-                    t = (px + py) / 1024
-                    bg = (0x1b * (1 - t) + 0x0b * t, 0x22 * (1 - t) + 0x0d * t, 0x30 * (1 - t) + 0x11 * t)
                     inside_bg = sd_round_rect(px, py, 0, 0, 512, 512, 112) <= 0 if (rounded and not maskable) else True
                     if not inside_bg:
                         continue
-                    col = list(bg)
                     # map into the (possibly shrunken) content box
                     qx = (px - off) / inner
                     qy = (py - off) / inner
-                    d_mon = abs(sd_round_rect(qx, qy, 96, 120, 320, 210, 34)) - 15
-                    d_base = sd_segment(qx, qy, 196, 396, 316, 396) - 15
-                    d_chk = min(sd_segment(qx, qy, 190, 226, 236, 272), sd_segment(qx, qy, 236, 272, 328, 180)) - 17
-                    if min(d_mon, d_base) <= 0:
-                        col = [0xe8, 0xeb, 0xf0]
-                    if d_chk <= 0:
-                        col = [0x5b, 0x9d, 0xff]
+                    col = art(qx, qy, plate_color(px, py))
                     if badge:
-                        # "someone is connected" dot for the tray icon, with a dark ring to separate it
+                        # "someone is connected" for the tray icon: the warm lamp, with a dark ring to separate it
                         d_dot = math.hypot(px - 412, py - 412) - 100
                         if d_dot <= 26:
-                            col = [0x0b, 0x0d, 0x11]
+                            col = [0x07, 0x09, 0x0d]
                         if d_dot <= 0:
-                            col = [0x3f, 0xbf, 0x74]
+                            col = list(LAMP)
                     acc[0] += col[0]; acc[1] += col[1]; acc[2] += col[2]; acc[3] += 255
             n = ss * ss
             i = (y * size + x) * 4
@@ -126,15 +142,7 @@ def render_macos(size):
                         ds = sd_round_rect(qx, qy - 12 / k, 0, 0, 512, 512, 115) * k
                         shadow += max(0.0, 1 - max(0.0, ds) / 28.0) ** 2 * 0.32
                         continue
-                    t = (qx + qy) / 1024
-                    col = [0x1b * (1 - t) + 0x0b * t, 0x22 * (1 - t) + 0x0d * t, 0x30 * (1 - t) + 0x11 * t]
-                    d_mon = abs(sd_round_rect(qx, qy, 96, 120, 320, 210, 34)) - 15
-                    d_base = sd_segment(qx, qy, 196, 396, 316, 396) - 15
-                    d_chk = min(sd_segment(qx, qy, 190, 226, 236, 272), sd_segment(qx, qy, 236, 272, 328, 180)) - 17
-                    if min(d_mon, d_base) <= 0:
-                        col = [0xe8, 0xeb, 0xf0]
-                    if d_chk <= 0:
-                        col = [0x5b, 0x9d, 0xff]
+                    col = art(qx, qy, plate_color(qx, qy))
                     acc[0] += col[0]; acc[1] += col[1]; acc[2] += col[2]
                     cov += 1
             n = ss * ss
