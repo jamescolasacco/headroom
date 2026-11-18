@@ -1,126 +1,85 @@
-# Relay and remote support
+# The relay and guest codes
 
-The account server (`account-server/server.mjs`) is also a relay. Every computer in an account keeps one
-outbound connection to it, so it can be reached **from any browser, anywhere**, with no port forwarding, no
-Tailscale and no certificate to install:
+Every Headroom Server keeps one outbound connection to the relay (part of the account server), so it can be
+reached from any browser on any network with no port forwarding, VPN or certificate install:
 
-- **Your own computers:** open your account server's address (`https://accounts.example.com/`) on any device,
-  sign in, and click a computer. If the device can't reach it directly (another network), the app goes through
-  the relay automatically.
-- **Remote support, AnyDesk-style:** the person at a computer opens Headroom Server → **Remote support**, creates
-  a one-time code, and gives it with the computer's **Headroom ID** (9 digits) to whoever is helping. The helper
-  opens the account server's address, chooses **Connect with an ID**, types both, and the computer shows
-  **Accept / View only / Decline**. The helper needs no account, no app and no pairing.
+- **Your devices:** a computer signed in to your account is on the relay as one of your devices; signed-in
+  browsers reach it at `/r/<its relay id>/` (the website does this for you — nobody sees or types relay ids).
+- **Guests:** any computer, signed in or not, can make a 9-digit code. Whoever has it opens the website, enters
+  it, and waits until the person at the computer clicks **Accept**.
 
-```
- browser (anywhere) ──HTTPS──▶ relay ◀──WebSocket (outbound)── computer
-                                │       control: {"t":"open",…}
-                                └──────WebSocket "tunnel" per viewer connection (raw bytes)──▶ computer's own HTTP server
-```
+Headroom Viewer on the same network connects to a computer directly instead.
 
 ## How it works
 
-1. A computer that joined an account opens a WebSocket to `/api/relay/control`, authenticated with its account
-   credential. The relay gives it a **Headroom ID** (9 digits, kept if the computer leaves and rejoins).
-2. A viewer request for `https://relay/r/<Headroom ID>/<path>` makes the relay send `{"t":"open","id":nonce}`
-   on the control connection. The computer opens `/api/relay/tunnel/<nonce>` (another WebSocket) and its binary
-   messages carry that viewer connection's raw bytes: one HTTP request, or a whole session WebSocket.
-3. The computer serves the tunnel with its normal HTTP stack, marked as **relayed**. The session protocol is the
-   same as a direct connection ([PROTOCOL.md](PROTOCOL.md)); the web client only changes its base address to
-   `…/r/<Headroom ID>`.
-
-Links between computers and the relay are WebSockets so that reverse proxies and tunnels (Caddy, nginx,
-Cloudflare) pass them like any other traffic.
+1. The computer opens a WebSocket to `/api/relay/control` — with its account credential, or with none (then it
+   gets a random, unguessable relay id each time and is reachable only with codes; at most 5 such computers per
+   network address).
+2. For each viewer connection, the relay sends `{"t":"open","id":<nonce>,"client":<address>,"country":<cc>,
+   "guest":<bool>}`; the computer opens a tunnel WebSocket to `/api/relay/tunnel/<nonce>` whose binary messages
+   carry the viewer's bytes, and serves it like a direct connection (marked as relayed: never local).
+3. The relay adds `X-Headroom-Client`, `X-Headroom-Country` and `X-Headroom-Guest` to forwarded requests and
+   drops any the viewer sent.
 
 ## What can go through it
 
-Only `/ws` (sessions), `/api/info`, `/api/me` and `/api/files/{list,download,upload,mkdir}`. Pairing, the settings
-API and certificate pages are refused **twice**: by the relay, and by the computer, which also never treats a
-relayed connection as local (the relay may run on the very same machine). Every session still authenticates on
-the computer: an account device's per-computer key, a paired device's token, or a support code.
+To `/r/<id>/`: only `/ws` (sessions), `/api/info`, `/api/me` and `/api/files/{list,download,upload,mkdir}`.
+To `/c/<code>/` (a guest before being accepted): only `/ws` and `/api/info` (the computer's name). Never the
+settings window, its API or anything else — the computer enforces the same lists again.
 
-## Support codes
+## Guest codes
 
-- 6 digits, valid for an hour, **one use**: the first accepted session uses it up. Five wrong tries withdraw it,
-  and failed tries count against the viewer's address in the computer's rate limiter.
-- **Ask before accepting** is on by default: the menu-bar app (Mac) or tray app (Windows) and the settings page
-  show the request; no answer within a minute means no. Turning it off allows unattended access with a code alone.
-- An accepted session gets a **resume key** so a dropped connection reconnects without asking again. It works
-  while the session lasts plus 10 minutes, at most 12 hours, and is never saved to disk. Disconnecting the
-  session from the computer revokes it.
-- Session messages: the viewer sends `{"t":"hello","support":{"code","name"}}`; the computer may answer
-  `{"t":"pending","message"}` while it asks, then `welcome` (with `resumeToken`, `support: true`) or
-  `{"t":"error","code":"bad-code"|"declined"}`. Reconnects send the resume key as `token`.
+- **Making one:** Headroom Server → *Let someone connect* → *Create a code*. The computer asks the relay for a
+  4-digit **slot** (`{"t":"slot"}`), which routes `/c/<slot>/` to it, and adds 5 secret digits of its own: the
+  relay never sees them. The code is shown as `123 456 789`, with a link `https://<site>/#code=123456789` (the
+  fragment never reaches a server). It works for one person, for 10 minutes, and stops when used, cancelled
+  ("Stop sharing"), withdrawn, or when the computer goes offline.
+- **Guessing:** unknown slots are throttled per address (5 free tries, then exponential) and overall; on a real
+  slot, 5 wrong secret digits make the computer withdraw the code. Codes only work through the relay's code path,
+  not directly.
+- **Accepting:** the computer always asks: "“name” wants to connect", with the name labelled as not verified, the
+  approximate location (country) and address, and a warning about support scams. **Accept**, **View only** or
+  **Decline**; *Let them transfer files* and *Share clipboard* start unticked. No answer in 2 minutes declines.
+  At most 3 people can wait at once; accepting one declines the others.
+- **During the session:** a bar at the top of the screen shows who is connected, with **Stop**. In the window
+  (Home), control, files and clipboard can be switched per guest while connected. The computer never sends its
+  clipboard to a guest unless allowed.
+- **Dropped connections:** an accepted guest gets a resume key and continues at the computer's own relay path; it
+  reconnects without asking again for 2 minutes after a drop (12 hours at most). Stop ends it for good.
 
 ## Trust model
 
 - TLS runs from the browser to the relay and from the relay to the computer, but **the relay itself sees the
-  session in the clear** (it's a proxy, not end-to-end encryption). Run it yourself, on a machine you trust: it's
-  the same server that already decides who's in your account.
+  session in the clear** (it's a proxy, not end-to-end encryption; that is next on the roadmap). Run your own if
+  you'd rather trust only yourself.
 - The relay can't make a computer accept anything it wouldn't accept directly: the computer authenticates every
-  session and refuses everything outside the paths above.
-- Headroom IDs are not secrets. Knowing one lets someone see the computer's name and try support codes, which the
-  limits above make hopeless.
+  session (your account's keys, or a guest it accepted) and refuses everything outside the paths above.
+- Limits: `MAX_HOSTS` computers and `MAX_TUNNELS` viewer connections at once (and 64 per computer); 5 computers
+  without an account per network address.
 
 ## Putting the relay on the internet
 
-The relay needs a public **HTTPS** address (browsers won't use a plain-HTTP server from an HTTPS page, and
-passwords cross it). Pick one:
-
-- **Cloudflare Tunnel** (free, no open ports; needs a domain on Cloudflare):
-  ```bash
-  cloudflared tunnel login && cloudflared tunnel create headroom
-  cloudflared tunnel route dns headroom accounts.example.com
-  cloudflared tunnel run --url http://localhost:8780 headroom
-  ```
-  For a quick test without a domain, `cloudflared tunnel --url http://localhost:8780` prints a temporary
-  `https://….trycloudflare.com` address (it changes every run).
-- **Tailscale Funnel** (free; needs Tailscale on the server machine): `tailscale funnel 8780` publishes it at
-  `https://<machine>.<tailnet>.ts.net/`.
-- **A small VPS** with the Docker image behind Caddy (`reverse_proxy localhost:8780` gets a certificate by itself).
-
-Behind any of these, start the server with `TRUST_PROXY=1` so rate limiting and the computers see the viewer's
-real address (taken from `X-Forwarded-For`; only do this when the server isn't also reachable directly), and
-`BIND=127.0.0.1` so it's only reachable through the proxy.
-
-On a Linux server or VPS, from a checkout of the repository:
+The relay needs a public **HTTPS** address. On a Linux server or VPS:
 
 ```bash
-sudo tools/install-account-server-linux.sh --admin <your username>
+sudo tools/install-account-server-linux.sh --url https://relay.example.com
 ```
 
-It installs a systemd service (`headroom-accounts`) listening on `127.0.0.1:8780` behind your tunnel or proxy,
-creates your account (asking for the password), and keeps public sign-up off, so nobody can claim a fresh
-server before you. Run it again after `git pull` to update. On a Mac, `tools/install-account-server-macos.sh`
-does the same with a login item. Both need Node.js 20 or later.
+(see [ACCOUNTS.md](ACCOUNTS.md) for email and the human check), behind one of:
 
-Then join each computer to `https://<your public address>` in Headroom Server → Account, so they connect to the
-relay at the address browsers use.
+- **Cloudflare Tunnel** (free, no open ports; needs a domain on Cloudflare). In cloudflared's `config.yml`:
+  ```yaml
+  ingress:
+    - hostname: relay.example.com
+      service: http://localhost:8780
+    - service: http_status:404
+  ```
+  WebSockets pass through by default. **Bot Fight Mode** (and similar challenges) can block the computers' own
+  connections, which aren't browsers: if a computer reports "The relay refused this computer (HTTP 403)", turn it
+  off for this hostname or skip challenges for `/api/relay/`, `/r/` and `/c/`. Cloudflare's free plan limits a
+  single upload to **100 MB** through the relay.
+- **Tailscale Funnel** (`tailscale funnel 8780`) or **Caddy** (`reverse_proxy localhost:8780`).
 
-### With Cloudflare Tunnel
-
-Point a public hostname at the server: in cloudflared's `config.yml`
-
-```yaml
-ingress:
-  - hostname: relay.example.com
-    service: http://localhost:8780
-  - service: http_status:404
-```
-
-(or **Public Hostname** in the Zero Trust dashboard for a dashboard-managed tunnel). WebSockets pass through
-Cloudflare by default. Two things to know:
-
-- **Bot Fight Mode** (and similar challenges) can block the computers' own connections, which aren't browsers.
-  If a computer shows "The relay answered HTTP 403", turn it off for this hostname or add a WAF rule that skips
-  challenges for `/api/relay/` and `/r/`.
-- Cloudflare's free plan limits a single upload to **100 MB**; larger files can't be sent to a computer through
-  the relay (direct connections have no limit).
-
-## Settings
-
-| where | setting | |
-|---|---|---|
-| account server | `RELAY=off` | turn the relay off (accounts keep working) |
-| Headroom Server → Remote support | Reachable through the relay | per computer, on by default while it's in an account |
-| Headroom Server → Remote support | Ask before someone connects with a code | on by default |
+Behind any of these the server runs with `TRUST_PROXY=1` (the installer sets it) so rate limiting and computers see
+the viewer's real address and country (`CF-IPCountry` behind Cloudflare), and `BIND=127.0.0.1` so it's only
+reachable through the proxy. `RELAY=off` turns the relay off (accounts keep working).

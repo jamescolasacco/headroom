@@ -1,19 +1,23 @@
 # Headroom
 
-Self-hosted remote desktop for your own computers, in the spirit of RealVNC, Jump Desktop and Parsec.
-No cloud and no subscriptions: pair each device with each computer, or run your own small account server and
-sign in once to see all your computers in one list.
+Remote desktop for your own computers, and quick help with a code, in the spirit of RealVNC and AnyDesk.
+Open source, and you can run the whole service yourself.
 
-Like VNC Server + VNC Viewer, every device gets the half it needs:
+- **Your devices:** sign in with your email on each computer (Headroom Server) and it joins your account. Sign in
+  at the Headroom website or in Headroom Viewer on any device and every one of your computers is listed: click one
+  to connect, from anywhere. No addresses, no pairing, no port forwarding.
+- **Let someone connect:** on the computer, click *Let someone connect* and give them the 9-digit code (or the
+  link). They enter it in their browser — no account, nothing to install — and you click **Accept** and choose
+  what they can do.
 
-| Device | Be controlled (server) | Control others (viewer) |
+| Device | Be reached (server) | Reach others (viewer) |
 |---|---|---|
-| **Windows** | **Headroom Server**: background service + tray icon + settings window | **Headroom Viewer**: desktop app; captures Win, Alt+Tab, PrtScn |
-| **Mac** | **Headroom Server**: menu-bar app + settings window | **Headroom Viewer**: desktop app; captures ⌘Tab, ⌘Space, Mission Control, screenshots |
-| **iPhone / iPad** | — | the web app, installed via Share → Add to Home Screen (no App Store or developer account) |
+| **Windows** | **Headroom Server**: background service + tray icon + window | **Headroom Viewer** desktop app (captures Win, Alt+Tab, PrtScn), or any browser |
+| **Mac** | **Headroom Server**: menu-bar app + window | **Headroom Viewer** desktop app (captures ⌘Tab, ⌘Space, Mission Control), or any browser |
+| **iPhone / iPad** | — | the website, installed via Share → Add to Home Screen (no App Store) |
 
-The same web client also runs in any modern browser, served by each Headroom Server (and by the optional
-account server).
+The public service runs at **https://relay.colasac.co** (the apps use it unless you set another); the same server
+is in this repository for running your own.
 
 ## Install
 
@@ -28,9 +32,28 @@ Recording and Accessibility when asked.
 [latest release](https://github.com/jamescolasacco/headroom/releases/latest), extract, and run `install.ps1`
 (Server, as administrator) or `install-viewer.ps1` (Viewer).
 
-**iPhone / iPad:** nothing to download, see [Connecting from your iPhone / iPad](#connecting-from-your-iphone--ipad).
+**iPhone / iPad, or any browser:** nothing to install. Open https://relay.colasac.co.
 
 To build from source instead, see [Build](#build).
+
+## Using it
+
+1. **Create an account** at https://relay.colasac.co (email and password; we email you a code to confirm).
+2. **On each computer** you want to reach: Headroom Server → **Account** → sign in with that email. It shows up in
+   your list, named after the computer (rename it there).
+3. **On any device:** sign in at the website or in Headroom Viewer and click a computer. Your own devices connect
+   straight away; nobody has to accept.
+
+**Helping someone, or being helped:** the person at the computer opens Headroom Server → **Let someone connect** →
+*Create a code* and reads out the code or sends the link. The helper opens the website, types the code under
+**Got a code?** and their name. The computer shows who is asking (the name is not verified) and roughly where
+from, with a warning about scams; **Accept**, **View only** or **Decline**. File transfer and clipboard sharing
+are off unless ticked. While anyone is connected, a bar at the top of the screen says who, with **Stop**.
+A code works for one person, for 10 minutes, and computers that aren't signed in to an account can use codes too.
+
+Account security: optional two-factor sign-in (authenticator app), an email for every new sign-in, *Where you're
+signed in* with Sign out for each, password reset by email code, change email, delete account. Details:
+[docs/ACCOUNTS.md](docs/ACCOUNTS.md).
 
 ## What you get
 
@@ -43,15 +66,13 @@ To build from source instead, see [Build](#build).
 | **Touch** (iPhone/iPad) | **Trackpad mode**: slide to move, tap to click, two-finger tap for right-click, tap-then-drag, hold-to-drag, two-finger scroll with momentum, pinch to zoom with cursor-follow. **Touch mode**: click where you touch. Apple Pencil and iPad trackpads/mice work too. |
 | **On-screen keyboard** | The iOS keyboard (with dictation, emoji and predictive text), plus an **extra-keys bar**: Esc, Tab, Ctrl, Alt, Win (⌘ on a Mac host), Shift, arrows, F1–F12, Del/Home/End/PgUp/PgDn and Ctrl+Alt+Del (Force Quit on a Mac host). Modifiers are sticky: tap once for one key, tap twice to lock. |
 | **Shortcuts menu** | Windows hosts: Ctrl+Alt+Del, Task Manager, Lock, Start, Alt+Tab, Task View, Show desktop, Explorer, Run, Settings, Snip, PrtScn and Alt+F4. Mac hosts: Force Quit, Activity Monitor, Lock screen, App switcher, Spotlight, Mission Control, screenshots, Close/Quit/Hide/Minimize and Emoji. "Type text" helps at login screens. |
-| **Clipboard** | Text syncs both ways. Paste on your device pastes on the remote computer, and copying there lands in your device's clipboard; Safari is handled with gesture-privileged writes. There is also a manual clipboard panel. |
-| **Files** | Browse the remote computer's folders and download files (resumable ranges); upload with a picker or by dragging onto the window (lands in Downloads). |
+| **Clipboard** | Text syncs both ways (for guests only if you allow it). Safari is handled with gesture-privileged writes. There is also a manual clipboard panel. |
+| **Files** | Browse the remote computer's folders and download files (resumable ranges); upload with a picker or by dragging onto the window (lands in Downloads). For guests only if you allow it. |
 | **Audio** | System audio as Opus (Windows: WASAPI loopback; Mac: ScreenCaptureKit + AudioToolbox's encoder), with roughly 40 ms of buffering. |
 | **Displays** | Pick or cycle monitors (Ctrl+Alt+Shift+1…9 / ←→). Fit, 1:1 or Fill scaling, a resolution cap (native/1440p/1080p/720p/"this screen"), and frame-rate and bandwidth limits. |
 | **Service mode** (Windows) | Runs as a Windows service, so it works **at the sign-in screen, lock screen and UAC prompts**, starts before anyone logs in, and supports **real Ctrl+Alt+Del**. On a Mac, Headroom Server runs in your session (start it at login); the login window after a restart isn't reachable yet. |
-| **Accounts** (optional) | Your own account server (one Node.js process or Docker container): sign in once with username, password and optional two-factor, and every computer in the account is listed and connects without pairing. Remove a device once and it loses access everywhere within seconds. |
-| **From anywhere, in any browser** | The account server is also a relay: computers keep an outbound connection to it, so you reach them from any browser on any network, with no port forwarding, VPN or certificate install. Direct connections are still used whenever they work. |
-| **Remote support** | AnyDesk-style: the computer shows its 9-digit **Headroom ID** and a one-time code; a helper with neither account nor app types both into a browser, and you **Accept / View only / Decline**. |
-| **Security** | TLS everywhere. Devices pair once (password, optional TOTP, or a one-time code) or sign in to an account; after that only a revocable 256-bit token is used, made for that one computer. Brute-force protection, view-only devices, loopback-only admin page, optional lock-on-disconnect. |
+| **From anywhere** | Computers keep an outbound connection to the relay, so browsers reach them on any network with no port forwarding, VPN or certificate install. Headroom Viewer connects directly when it's on the same network. |
+| **Security** | HTTPS/TLS on every connection. Accounts: scrypt password hashing, breached-password check, rate limiting, optional TOTP, sign-in alerts, enumeration-safe answers, Turnstile against bots. Each sign-in gets a revocable key made for each computer alone; signing out cuts it off everywhere within seconds. Guests: the code's last 5 digits are checked only on the computer, 5 wrong tries end it, and nobody gets in without Accept. Sessions through the relay are encrypted on both legs (end-to-end encryption is next on the roadmap). |
 | **Resilience** | Auto-reconnect with backoff, recovery when the app returns from the background (iOS), keep-awake during sessions, and a decoder watchdog that falls back to software decoding. |
 
 ## Build
@@ -71,7 +92,7 @@ tools/build-macos.sh
 That produces `dist/Headroom Server.app` and `dist/Headroom Viewer.app` (`--universal` for Intel + Apple
 silicon). The first build fetches SwiftNIO, swift-nio-ssl and swift-certificates and takes a few minutes.
 
-## Headroom Server (the PC you want to reach)
+## Headroom Server (Windows)
 
 - **Install** (recommended). Run as administrator:
   ```bash
@@ -79,28 +100,9 @@ silicon). The first build fetches SwiftNIO, swift-nio-ssl and swift-certificates
   ```
   It installs to `C:\Program Files\Headroom` and registers the `Headroom` service, which starts with
   Windows, works before anyone signs in, and can show and control **UAC prompts, the lock screen and
-  Ctrl+Alt+Del**. It also adds a firewall rule for private networks, a Start-menu entry, and the tray
-  icon at sign-in.
-- **Or just try it:** run `dist\Headroom\HeadroomServer.exe`.
-  - The tray app runs the server for you in "user mode", with no console window.
-  - UAC prompts and the lock screen appear as a notice instead of video.
-  - When Windows asks about the firewall, allow **Private networks**.
-
-**The tray icon:**
-- A green dot appears while someone is connected.
-- Notifications pop up on connect and disconnect.
-- The menu has: open, pair a device, copy address, disconnect everyone, start/stop, start with Windows.
-
-**The settings window** has these sections:
-- **Status:** connected viewers, with disconnect.
-- **Pair a device:** a one-time code plus scannable QR codes.
-- **Devices:** revoke, or make view-only.
-- **Security:** password and authenticator-app 2FA.
-- **Features:** clipboard, files, sound, remote control.
-- **Quality:** encoder, frame rate, bitrate.
-- **Connection:** Tailscale, certificate fingerprints.
-
-The same panel is at http://localhost:7080/admin.html on that PC.
+  Ctrl+Alt+Del**. It also adds a Start-menu entry and the tray icon at sign-in.
+- **Or just try it:** run `dist\Headroom\HeadroomServer.exe`. The tray app runs the server for you in "user mode";
+  UAC prompts and the lock screen appear as a notice instead of video.
 
 ## Headroom Server (Mac)
 
@@ -108,113 +110,52 @@ The same panel is at http://localhost:7080/admin.html on that PC.
 tools/install-macos.sh          # add --cli to also put `headroom` on your PATH
 ```
 - **Install:** copies both apps to `/Applications` (or `~/Applications`) and starts Headroom Server. It lives in
-  the **menu bar**; turn on **Start at Login** from its menu.
-- **Permissions:** macOS asks for two, and the Status page shows both with buttons to fix them:
+  the **menu bar**; turn on **Start at login** in its Settings.
+- **Permissions:** macOS asks for two, and the window shows both with buttons to fix them:
   - **Screen Recording** (Privacy & Security → Screen & System Audio Recording): video and sound. macOS restarts
     the app after you turn it on.
   - **Accessibility** (Privacy & Security → Accessibility): mouse and keyboard control.
-- **The menu-bar icon** shows a dot while someone is connected (notifications pop up on connect and disconnect)
-  and has: open, pair a device, copy address, disconnect everyone, allow permissions, start/stop, start at login.
-- **The settings window** is the same panel as on Windows (status, pairing with QR codes, devices, security,
-  features, quality, connection), also at http://localhost:7080/admin.html on that Mac.
-- **Firewall:** if the macOS firewall is on, allow incoming connections for Headroom Server when asked.
-- **Locking:** "Lock this Mac when the last viewer disconnects" is in Security. The login window after a restart
+- **Locking:** "Lock this Mac when the last person disconnects" is in Settings. The login window after a restart
   can't be shown yet (see the roadmap).
 
 Data lives in `~/Library/Application Support/Headroom` (config and certificates, readable only by you) and logs
 in `~/Library/Logs/Headroom`. `tools/uninstall-macos.sh [--purge]` removes everything.
 
-## Headroom Viewer (Mac)
+**On both**, the window has four sections: **Home** (who's connected, with Stop, and for guests their control,
+files and clipboard switches), **Let someone connect** (codes), **Account** (sign in, this computer's name) and
+**Settings** (start at login, what your devices may do, quality, permissions). The tray / menu-bar icon has the
+same essentials, and the Accept prompt appears there.
 
-Installed by `tools/install-macos.sh` (or `--only viewer`). It works like the Windows viewer:
-- **Adding a computer:** the first time, it shows the computer's **server key fingerprint**; compare it with
-  Headroom Server → Connection, then trust it. The key is pinned for the viewer only: nothing goes into your
-  keychain, and the pin survives certificate renewals.
-- **System shortcuts:** while a session window is focused, **⌘Tab, ⌘Space, ⌃↑/⌃↓, ⌘⇧3/4/5 and ⌘Q/⌘W/⌘H** go to
-  the remote computer, not your Mac. Use the menus (or Ctrl+Alt+Shift+Q) to close a session.
-- **Windows and full screen:** each computer can open in its own window (computer menu → Open in new window);
-  ⌃⌘F for full screen. Sound, clipboard sync, file downloads (to Downloads) and uploads work as in a browser.
+## Headroom Viewer (Mac and Windows)
 
-## Headroom Viewer (Windows)
+Sign in once; your computers are listed, online first. On the same network it connects directly (trusting the
+computer's key as vouched for by your account), otherwise through the relay. "Got a code?" works here too.
+- **Mac:** while a session window is focused, **⌘Tab, ⌘Space, ⌃↑/⌃↓, ⌘⇧3/4/5 and ⌘Q/⌘W/⌘H** go to the remote
+  computer, not your Mac. Use the menus (or Ctrl+Alt+Shift+Q) to close a session.
+- **Windows:** per-user install, no admin rights (`dist\HeadroomViewer\install-viewer.ps1`). While a session
+  window is focused, **Win, Win+anything, Alt+Tab, Alt+F4, Ctrl+Esc and PrtScn go to the remote PC**.
+  Ctrl+Alt+End sends Ctrl+Alt+Del.
+- Each computer can open in its own window (the arrow button next to it).
 
-```bash
-powershell -ExecutionPolicy Bypass -File dist\HeadroomViewer\install-viewer.ps1
-```
-- **Install:** per-user, no admin rights needed. It adds a Start-menu and desktop shortcut.
-- **Adding a computer:** add it by address. The first time, the viewer shows that computer's **server key
-  fingerprint**; compare it with Headroom Server → Connection, then confirm.
-- **Certificate trust:** the viewer trusts that key for itself only. Nothing is installed into Windows'
-  certificate store, and the key stays the same when the server renews its certificate.
-- **Shortcuts:** while a session window is focused, **Win, Win+anything, Alt+Tab, Alt+F4, Ctrl+Esc and
-  PrtScn go to the remote PC**. Ctrl+Alt+End sends Ctrl+Alt+Del.
-- **Windows:** each computer can open in its own window (computer menu → Open in new window).
+## iPhone / iPad
 
-## Connecting from your iPhone / iPad
-
-Browsers only decode video in hardware over HTTPS, so each device must trust the computer once. Pick one:
-
-- **Tailscale (recommended, also works away from home):**
-  1. Install Tailscale on the computer and the phone, and sign both into your tailnet.
-  2. In the Tailscale admin console, turn on **MagicDNS** and **HTTPS Certificates**.
-  3. Headroom fetches a real certificate automatically and prints `https://<computer>.<tailnet>.ts.net:7443/`.
-  4. Open that address in Safari. No certificate install is needed.
-- **Home network only (local certificate):** on the phone, open `http://<computer-ip>:7080/` in Safari and
-  follow the steps:
-  1. Download the profile.
-  2. Install it under Settings → General → VPN & Device Management.
-  3. Turn on Settings → General → About → Certificate Trust Settings → Headroom Local CA.
-  4. Then open `https://<computer-ip>:7443/`.
-
-Then install the app and pair:
-1. In Safari, open the computer's `https://` address and tap **Share → Add to Home Screen**.
-2. Open **Headroom** from your Home Screen. It finds the computer and asks to pair: enter the one-time code
-   from Headroom Server → Pair a device (the password works too).
-
-Pair *inside* the Home Screen app: iOS gives it its own storage, separate from Safari's, so a pairing made in
-Safari doesn't carry over. Scanning the pairing QR code with the camera pairs Safari instead; that's handy if
-you'd rather not install the app, and Safari shows the code to type into the app if you change your mind.
-
-Sound needs iOS 26 or later (Safari's WebCodecs audio); on older versions everything else works, silently.
-
-Tip: in the iPhone's Settings → Apps → Safari (or the home-screen app), allow "Paste from Other Apps" to
+Open https://relay.colasac.co in Safari, sign in (or enter a code), then **Share → Add to Home Screen** for a
+full-screen app. The Home Screen app has its own storage, so sign in again inside it. Sound needs iOS 26 or later
+(Safari's WebCodecs audio). Tip: allow "Paste from Other Apps" for Safari (or the home-screen app) in Settings to
 avoid paste prompts.
 
-## Accounts (optional)
+## Running your own server
 
-Pairing works computer by computer. With an account, each device signs in once and sees every computer:
-
-1. Run the account server somewhere your devices can reach (a home server, a VPS, a Tailscale machine). It needs
-   Node.js 20+ and nothing else:
-   ```bash
-   node account-server/server.mjs                # or: docker build -f account-server/Dockerfile -t headroom-accounts .
-   ```
-   The first account created is the owner's; after that, sign-up closes (`SIGNUP=open` to allow more, or
-   `node account-server/server.mjs add-user <name>`). Give it HTTPS with a real certificate (`TLS_CERT`/`TLS_KEY`,
-   `tailscale cert`, or a reverse proxy such as Caddy): the app can't reach a plain-HTTP server from an HTTPS page.
-2. On each computer: Headroom Server → Settings → **Account** → sign in.
-3. On each device: open Headroom (any Headroom Server's address, the account server's own address, or Headroom
-   Viewer) → **Sign in to your account**.
-
-Tap your account name to remove devices, make one view-only, turn on two-factor sign-in or change the password.
-The first account is the server's administrator: **Manage people** invites others with a single-use link, resets
-passwords and two-factor, and assigns roles; each person sees only their own computers. Pairing keeps working
-alongside. Details, security controls (NIST SP 800-63B / OWASP ASVS) and the trust model:
-[docs/ACCOUNTS.md](docs/ACCOUNTS.md).
-
-## From anywhere, and remote support
-
-Put the account server on the internet with HTTPS (Cloudflare Tunnel, Tailscale Funnel or a small VPS; see
-[docs/RELAY.md](docs/RELAY.md)) and join your computers to it at that address. Then:
-
-- **Reach your own computers** from any browser: open the account server's address, sign in, click a computer.
-  When there's no direct path, the session goes through the relay.
-- **Get help (or help someone), AnyDesk-style:** on the computer, Headroom Server → **Remote support** →
-  *Create a code*. Give the helper the 9-digit **Headroom ID** and the 6-digit code (or the link shown). They open
-  the account server's address, choose **Connect with an ID**, and you click **Accept** (or *View only*) when
-  Headroom asks. The code works once; disconnecting the session ends it for good.
-
-To run the account server as a service: `sudo tools/install-account-server-linux.sh --admin <you>` on a Linux
-server or VPS (systemd), or `tools/install-account-server-macos.sh` on a Mac. Both need Node.js 20+.
+The account server and relay is one Node.js file with no dependencies (`account-server/server.mjs`). On a Linux
+server or VPS (systemd), behind HTTPS (Cloudflare Tunnel, Caddy, nginx):
+```bash
+sudo tools/install-account-server-linux.sh --url https://relay.example.com
+```
+Then put your [Resend](https://resend.com) API key and sender address, and your Cloudflare Turnstile keys, in
+`/etc/headroom-accounts.env` and `sudo systemctl restart headroom-accounts`. Moderation from the command line:
+`sudo headroom-accounts list-users` (also `disable-user`, `enable-user`, `reset-2fa`, `delete-user`). Point the
+apps at it: `DEFAULT_ACCOUNT_SERVER` in `web/js/config.js`, and `"server"` in each Headroom Server's config.json.
+See [docs/ACCOUNTS.md](docs/ACCOUNTS.md) and [docs/RELAY.md](docs/RELAY.md).
 
 ## Keyboard shortcuts in a session
 
@@ -236,13 +177,9 @@ On iPad with a hardware keyboard, ⌘. sends Esc. Shortcuts that iPadOS or macOS
 The same commands work on both platforms (`headroom.exe` on Windows; on a Mac, the `headroom` inside
 `Headroom Server.app/Contents/MacOS`, linked onto your PATH by `install-macos.sh --cli`):
 ```bash
-headroom                    # run in user mode (prints addresses + pairing code)
-headroom set-password       # set the pairing password
-headroom pair               # one-time pairing code (host must be running)
-headroom devices            # list paired devices
-headroom revoke <id>        # revoke a device
+headroom                    # run in user mode
 headroom service install    # service mode (admin, Windows)
-headroom service uninstall  # remove the service (--purge also deletes pairings/certs) (Windows)
+headroom service uninstall  # remove the service (--purge also deletes settings/certs) (Windows)
 headroom permissions        # Screen Recording / Accessibility status; --request shows the prompts (Mac)
 headroom selftest 5         # capture + encode test, writes an .h264 you can inspect with ffprobe
 ```
@@ -259,9 +196,9 @@ host-windows/Headroom.Host/   C# / .NET 10 host
   Session/   WebSocket session: priority send queue, flow control, adaptive bitrate, input dispatch
   Input/     SendInput injection (scancodes / Unicode), desktop following for secure desktops
   Services/  clipboard, WASAPI→Opus audio, sessions/keep-awake
-  Security/  pairing, tokens, TOTP, rate limiting, local CA + Tailscale certificates
+  Security/  session tokens, rate limiting, local CA + Tailscale certificates
   Service/   Windows service + session agent launcher (SYSTEM in the console session), installer
-  Web/       Kestrel HTTPS/WSS server, file API, certificate trust page
+  Web/       Kestrel HTTPS/WSS server, file API, settings API
 host-windows/Headroom.Server/ HeadroomServer.exe: tray icon, notifications, settings window (WebView2)
 viewer-windows/Headroom.Viewer/ HeadroomViewer.exe: WebView2 shell, pinned-key trust, system-shortcut hook
 host-macos/                   Swift package (SwiftNIO + swift-nio-ssl + swift-certificates)
@@ -271,20 +208,20 @@ host-macos/                   Swift package (SwiftNIO + swift-nio-ssl + swift-ce
     Session/   WebSocket session: flow control, adaptive bitrate, input dispatch
     Input/     CGEvent injection (W3C code → macOS virtual key codes)
     Services/  clipboard, ScreenCaptureKit audio → Opus, power, host info, permissions
-    Security/  pairing, tokens, TOTP, rate limiting, local CA + Tailscale certificates
-    Net/ Web/  HTTP/1.1 + WebSocket server on NIO with SNI certificate selection, file API, trust page
+    Security/  session tokens, rate limiting, local CA + Tailscale certificates
+    Net/ Web/  HTTP/1.1 + WebSocket server on NIO, relay connection, file API, settings API
   Sources/headroom/           the CLI / engine executable (`headroom run`, `headroom agent`, …)
   Sources/HeadroomServer/     Headroom Server.app: menu-bar icon, notifications, settings window (WKWebView)
 viewer-macos/                 Headroom Viewer.app: WKWebView shell, pinned-key trust, system-shortcut capture
 web/                          the client (vanilla ES modules, no build step), also the PWA
   js/video/  worker decoder: VideoTrackGenerator→<video> on Safari, OffscreenCanvas elsewhere
   js/input/  keyboard (profiles, quirks), mouse, touch gestures, soft keyboard
-account-server/               optional account server (Node.js, no dependencies): accounts, devices, per-computer keys
+account-server/               the account server and relay (Node.js, no dependencies): accounts, devices, guest codes
 docs/PROTOCOL.md              wire protocol (the contract for other hosts)
 docs/ACCOUNTS.md              accounts: setup, trust model, API
-docs/RELAY.md                 the relay, remote support codes, putting the account server on the internet
+docs/RELAY.md                 the relay, guest codes, putting the server on the internet
 tools/                        publish / install / uninstall scripts (Windows .ps1, macOS .sh), icon generator,
-                              protocol-check.mjs (headless end-to-end test of any host)
+                              protocol-check.mjs and account-check.mjs (headless end-to-end tests of any host)
 ```
 
 ## Development
@@ -294,8 +231,9 @@ Run the host against the live `web/` folder with a separate data dir:
 dotnet run --project host-windows/Headroom.Host -- run --data=.devdata --webroot=web
 swift run --package-path host-macos headroom run --data=.devdata-mac --webroot=web
 ```
-Then open http://localhost:7080/. Loopback counts as a secure context, so plain HTTP works on the PC
-itself. Viewing the PC from itself mirrors the screen and disables audio to avoid feedback.
+Then open http://localhost:7080/ for the window. Run the account server too (`DEV_MAIL=1 node account-server/server.mjs`,
+then `"server": "http://127.0.0.1:8780"` in the dev data dir's config.json) and open http://localhost:8780/ for the
+website; with `DEV_MAIL=1`, emailed codes are at `/api/dev/mail?to=<email>`.
 
 On a Mac, a host started from a terminal uses *the terminal's* Screen Recording and Accessibility permissions.
 
@@ -308,11 +246,15 @@ Development switches:
 - `HEADROOM_CDP_PORT=<port>` exposes the Windows viewer's page over the Chrome DevTools Protocol for scripted tests;
   `HEADROOM_DEVTOOLS=1` makes the Mac viewer's page inspectable in Safari.
 
-`node tools/protocol-check.mjs` (run on the host) pairs a throwaway device, streams video, checks keyframes,
-epochs, acks, pings and stats, and validates the received H.264 with ffprobe. It works against either host.
+`node tools/protocol-check.mjs` (run on the host) connects as a guest with a code through the relay, accepts
+itself, streams video, checks keyframes, epochs, acks, pings, stats, permission changes, resuming and Stop, and
+validates the received H.264 with ffprobe. `node tools/account-check.mjs` signs the host in to an account and
+connects through the relay as one of your devices. Both work against either host.
 
 ## Roadmap
 
+- **End-to-end encryption** of sessions through the relay (keys only on the two ends; for guests, proven by the
+  code), so the relay can't see them.
 - **Mac login window:** a LaunchDaemon helper so a Mac can be reached after a restart, before anyone logs in
   (the counterpart of Windows service mode).
 - Signed and notarized Mac builds (stable permissions across updates), and a Windows/Mac installer UI.

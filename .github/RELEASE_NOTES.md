@@ -1,30 +1,14 @@
-Self-hosted remote desktop for your own computers: **Headroom Server** on the computer you want to reach, **Headroom Viewer** (or the iPhone/iPad web app) on the device you use. Pair devices one by one, or run your own small account server and sign in once.
+Remote desktop for your own computers, and quick help with a code: **Headroom Server** on the computer you want to reach; **Headroom Viewer**, any browser, or an iPhone/iPad on the device you use.
 
-## New in 0.3: people and a plain login
+## New in 0.4: one account for your devices, and codes for everyone else
 
-- **Sign in like any other service.** The apps sign in to the built-in account server (set in `web/js/config.js`);
-  signed out, the home screen is just a login.
-- **People.** The first account is the administrator: invite others with a single-use link (they pick their own
-  password), send password-reset links, reset two-factor, assign roles, remove accounts. Each person sees only
-  their own computers.
-- **Security, aligned with NIST SP 800-63B and OWASP ASVS:** 12-character minimum with checks against common and
-  breached passwords, stronger password hashing (upgraded at your next sign-in), re-entering your password for
-  sensitive changes, other devices signed out when a password changes, idle sign-ins expiring after 90 days, a
-  strict Content-Security-Policy and HSTS, and an audit log. See
-  [docs/ACCOUNTS.md](https://github.com/jamescolasacco/headroom/blob/master/docs/ACCOUNTS.md#security-controls).
-- **Updating your account server:** `cd headroom && git pull && sudo tools/install-account-server-linux.sh`.
-  Existing accounts keep working; the oldest becomes the administrator.
+- **Your devices, signed in with your email.** Create an account at https://relay.colasac.co (email, password, and a code we email you). Sign in with it in Headroom Server on each computer and it's one of your devices, listed even while it's off. Sign in at the website or in Headroom Viewer and click a computer to connect, from anywhere. No addresses, no pairing, no port forwarding. Rename a computer in Headroom Server.
+- **Let someone connect.** Headroom Server → *Let someone connect* gives a 9-digit code and a link. The other person enters it in their browser — no account, nothing to install. Your computer always asks first: it shows the name they typed (marked as not verified), roughly where they are, and a warning about support scams. **Accept**, **View only** or **Decline**; file transfer and clipboard are off unless you tick them. A bar at the top of your screen shows who's connected, with **Stop**, and you can switch their control, files and clipboard while they're connected. Works on computers that aren't signed in to an account too.
+- **Account security:** email verification, "Forgot password?" by emailed code, a human check against bots, optional two-factor sign-in, an email for every new sign-in, *Where you're signed in* with Sign out for each, change email, delete account.
+- **Simpler apps.** Headroom Server's window has four sections: Home, Let someone connect, Account, Settings. The website is a code box and a sign-in when signed out, and your devices when signed in.
+- **Removed:** pairing (passwords, pairing codes, QR codes), adding computers by address, Headroom IDs, the people/invites page, and computers serving their own web pages and certificate pages. Old pairings and username accounts don't carry over: sign in again with an email.
 
-## New in 0.2: from anywhere, and remote support
-
-- **Any browser, any network.** Your account server is now also a relay: computers keep an outbound connection
-  to it, so you can reach them from anywhere with no port forwarding, VPN or certificate install. Direct
-  connections are still used whenever they work.
-- **Remote support, AnyDesk-style.** Headroom Server → Remote support shows the computer's 9-digit Headroom ID and a
-  one-time code. The helper opens your account server's address in any browser, chooses **Connect with an ID**,
-  and you click **Accept**, **View only** or **Decline**.
-- Put the account server on the internet with Cloudflare Tunnel, Tailscale Funnel or a small VPS:
-  [docs/RELAY.md](https://github.com/jamescolasacco/headroom/blob/master/docs/RELAY.md).
+**Running your own server:** `git pull && sudo tools/install-account-server-linux.sh --url https://your.domain`, then add your Resend and Turnstile keys to `/etc/headroom-accounts.env`. The old username database is set aside and the server starts fresh. See [docs/ACCOUNTS.md](https://github.com/jamescolasacco/headroom/blob/master/docs/ACCOUNTS.md).
 
 ## Install
 
@@ -47,13 +31,8 @@ Prefer to download it yourself? Get **Headroom-macOS.zip** below, unzip it, then
 
 The builds aren't code-signed, so SmartScreen may warn: choose **More info → Run anyway**.
 
-### iPhone / iPad
+### iPhone / iPad, or any browser
 
-No download: open your computer's Headroom address in Safari, then Share → Add to Home Screen. The [README](https://github.com/jamescolasacco/headroom#connecting-from-your-iphone--ipad) has the steps for trusting the computer's certificate (or use Tailscale).
-
-## Connecting
-
-- **Pairing:** Headroom Server → Pair a device shows a one-time code. In Headroom Viewer, add the computer by its address and enter the code.
-- **Accounts and relay (optional):** run `node account-server/server.mjs` from the source (Node 20+; on a Mac, `tools/install-account-server-macos.sh` keeps it running) or its Docker image, put it behind HTTPS, join each computer in Headroom Server → Settings → Account, and sign in on your devices. See [docs/ACCOUNTS.md](https://github.com/jamescolasacco/headroom/blob/master/docs/ACCOUNTS.md) and [docs/RELAY.md](https://github.com/jamescolasacco/headroom/blob/master/docs/RELAY.md).
+Nothing to install: open https://relay.colasac.co. In Safari, Share → Add to Home Screen gives a full-screen app.
 
 `SHA256SUMS.txt` lists the checksums of every download.

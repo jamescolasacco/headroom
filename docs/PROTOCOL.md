@@ -24,9 +24,12 @@ JSON control messages, and binary frames carry media and input. Binary layouts a
    ```
    Error codes are `unauthorized`, `rate-limited` (with `retryAfter` in seconds) and `bad-request`.
 
-   Remote support ([RELAY.md](RELAY.md)): instead of `token`, `hello` may carry `"support": {"code", "name"}`. The
-   host may first send `{"t":"pending","message"}` while it asks the person at the computer, then `welcome` (with
-   `"resumeToken"` and `"support": true`, used as `token` to reconnect) or an error: `bad-code` or `declined`.
+   Guest codes ([RELAY.md](RELAY.md)): through the relay's code path (`/c/<slot>/ws`) only, `hello` carries
+   `"support": {"code", "name"}` instead of `token`. The host sends `{"t":"pending","message"}` (repeated every 20 s)
+   while it asks the person at the computer, then `welcome` (with `"resumeToken"`, used as `token` to reconnect,
+   `"support": true` and `"relayPath": "/r/<id>"`, where the session continues: the code is used up) or an error:
+   `bad-code` or `declined`. While connected, the host may send `{"t":"permissions","permissions":{…}}` when what
+   the session may do changes (same fields as in `welcome`).
 
    `host.os` is `windows` or `macos`; the client adapts keyboard profiles, the shortcuts menu and the extra-keys
    bar to it. Monitor fields per host:
@@ -41,8 +44,8 @@ JSON control messages, and binary frames carry media and input. Binary layouts a
      "maxWidth": 0, "maxHeight": 0, "audio": true }
    ```
 
-Tokens come from pairing (`POST /api/pair`, see §6), an account ([ACCOUNTS.md](ACCOUNTS.md)) or a support
-session, and are never placed in URLs. Through the relay, the same protocol runs under `https://<relay>/r/<Headroom ID>/`.
+Tokens come from an account ([ACCOUNTS.md](ACCOUNTS.md)) or an accepted guest's resume key, and are never placed
+in URLs. Through the relay, the same protocol runs under `https://<relay>/r/<relay id>/`.
 
 ## 2. Video
 
@@ -140,18 +143,16 @@ The host only ever sees plain key codes.
 
 | method | path | auth | purpose |
 |---|---|---|---|
-| GET | `/api/info` | none | host identity, whether a password is set, TOTP requirement |
-| POST | `/api/pair` | password + optional TOTP, or a one-time `code` | returns `{token, device, host}` |
+| GET | `/api/info` | none | `{host: {id, name, machine, os, osVersion, version}}` |
 | GET | `/api/me` | Bearer | token health check |
 | GET | `/api/files/list?path=` | Bearer | directory listing; empty path lists roots |
 | POST | `/api/files/upload?dir=&name=` | Bearer | raw body; saved under a non-clashing name |
 | GET | `/api/files/download?t=` | ephemeral token | file download |
-| GET | `/headroom-ca.crt`, `/headroom-ca.mobileconfig` | none | local CA for device trust |
-| * | `/api/admin/*` | loopback only: loopback peer *and* loopback `Host`, no foreign `Origin`, `Sec-Fetch-Site` same-origin/none (so web pages can't use it); never CORS | password, pairing codes, devices, settings, `account/join\|leave\|sync`; on macOS also `permissions` in `/status` and `POST /permissions/request {"kind":"screen"\|"accessibility"}` |
+| * | `/api/admin/*` | loopback only: loopback peer *and* loopback `Host`, no foreign `Origin`, `Sec-Fetch-Site` same-origin/none (so web pages can't use it); never CORS | the window's API: `status`, `settings`, `support/code` (POST/DELETE), `support/requests/<id>`, `sessions/<id>/disconnect\|rights`, `sessions/disconnect-all`, `account/join\|leave\|sync`; on macOS also `permissions/request` |
 
-Hosts joined to a Headroom account also accept the account's devices: their tokens are checked against the
-hashes from the host's last check-in with the account server ([ACCOUNTS.md](ACCOUNTS.md)), and they appear as
-`account:<id>` devices. To a client, nothing in this protocol changes.
+Only the paths above with `none`/Bearer/ephemeral auth (and `/ws`) answer on the network; the settings window and
+`/api/admin` are loopback-only. Your account's sign-ins are checked against the hashes from the host's last
+check-in ([ACCOUNTS.md](ACCOUNTS.md)) and appear as `account:<id>`; guests appear as `guest:<id>`.
 
 The WebSocket upgrade is accepted on any request of a keep-alive connection, not only the first.
 
