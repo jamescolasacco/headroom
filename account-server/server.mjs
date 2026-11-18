@@ -3,8 +3,8 @@
 // account is there, with no per-computer pairing. Zero dependencies (Node 20+), JSON-file storage.
 //
 //   node server.mjs                     run (PORT, BIND, DATA_DIR, WEB_ROOT, TLS_CERT/TLS_KEY, SIGNUP, NAME, TRUST_PROXY)
-//   node server.mjs add-user <name>     create an account (asks for the password)
-//   node server.mjs list-users | reset-password <name> | reset-2fa <name> | delete-user <name>
+//   node server.mjs add-user <name> [--admin]   create an account (asks for the password; the first is the admin)
+//   node server.mjs list-users | reset-password <name> | reset-2fa <name> | make-admin <name> | make-user <name> | delete-user <name>
 //
 // Trust model (docs/ACCOUNTS.md): computers check in with their addresses and certificate pins and receive the
 // account's devices as (id, name, token hash). Each signed-in device gets one token *per computer*, derived as
@@ -38,6 +38,13 @@ const SIGNUP = env.SIGNUP || 'first';          // first (only while no account e
 const NAME = env.NAME || 'Headroom';
 const RELAY = env.RELAY !== 'off';            // on (default) | off
 const TRUST_PROXY = env.TRUST_PROXY === '1';   // behind a reverse proxy: take the client IP from X-Forwarded-For
+// Passwords (NIST SP 800-63B, OWASP ASVS): a length floor, no composition rules, screened against common and
+// breached passwords (Have I Been Pwned's k-anonymity API: only 5 hex digits of a SHA-1 leave the server).
+const MIN_PASSWORD = Math.max(8, Number(env.MIN_PASSWORD) || 12);
+const BREACH_CHECK = env.BREACH_CHECK !== 'off';
+const DEVICE_IDLE_DAYS = Number(env.DEVICE_IDLE_DAYS ?? 90); // sign-ins unused this long expire (0 = never)
+const INVITE_DAYS = 7;
+const RESET_HOURS = 24;
 const HEARTBEAT_S = 20;
 const ONLINE_S = 70;                           // a computer counts as online if it checked in this recently
 
@@ -49,6 +56,11 @@ export class Store {
     this.file = path.join(dir, 'db.json');
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     this.data = fs.existsSync(this.file) ? JSON.parse(fs.readFileSync(this.file, 'utf8')) : { version: 1, accounts: [], devices: [], computers: [] };
+    // Roles: the first account (the server's owner) is an admin; older databases had none.
+    for (const a of this.data.accounts) a.role ||= 'user';
+    if (this.data.accounts.length && !this.data.accounts.some(a => a.role === 'admin')) this.data.accounts[0].role = 'admin';
+    this.data.invites ||= [];
+    this.data.resets ||= [];
     const keyFile = path.join(dir, 'secret.key');
     if (!fs.existsSync(keyFile)) fs.writeFileSync(keyFile, crypto.randomBytes(32).toString('hex'), { mode: 0o600 });
     this.key = Buffer.from(fs.readFileSync(keyFile, 'utf8').trim(), 'hex');
@@ -77,22 +89,78 @@ const sha256Hex = s => crypto.createHash('sha256').update(s, 'utf8').digest('hex
 
 // ------------------------------------------------------------------------------------------------- crypto
 
-const SCRYPT = { N: 32768, r: 8, p: 1, keylen: 32 };
+// OWASP Password Storage Cheat Sheet: scrypt with N=2^15, r=8, p=3 (equivalent to its N=2^17, p=1 baseline). Each
+// record keeps its parameters; older ones are upgraded at the next successful sign-in.
+const SCRYPT = { N: 32768, r: 8, p: 3, keylen: 32 };
+const needsRehash = rec => rec?.algorithm !== 'scrypt' || rec.N !== SCRYPT.N || rec.r !== SCRYPT.r || rec.p !== SCRYPT.p;
+/** Unicode passwords compare by their NFKC form (NIST SP 800-63B §3.1.1.2), so the same phrase typed on any keyboard works. */
+const normalizePassword = s => String(s ?? '').normalize('NFKC');
 
 function hashPassword(password) {
   const salt = crypto.randomBytes(16);
-  return new Promise((resolve, reject) => crypto.scrypt(password, salt, SCRYPT.keylen, { N: SCRYPT.N, r: SCRYPT.r, p: SCRYPT.p, maxmem: 128 * 1024 * 1024 }, (err, key) => {
+  password = normalizePassword(password);
+  return new Promise((resolve, reject) => crypto.scrypt(password, salt, SCRYPT.keylen, { N: SCRYPT.N, r: SCRYPT.r, p: SCRYPT.p, maxmem: 256 * 1024 * 1024 }, (err, key) => {
     if (err) reject(err);
     else resolve({ algorithm: 'scrypt', N: SCRYPT.N, r: SCRYPT.r, p: SCRYPT.p, salt: salt.toString('base64'), hash: key.toString('base64') });
   }));
 }
 
-function verifyPassword(password, rec) {
-  if (!rec) return Promise.resolve(false);
+function scryptCheck(password, rec) {
   const expected = Buffer.from(rec.hash, 'base64');
-  return new Promise(resolve => crypto.scrypt(password, Buffer.from(rec.salt, 'base64'), expected.length, { N: rec.N, r: rec.r, p: rec.p, maxmem: 128 * 1024 * 1024 }, (err, key) => {
+  return new Promise(resolve => crypto.scrypt(password, Buffer.from(rec.salt, 'base64'), expected.length, { N: rec.N, r: rec.r, p: rec.p, maxmem: 256 * 1024 * 1024 }, (err, key) => {
     resolve(!err && crypto.timingSafeEqual(key, expected));
   }));
+}
+
+async function verifyPassword(password, rec) {
+  if (!rec) return false;
+  const n = normalizePassword(password);
+  if (await scryptCheck(n, rec)) return true;
+  // Hashes made before normalization: the raw form (only differs for some non-ASCII passwords).
+  return n !== String(password ?? '') && scryptCheck(String(password), rec);
+}
+
+// A few common passwords long enough to pass the length rule (the breach check catches the rest).
+const COMMON_PASSWORDS = new Set(['password1234', 'password12345', 'password123456', 'qwertyuiop123', 'qwerty123456', '123456789012',
+  '1234567890123', 'iloveyou1234', 'abc123456789', 'passw0rd1234', 'letmein12345', 'welcome12345', 'administrator', 'adminadmin123',
+  'changeme1234', 'trustno11234', 'football1234', 'baseball1234', 'superman1234', 'whatever1234', 'sunshine1234', 'princess1234',
+  'qwertyqwerty', 'asdfghjkl123', 'zxcvbnm12345', 'p@ssw0rd1234', 'password!234', 'correcthorsebatterystaple']);
+
+/** Have I Been Pwned range API (k-anonymity). Unreachable = no answer, not a refusal. */
+async function breached(password) {
+  if (!BREACH_CHECK) return false;
+  const sha1 = crypto.createHash('sha1').update(password, 'utf8').digest('hex').toUpperCase();
+  try {
+    const r = await fetch(`https://api.pwnedpasswords.com/range/${sha1.slice(0, 5)}`, {
+      headers: { 'Add-Padding': 'true', 'User-Agent': 'Headroom-Account-Server' }, signal: AbortSignal.timeout(3000),
+    });
+    if (!r.ok) return false;
+    const suffix = sha1.slice(5);
+    return (await r.text()).split('\n').some(line => { const [h, n] = line.trim().split(':'); return h === suffix && Number(n) > 0; });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * What's wrong with a new password, or null (NIST SP 800-63B §3.1.1.2, OWASP ASVS V6): at least MIN_PASSWORD
+ * characters, at most 256, any characters including spaces, no composition rules; refuses the username, repeated or
+ * sequential runs, common passwords and passwords known from breaches.
+ */
+export async function passwordProblem(password, username, { breach = true } = {}) {
+  const pw = normalizePassword(password);
+  if ([...pw].length < MIN_PASSWORD) return `Use at least ${MIN_PASSWORD} characters. A few words make a good one; spaces are fine.`;
+  if (pw.length > 256) return 'Use at most 256 characters.';
+  const lower = pw.toLowerCase();
+  if (username && username.length >= 3 && lower.includes(username.toLowerCase())) return 'Don\'t include your username.';
+  const compact = lower.replace(/\s+/g, '');
+  if (new Set(compact).size < 4) return 'That\'s too predictable: use more different characters.';
+  for (const run of ['0123456789012345678901234567890', 'abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz', 'qwertyuiopasdfghjklzxcvbnmqwertyuiopasdfghjklzxcvbnm']) {
+    if (run.includes(compact) || [...run].reverse().join('').includes(compact)) return 'That\'s too predictable: avoid keyboard runs and sequences.';
+  }
+  if (COMMON_PASSWORDS.has(compact) || COMMON_PASSWORDS.has(lower)) return 'That\'s one of the most common passwords. Choose another.';
+  if (breach && await breached(pw)) return 'That password appears in known data breaches (haveibeenpwned.com), so attackers try it. Choose another.';
+  return null;
 }
 
 /** The token device `d` uses on computer `c`. Never stored; computers only receive its hash. */
@@ -414,6 +482,14 @@ export function createApp({ store, now = () => Date.now() }) {
     if (kind && dev.kind !== kind) fail(403, kind === 'computer' ? 'computers only' : 'not allowed for computers');
     const account = store.account(dev.accountId);
     if (!account) fail(401, 'unauthorized');
+    // A browser or phone that hasn't been used for a long time is signed out (computers check in all the time).
+    const last = Date.parse(dev.lastSeen || dev.created);
+    if (dev.kind === 'viewer' && DEVICE_IDLE_DAYS > 0 && now() - last > DEVICE_IDLE_DAYS * 86_400_000) {
+      removeDevice(dev);
+      store.save();
+      audit(`'${dev.name}' of '${account.username}' signed out after ${DEVICE_IDLE_DAYS} days unused`);
+      fail(401, 'expired', { message: 'Signed out after a long time unused. Sign in again.' });
+    }
     dev.lastSeen = new Date(now()).toISOString();
     dev.lastAddress = clientIp(req);
     store.touch();
@@ -463,33 +539,113 @@ export function createApp({ store, now = () => Date.now() }) {
     if (retry) fail(429, 'rate-limited', { retryAfter: retry });
     const account = store.accountByName(username);
     // Same work and answer for unknown users and wrong passwords.
-    const ok = await verifyPassword(String(body.password || ''), account?.password || DUMMY_PASSWORD) && !!account;
-    if (!ok) { limiter.fail(ip, 'user:' + username); fail(401, 'bad-credentials'); }
+    const ok = await verifyPassword(body.password, account?.password || DUMMY_PASSWORD) && !!account;
+    if (!ok) { limiter.fail(ip, 'user:' + username); audit(`failed sign-in for '${username}' from ${ip}`); fail(401, 'bad-credentials'); }
     if (account.totpEnabled) {
       if (!body.totp) fail(401, 'totp-required');
-      if (!totpVerify(account, body.totp)) { limiter.fail(ip, 'user:' + username); fail(401, 'bad-totp'); }
+      if (!totpVerify(account, body.totp)) { limiter.fail(ip, 'user:' + username); audit(`wrong two-factor code for '${username}' from ${ip}`); fail(401, 'bad-totp'); }
     }
     limiter.ok(ip, 'user:' + username);
+    if (needsRehash(account.password)) account.password = await hashPassword(body.password); // stronger parameters
+    // Passwords set under an older, weaker rule still work; the app suggests changing them.
+    const weak = kind === 'viewer' && !!await passwordProblem(body.password, username, { breach: false });
     const { dev, token } = newDevice(account, kind, str(body.deviceName, 64), str(body.platform, 32), ip);
     store.save();
-    log(`${kind} '${dev.name}' signed in to '${account.username}' from ${ip}`);
-    return { token, device: deviceJson(dev, dev.id), account: { id: account.id, username: account.username, totpEnabled: !!account.totpEnabled } };
+    audit(`${kind} '${dev.name}' signed in to '${account.username}' from ${ip}`);
+    return { token, device: deviceJson(dev, dev.id), account: accountJson(account), passwordWeak: weak };
+  }
+
+  const accountJson = a => ({ id: a.id, username: a.username, role: a.role || 'user', totpEnabled: !!a.totpEnabled });
+
+  /** Admin endpoints: a signed-in device of an admin account. */
+  function requireAdmin(req) {
+    const ctx = authenticate(req, 'viewer');
+    if (ctx.account.role !== 'admin') fail(403, 'admin-only', { message: 'Only an administrator can do that.' });
+    return ctx;
+  }
+
+  /** Re-authentication before dangerous actions (OWASP ASVS: re-auth for sensitive operations). */
+  async function confirmPassword(req, account, password) {
+    const ip = clientIp(req);
+    const retry = limiter.retryAfter(ip, 'user:' + account.username);
+    if (retry) fail(429, 'rate-limited', { retryAfter: retry });
+    if (!await verifyPassword(password, account.password)) {
+      limiter.fail(ip, 'user:' + account.username);
+      fail(401, 'bad-credentials', { message: 'Wrong password.' });
+    }
+  }
+
+  /** Signs out an account's browsers and phones (not its computers), except `keep`. */
+  function signOutViewers(accountId, keep) {
+    const gone = store.data.devices.filter(d => d.accountId === accountId && d.kind === 'viewer' && d.id !== keep);
+    for (const d of gone) removeDevice(d);
+    return gone.length;
+  }
+
+  /** A single-use secret for a link (invite or password reset); only its hash is stored. */
+  function newLinkToken() {
+    const token = crypto.randomBytes(32).toString('base64url');
+    return { token, tokenHash: sha256Hex(token) };
+  }
+  function findByToken(list, token) {
+    const h = sha256Hex(String(token || ''));
+    const item = list.find(x => x.tokenHash.length === h.length && crypto.timingSafeEqual(Buffer.from(x.tokenHash), Buffer.from(h)));
+    return item && Date.parse(item.expires) > now() ? item : null;
+  }
+  function pruneLinks() {
+    store.data.invites = store.data.invites.filter(x => Date.parse(x.expires) > now());
+    store.data.resets = store.data.resets.filter(x => Date.parse(x.expires) > now());
+  }
+  /** Looking up link tokens is rate limited like sign-in, so they can't be probed. */
+  function tokenAttempt(req, item) {
+    const ip = clientIp(req);
+    const retry = limiter.retryAfter(ip);
+    if (retry) fail(429, 'rate-limited', { retryAfter: retry });
+    if (!item) { limiter.fail(ip); fail(404, 'invalid-link', { message: 'This link is invalid, used or expired. Ask for a new one.' }); }
   }
 
   const routes = {
     'GET /api/info': () => ({ service: 'headroom-account-server', name: NAME, version: VERSION, signup: signupOpen(), firstAccount: store.data.accounts.length === 0, relay: RELAY }),
 
     'POST /api/account/register': async (req) => {
-      if (!signupOpen()) fail(403, 'signup-closed', { message: 'New accounts are created by the administrator of this server.' });
       const body = await readJson(req);
+      // With an invite from an administrator, or while sign-up is open (the first account, or SIGNUP=open).
+      pruneLinks();
+      const invite = body.invite ? findByToken(store.data.invites, body.invite) : null;
+      if (body.invite) tokenAttempt(req, invite);
+      else if (!signupOpen()) fail(403, 'signup-closed', { message: 'Accounts on this server are by invitation. Ask its administrator for an invite link.' });
       const username = normalizeName(body.username);
       if (!/^[a-z0-9._-]{3,64}$/.test(username)) fail(400, 'bad-username', { message: 'Use 3–64 letters, digits, dots, dashes or underscores.' });
-      if (String(body.password || '').length < 8) fail(400, 'weak-password', { message: 'Password must be at least 8 characters.' });
-      if (store.accountByName(username)) fail(409, 'username-taken');
-      store.data.accounts.push({ id: randomId(), username, password: await hashPassword(String(body.password)), created: new Date(now()).toISOString(), totpEnabled: false });
+      if (store.accountByName(username)) fail(409, 'username-taken', { message: 'That username is taken.' });
+      const problem = await passwordProblem(body.password, username);
+      if (problem) fail(400, 'weak-password', { message: problem });
+      const first = store.data.accounts.length === 0;
+      store.data.accounts.push({
+        id: randomId(), username, password: await hashPassword(body.password), created: new Date(now()).toISOString(), totpEnabled: false,
+        role: first ? 'admin' : invite?.role === 'admin' ? 'admin' : 'user',
+      });
+      if (invite) store.data.invites = store.data.invites.filter(x => x !== invite);
       store.save();
-      log(`account '${username}' created`);
+      audit(`account '${username}' created${invite ? ` with an invite from '${store.account(invite.createdBy)?.username || '?'}'` : ''}${first ? ' (administrator)' : ''}`);
       return login(req, body, 'viewer');
+    },
+
+    // Invite and password-reset links: what the page shows before the form.
+    'POST /api/account/reset': async (req) => {
+      const body = await readJson(req);
+      pruneLinks();
+      const reset = findByToken(store.data.resets, body.token);
+      tokenAttempt(req, reset);
+      const account = store.account(reset.accountId);
+      if (!account) fail(404, 'invalid-link');
+      const problem = await passwordProblem(body.password, account.username);
+      if (problem) fail(400, 'weak-password', { message: problem });
+      account.password = await hashPassword(body.password);
+      store.data.resets = store.data.resets.filter(x => x !== reset);
+      const n = signOutViewers(account.id);
+      store.save();
+      audit(`password of '${account.username}' reset with a link; ${n} device(s) signed out`);
+      return { ok: true, username: account.username };
     },
 
     'POST /api/account/login': async (req) => {
@@ -499,7 +655,7 @@ export function createApp({ store, now = () => Date.now() }) {
 
     'GET /api/account/me': (req) => {
       const { dev, account } = authenticate(req);
-      return { account: { id: account.id, username: account.username, totpEnabled: !!account.totpEnabled }, device: deviceJson(dev, dev.id) };
+      return { account: accountJson(account), device: deviceJson(dev, dev.id) };
     },
 
     'POST /api/account/logout': (req) => {
@@ -520,13 +676,50 @@ export function createApp({ store, now = () => Date.now() }) {
     },
 
     'POST /api/account/password': async (req) => {
-      const { account } = authenticate(req, 'viewer');
+      const { dev, account } = authenticate(req, 'viewer');
       const body = await readJson(req);
-      if (!await verifyPassword(String(body.current || ''), account.password)) fail(401, 'bad-credentials');
-      if (String(body.password || '').length < 8) fail(400, 'weak-password', { message: 'Password must be at least 8 characters.' });
-      account.password = await hashPassword(String(body.password));
+      await confirmPassword(req, account, body.current);
+      const problem = await passwordProblem(body.password, account.username);
+      if (problem) fail(400, 'weak-password', { message: problem });
+      account.password = await hashPassword(body.password);
+      // Other browsers and phones sign in again with the new password (OWASP ASVS: invalidate sessions on change).
+      const n = signOutViewers(account.id, dev.id);
       store.save();
-      return { ok: true };
+      audit(`'${account.username}' changed their password; ${n} other device(s) signed out`);
+      return { ok: true, signedOut: n };
+    },
+
+    // ------------------------------------------------------------------------------------- administration
+
+    'GET /api/admin/users': (req) => {
+      requireAdmin(req);
+      return {
+        users: store.data.accounts.map(a => {
+          const devs = store.data.devices.filter(d => d.accountId === a.id);
+          const seen = devs.map(d => d.lastSeen).filter(Boolean).sort().at(-1) || null;
+          return { ...accountJson(a), created: a.created, devices: devs.filter(d => d.kind === 'viewer').length, computers: devs.filter(d => d.kind === 'computer').length, lastSeen: seen };
+        }),
+      };
+    },
+
+    'GET /api/admin/invites': (req) => {
+      requireAdmin(req);
+      pruneLinks();
+      return { invites: store.data.invites.map(x => ({ id: x.id, role: x.role, note: x.note, created: x.created, expires: x.expires, createdBy: store.account(x.createdBy)?.username })) };
+    },
+
+    'POST /api/admin/invites': async (req) => {
+      const { account } = requireAdmin(req);
+      const body = await readJson(req);
+      const role = body.role === 'admin' ? 'admin' : 'user';
+      if (role === 'admin') await confirmPassword(req, account, body.password);
+      pruneLinks();
+      const { token, tokenHash } = newLinkToken();
+      const invite = { id: randomId(), tokenHash, role, note: str(body.note, 80), createdBy: account.id, created: new Date(now()).toISOString(), expires: new Date(now() + INVITE_DAYS * 86_400_000).toISOString() };
+      store.data.invites.push(invite);
+      store.save();
+      audit(`'${account.username}' created an invite (${role}${invite.note ? `, "${invite.note}"` : ''})`);
+      return { id: invite.id, token, role, expires: invite.expires };
     },
 
     'POST /api/account/totp/setup': (req) => {
@@ -545,15 +738,17 @@ export function createApp({ store, now = () => Date.now() }) {
       pendingTotp.delete(account.id);
       Object.assign(account, { totpSecret: secret, totpEnabled: true, totpLastStep: Math.floor(Date.now() / 30000) });
       store.save();
+      audit(`'${account.username}' turned on two-factor sign-in`);
       return { ok: true };
     },
 
     'POST /api/account/totp/disable': async (req) => {
       const { account } = authenticate(req, 'viewer');
       const body = await readJson(req);
-      if (!await verifyPassword(String(body.password || ''), account.password)) fail(401, 'bad-credentials');
+      await confirmPassword(req, account, body.password);
       Object.assign(account, { totpSecret: null, totpEnabled: false });
       store.save();
+      audit(`'${account.username}' turned off two-factor sign-in`);
       return { ok: true };
     },
 
@@ -581,13 +776,85 @@ export function createApp({ store, now = () => Date.now() }) {
 
   // Routes with an id in the path.
   const dynamic = [
+    [/^GET \/api\/invite\/([\w-]{20,60})$/, async (req, token) => {
+      pruneLinks();
+      const invite = findByToken(store.data.invites, token);
+      tokenAttempt(req, invite);
+      return { ok: true, role: invite.role, expires: invite.expires, from: store.account(invite.createdBy)?.username || null, name: NAME };
+    }],
+    [/^GET \/api\/reset\/([\w-]{20,60})$/, async (req, token) => {
+      pruneLinks();
+      const reset = findByToken(store.data.resets, token);
+      tokenAttempt(req, reset);
+      return { ok: true, username: store.account(reset.accountId)?.username, expires: reset.expires };
+    }],
+    [/^DELETE \/api\/admin\/invites\/([\w-]+)$/, async (req, id) => {
+      const { account } = requireAdmin(req);
+      const before = store.data.invites.length;
+      store.data.invites = store.data.invites.filter(x => x.id !== id);
+      if (store.data.invites.length === before) fail(404, 'not found');
+      store.save();
+      audit(`'${account.username}' cancelled an invite`);
+      return { ok: true };
+    }],
+    [/^POST \/api\/admin\/users\/([\w-]+)\/reset-link$/, async (req, id) => {
+      const { account } = requireAdmin(req);
+      const user = store.account(id) || fail(404, 'not found');
+      pruneLinks();
+      store.data.resets = store.data.resets.filter(x => x.accountId !== id); // one live link per account
+      const { token, tokenHash } = newLinkToken();
+      const reset = { id: randomId(), accountId: id, tokenHash, created: new Date(now()).toISOString(), expires: new Date(now() + RESET_HOURS * 3_600_000).toISOString() };
+      store.data.resets.push(reset);
+      store.save();
+      audit(`'${account.username}' created a password reset link for '${user.username}'`);
+      return { token, username: user.username, expires: reset.expires };
+    }],
+    [/^POST \/api\/admin\/users\/([\w-]+)\/reset-2fa$/, async (req, id) => {
+      const { account } = requireAdmin(req);
+      const body = await readJson(req);
+      await confirmPassword(req, account, body.password);
+      const user = store.account(id) || fail(404, 'not found');
+      Object.assign(user, { totpSecret: null, totpEnabled: false });
+      store.save();
+      audit(`'${account.username}' turned off two-factor sign-in for '${user.username}'`);
+      return { ok: true };
+    }],
+    [/^POST \/api\/admin\/users\/([\w-]+)$/, async (req, id) => {
+      const { account } = requireAdmin(req);
+      const body = await readJson(req);
+      const user = store.account(id) || fail(404, 'not found');
+      if (body.role !== 'admin' && body.role !== 'user') fail(400, 'bad-role');
+      await confirmPassword(req, account, body.password);
+      if (body.role === 'user' && user.role === 'admin' && store.data.accounts.filter(a => a.role === 'admin').length === 1) {
+        fail(409, 'last-admin', { message: 'This is the only administrator. Make someone else an administrator first.' });
+      }
+      user.role = body.role;
+      store.save();
+      audit(`'${account.username}' made '${user.username}' ${body.role === 'admin' ? 'an administrator' : 'a regular user'}`);
+      return { ok: true };
+    }],
+    [/^DELETE \/api\/admin\/users\/([\w-]+)$/, async (req, id) => {
+      const { account } = requireAdmin(req);
+      const body = await readJson(req);
+      await confirmPassword(req, account, body.password);
+      const user = store.account(id) || fail(404, 'not found');
+      if (user.id === account.id) fail(409, 'self', { message: 'You can\'t delete your own account here.' });
+      for (const d of store.data.devices.filter(d => d.accountId === id)) removeDevice(d);
+      store.data.computers = store.data.computers.filter(c => c.accountId !== id);
+      store.data.accounts = store.data.accounts.filter(a => a.id !== id);
+      store.data.invites = store.data.invites.filter(x => x.createdBy !== id);
+      store.data.resets = store.data.resets.filter(x => x.accountId !== id);
+      store.save();
+      audit(`'${account.username}' deleted the account '${user.username}' with its devices and computers`);
+      return { ok: true };
+    }],
     [/^DELETE \/api\/account\/devices\/([\w-]+)$/, async (req, id) => {
       const { account } = authenticate(req, 'viewer');
       const d = store.device(id);
       if (!d || d.accountId !== account.id) fail(404, 'not found');
       removeDevice(d);
       store.save();
-      log(`${d.kind} '${d.name}' removed from '${account.username}'`);
+      audit(`${d.kind} '${d.name}' removed from '${account.username}'`);
       return { ok: true };
     }],
     [/^POST \/api\/account\/devices\/([\w-]+)$/, async (req, id) => {
@@ -712,7 +979,17 @@ export function createApp({ store, now = () => Date.now() }) {
 
   async function handle(req, res) {
     const url = new URL(req.url, 'http://x');
-    const headers = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY' };
+    const headers = {
+      'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY',
+      'Cross-Origin-Opener-Policy': 'same-origin', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=()',
+      // The web app runs only its own scripts; it connects to computers anywhere (directly or through this relay).
+      'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; " +
+        "media-src 'self' blob:; font-src 'self'; connect-src 'self' https: wss: http: ws:; worker-src 'self'; manifest-src 'self'; " +
+        "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+    };
+    if (req.socket.encrypted || (TRUST_PROXY && String(req.headers['x-forwarded-proto'] || '').startsWith('https'))) {
+      headers['Strict-Transport-Security'] = 'max-age=31536000';
+    }
     for (const [k, v] of Object.entries(headers)) res.setHeader(k, v);
     const target = relayTarget(url);
     if (target) {
@@ -765,6 +1042,8 @@ export function createApp({ store, now = () => Date.now() }) {
 let DUMMY_PASSWORD = null;
 
 function log(msg) { console.log(`${new Date().toISOString()} ${msg}`); }
+/** Security events (sign-ins, password and two-factor changes, administration), never secrets. */
+function audit(msg) { log(`audit: ${msg}`); }
 
 // ------------------------------------------------------------------------------------------------- CLI
 
@@ -790,7 +1069,7 @@ function runningServer() {
 
 async function cli(cmd, args) {
   // A running server would overwrite changes made here with its in-memory copy: refuse instead.
-  if (['add-user', 'reset-password', 'reset-2fa', 'delete-user'].includes(cmd) && runningServer()) {
+  if (['add-user', 'reset-password', 'reset-2fa', 'make-admin', 'make-user', 'delete-user'].includes(cmd) && runningServer()) {
     console.log('The account server is running on this data directory. Stop it first (e.g. sudo systemctl stop headroom-accounts),');
     console.log('run this again, then start it.');
     return 1;
@@ -802,26 +1081,33 @@ async function cli(cmd, args) {
     case 'add-user': {
       if (!/^[a-z0-9._-]{3,64}$/.test(name)) { console.log('usage: add-user <username>  (3–64 letters, digits, . - _)'); return 1; }
       if (account) { console.log('That username exists.'); return 1; }
-      const pw = await ask('Password (8+ characters): ', true);
-      if (pw.length < 8) { console.log('Too short.'); return 1; }
-      store.data.accounts.push({ id: randomId(), username: name, password: await hashPassword(pw), created: new Date().toISOString(), totpEnabled: false });
+      const pw = await ask(`Password (${MIN_PASSWORD}+ characters): `, true);
+      const problem = await passwordProblem(pw, name);
+      if (problem) { console.log(problem); return 1; }
+      const admin = store.data.accounts.length === 0 || args.includes('--admin');
+      store.data.accounts.push({ id: randomId(), username: name, password: await hashPassword(pw), created: new Date().toISOString(), totpEnabled: false, role: admin ? 'admin' : 'user' });
       store.save();
-      console.log(`Created '${name}'.`);
+      audit(`account '${name}' created from the command line${admin ? ' (administrator)' : ''}`);
+      console.log(`Created '${name}'${admin ? ' (administrator)' : ''}.`);
       return 0;
     }
     case 'list-users':
       for (const a of store.data.accounts) {
         const devs = store.data.devices.filter(d => d.accountId === a.id);
-        console.log(`${a.username.padEnd(24)} ${devs.filter(d => d.kind === 'computer').length} computer(s), ${devs.filter(d => d.kind === 'viewer').length} device(s)${a.totpEnabled ? ', 2FA on' : ''}`);
+        console.log(`${a.username.padEnd(24)} ${(a.role || 'user').padEnd(6)} ${devs.filter(d => d.kind === 'computer').length} computer(s), ${devs.filter(d => d.kind === 'viewer').length} device(s)${a.totpEnabled ? ', 2FA on' : ''}`);
       }
       return 0;
     case 'reset-password': {
       if (!account) { console.log('No such user.'); return 1; }
-      const pw = await ask('New password (8+ characters): ', true);
-      if (pw.length < 8) { console.log('Too short.'); return 1; }
+      const pw = await ask(`New password (${MIN_PASSWORD}+ characters): `, true);
+      const problem = await passwordProblem(pw, name);
+      if (problem) { console.log(problem); return 1; }
       account.password = await hashPassword(pw);
+      const out = store.data.devices.filter(d => d.accountId === account.id && d.kind === 'viewer');
+      store.data.devices = store.data.devices.filter(d => !out.includes(d));
       store.save();
-      console.log('Password changed. Signed-in devices stay signed in; remove them in the app if needed.');
+      audit(`password of '${name}' reset from the command line; ${out.length} device(s) signed out`);
+      console.log(`Password changed; ${out.length} signed-in browser(s)/phone(s) must sign in again.`);
       return 0;
     }
     case 'reset-2fa':
@@ -830,6 +1116,17 @@ async function cli(cmd, args) {
       store.save();
       console.log('Two-factor sign-in turned off.');
       return 0;
+    case 'make-admin':
+    case 'make-user': {
+      if (!account) { console.log('No such user.'); return 1; }
+      const admins = store.data.accounts.filter(a => a.role === 'admin');
+      if (cmd === 'make-user' && account.role === 'admin' && admins.length === 1) { console.log('That is the only administrator.'); return 1; }
+      account.role = cmd === 'make-admin' ? 'admin' : 'user';
+      store.save();
+      audit(`'${name}' made ${account.role === 'admin' ? 'an administrator' : 'a regular user'} from the command line`);
+      console.log(`'${name}' is now ${account.role === 'admin' ? 'an administrator' : 'a regular user'}.`);
+      return 0;
+    }
     case 'delete-user':
       if (!account) { console.log('No such user.'); return 1; }
       store.data.devices = store.data.devices.filter(d => d.accountId !== account.id);
@@ -839,7 +1136,7 @@ async function cli(cmd, args) {
       console.log('Deleted, with its devices and computers.');
       return 0;
     default:
-      console.log('commands: add-user <name> | list-users | reset-password <name> | reset-2fa <name> | delete-user <name>');
+      console.log('commands: add-user <name> [--admin] | list-users | reset-password <name> | reset-2fa <name> | make-admin <name> | make-user <name> | delete-user <name>');
       return cmd ? 1 : 0;
   }
 }

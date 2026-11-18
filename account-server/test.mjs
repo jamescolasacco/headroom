@@ -10,7 +10,8 @@ import path from 'node:path';
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'headroom-accounts-'));
 process.env.DATA_DIR = dir;
 process.env.SIGNUP = 'first';
-const { createApp, Store, totpCode } = await import('./server.mjs');
+process.env.BREACH_CHECK = 'off'; // no network in tests
+const { createApp, Store, totpCode, passwordProblem } = await import('./server.mjs');
 const store = new Store(dir);
 const app = createApp({ store });
 const server = http.createServer(app);
@@ -116,6 +117,105 @@ await test('two-factor: setup, enable, then required to sign in', async () => {
   const ok = await call('POST', '/api/account/login', { username: 'sam', password: 'correct horse', totp: totpCode(setup.secret, step + 1) });
   assert.equal(ok.status, 200);
 });
+// ------------------------------------------------------------------------------------- users and security
+const STRONG = 'violet canyon river 42';
+await test('password policy: length, username, runs, common passwords; passphrases pass', async () => {
+  assert.match(await passwordProblem('short pw', 'sam'), /at least 12/);
+  assert.match(await passwordProblem('my name is sam ok', 'sam'), /username/);
+  assert.match(await passwordProblem('1234567890123', 'x'), /predictable/);
+  assert.match(await passwordProblem('qwertyuiopasd', 'x'), /predictable/);
+  assert.match(await passwordProblem('aaaaaaaaaaaaaaa', 'x'), /predictable/);
+  assert.match(await passwordProblem('Password1234', 'x'), /common/);
+  assert.equal(await passwordProblem(STRONG, 'sam'), null);
+  assert.equal(await passwordProblem('ünïcödé pässwörd ok', 'sam'), null);
+});
+await test('the first account is the administrator', async () => {
+  assert.equal((await call('GET', '/api/account/me', null, viewer.token)).body.account.role, 'admin');
+});
+let pat, invite;
+await test('an admin invites someone; the link works once', async () => {
+  const r = await call('POST', '/api/admin/invites', { note: 'Pat' }, viewer.token);
+  assert.equal(r.status, 200);
+  invite = r.body.token;
+  assert.equal((await call('GET', `/api/invite/${invite}`)).body.role, 'user');
+  assert.equal((await call('POST', '/api/account/register', { username: 'pat', password: 'short', invite })).body.error, 'weak-password');
+  const reg = await call('POST', '/api/account/register', { username: 'pat', password: STRONG, invite, deviceName: 'Pat laptop' });
+  assert.equal(reg.status, 200);
+  assert.equal(reg.body.account.role, 'user');
+  pat = reg.body;
+  assert.equal((await call('GET', `/api/invite/${invite}`)).status, 404);
+  assert.equal((await call('POST', '/api/account/register', { username: 'pat2', password: STRONG, invite })).body.error, 'invalid-link');
+});
+await test('invites can make administrators only with the admin\'s password', async () => {
+  assert.equal((await call('POST', '/api/admin/invites', { role: 'admin' }, viewer.token)).status, 401);
+  assert.equal((await call('POST', '/api/admin/invites', { role: 'admin', password: 'correct horse' }, viewer.token)).body.role, 'admin');
+});
+await test('only administrators can manage users', async () => {
+  assert.equal((await call('GET', '/api/admin/users', null, pat.token)).status, 403);
+  assert.equal((await call('POST', '/api/admin/invites', {}, pat.token)).status, 403);
+  const users = (await call('GET', '/api/admin/users', null, viewer.token)).body.users;
+  assert.deepEqual(users.map(u => `${u.username}:${u.role}`).sort(), ['pat:user', 'sam:admin']);
+});
+await test('each account sees only its own computers', async () => {
+  assert.equal((await call('GET', '/api/account/computers', null, pat.token)).body.computers.length, 0);
+});
+await test('a reset link sets a new password and signs the account\'s devices out', async () => {
+  const patId = pat.account.id;
+  const link = (await call('POST', `/api/admin/users/${patId}/reset-link`, null, viewer.token)).body;
+  assert.equal((await call('GET', `/api/reset/${link.token}`)).body.username, 'pat');
+  assert.equal((await call('POST', '/api/account/reset', { token: link.token, password: 'pat pat pat pat pat' })).body.error, 'weak-password');
+  assert.equal((await call('POST', '/api/account/reset', { token: link.token, password: 'orange glacier ferry 7' })).status, 200);
+  assert.equal((await call('GET', '/api/account/me', null, pat.token)).status, 401);
+  assert.equal((await call('POST', '/api/account/reset', { token: link.token, password: 'orange glacier ferry 8' })).body.error, 'invalid-link');
+  pat = (await call('POST', '/api/account/login', { username: 'pat', password: 'orange glacier ferry 7', deviceName: 'Pat phone' })).body;
+  assert.ok(pat.token);
+});
+await test('changing a password signs out the other browsers and phones', async () => {
+  const other = (await call('POST', '/api/account/login', { username: 'pat', password: 'orange glacier ferry 7', deviceName: 'Pat tablet' })).body;
+  const r = await call('POST', '/api/account/password', { current: 'orange glacier ferry 7', password: 'silver lantern harbor 9' }, pat.token);
+  assert.equal(r.body.signedOut, 1);
+  assert.equal((await call('GET', '/api/account/me', null, other.token)).status, 401);
+  assert.equal((await call('GET', '/api/account/me', null, pat.token)).status, 200);
+});
+await test('role changes need the admin\'s password, and the last administrator stays one', async () => {
+  const me = (await call('GET', '/api/account/me', null, viewer.token)).body.account;
+  assert.equal((await call('POST', `/api/admin/users/${me.id}`, { role: 'user' }, viewer.token)).status, 401);
+  assert.equal((await call('POST', `/api/admin/users/${me.id}`, { role: 'user', password: 'correct horse' }, viewer.token)).body.error, 'last-admin');
+  assert.equal((await call('POST', `/api/admin/users/${pat.account.id}`, { role: 'admin', password: 'correct horse' }, viewer.token)).status, 200);
+  assert.equal((await call('GET', '/api/admin/users', null, pat.token)).status, 200);
+  assert.equal((await call('POST', `/api/admin/users/${pat.account.id}`, { role: 'user', password: 'correct horse' }, viewer.token)).status, 200);
+});
+await test('deleting a user needs the admin\'s password and removes their devices', async () => {
+  assert.equal((await call('DELETE', `/api/admin/users/${pat.account.id}`, {}, viewer.token)).status, 401);
+  assert.equal((await call('DELETE', `/api/admin/users/${pat.account.id}`, { password: 'correct horse' }, viewer.token)).status, 200);
+  assert.equal((await call('GET', '/api/account/me', null, pat.token)).status, 401);
+  assert.equal((await call('GET', '/api/admin/users', null, viewer.token)).body.users.length, 1);
+});
+await test('a sign-in unused for 90 days expires', async () => {
+  const inv = (await call('POST', '/api/admin/invites', {}, viewer.token)).body.token;
+  const stale = (await call('POST', '/api/account/register', { username: 'olduser', password: STRONG, invite: inv, deviceName: 'old' })).body;
+  assert.ok(stale.token, 'signed in');
+  store.data.devices.find(d => d.id === stale.device.id).lastSeen = new Date(Date.now() - 91 * 86_400_000).toISOString();
+  const r = await call('GET', '/api/account/me', null, stale.token);
+  assert.equal(r.body.error, 'expired');
+});
+await test('older password hashes are upgraded at sign-in', async () => {
+  const salt = crypto.randomBytes(16);
+  const hash = crypto.scryptSync('old style secret words', salt, 32, { N: 16384, r: 8, p: 1 });
+  store.data.accounts.push({ id: 'legacy1', username: 'legacy', role: 'user', totpEnabled: false, created: new Date().toISOString(),
+    password: { algorithm: 'scrypt', N: 16384, r: 8, p: 1, salt: salt.toString('base64'), hash: hash.toString('base64') } });
+  const r = await call('POST', '/api/account/login', { username: 'legacy', password: 'old style secret words' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(r.body.passwordWeak, false);
+  const rec = store.data.accounts.find(a => a.id === 'legacy1').password;
+  assert.deepEqual([rec.N, rec.p], [32768, 3]);
+});
+await test('the web app is served with security headers', async () => {
+  const r = await fetch(base + '/');
+  assert.match(r.headers.get('content-security-policy') || '', /script-src 'self'/);
+  assert.equal(r.headers.get('x-frame-options'), 'DENY');
+});
+
 await test('repeated failures are rate limited', async () => {
   let last;
   for (let i = 0; i < 7; i++) last = await call('POST', '/api/account/login', { username: 'mallory', password: 'guess ' + i });
