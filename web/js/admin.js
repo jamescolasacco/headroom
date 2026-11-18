@@ -7,6 +7,8 @@
 import { h, svg, announce, field, nextId, plural } from './ui/dom.js';
 import { QrCode } from './qr.js';
 import { bridge } from './platform.js';
+import { lightOf } from './ui/light.js';
+import { I } from './ui/icons.js';
 
 const native = bridge;   // present when hosted by Headroom Server's own window
 const postNative = msg => native?.post(msg);
@@ -19,10 +21,7 @@ const ICON = {
   connect: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/>',
   account: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
   settings: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
-  check: '<path d="M20 6 9 17l-5-5"/>',
   warn: '<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0ZM12 9v4M12 17h.01"/>',
-  live: '<rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/><circle cx="12" cy="10.5" r="2.5"/>',
-  down: '<circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6M9 9l6 6"/>',
   shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="M12 8v4M12 16h.01"/>',
 };
 
@@ -64,6 +63,8 @@ async function refresh({ force = false } = {}) {
   st = next;
   tellAboutChanges();
   renderNav();
+  // This computer's own light: the colour its screen has on the website and in sessions (ui/light.js).
+  document.getElementById('app').dataset.light = String(lightOf(st.host.id));
   const side = document.getElementById('side-host');
   side.textContent = st.host.name;
   side.title = st.host.name; // the menu cuts a long name short
@@ -139,11 +140,12 @@ function renderOffline(message) {
   navButtons = null;
   document.getElementById('nav').replaceChildren();
   const c = document.getElementById('content');
-  c.replaceChildren(h('section', {},
-    h('div', { class: 'card' }, h('div', { class: 'hero down' }, h('div', { class: 'ring' }, svg(ICON.down, 28)),
-      h('div', {}, h('h2', { class: 'title' }, 'Headroom Server isn\'t running'),
-        h('p', { class: 'muted small' }, native ? 'Start it here, or from the Headroom icon in the menu bar / notification area.' : `This page talks to Headroom Server on this computer (${message}).`))),
-      native ? h('div', { class: 'row', style: { marginTop: '14px' } }, h('button', { class: 'primary', onclick: () => postNative({ cmd: 'startServer' }) }, 'Start server')) : null)));
+  c.replaceChildren(h('section', {}, h('div', { class: 'me-block' },
+    h('div', { class: 'face me off', 'aria-hidden': 'true' }),
+    h('div', { class: 'me-text' },
+      h('h2', { class: 'title' }, 'Headroom Server isn\'t running'),
+      h('p', { class: 'me-sub' }, native ? 'Start it here, or from the Headroom icon in the menu bar / notification area.' : `This page talks to Headroom Server on this computer (${message}).`),
+      native ? h('div', { class: 'row me-badges' }, h('button', { class: 'primary', onclick: () => postNative({ cmd: 'startServer' }) }, 'Start server')) : null))));
 }
 
 /** Redraws the current section, keeping keyboard focus and the scroll position where they were. */
@@ -351,18 +353,23 @@ function viewHome() {
   const title = waiting ? plural(waiting, '1 person is waiting for your answer', `${waiting} people are waiting for your answer`)
     : n ? plural(n, `${st.sessions[0].device || 'Someone'} is connected`, `${n} people are connected`)
       : missing ? 'Needs permission before anyone can connect' : 'Nobody is connected';
-  const hero = h('div', { class: `hero ${state}` },
-    h('div', { class: 'ring', 'aria-hidden': 'true' }, svg(n || waiting ? ICON.live : missing ? ICON.warn : ICON.check, 28)),
-    h('div', { class: 'grow' },
-      h('p', { class: 'title' }, title),
-      h('div', { class: 'row', style: { marginTop: '6px' } },
-        st.account ? h('span', { class: 'badge ok' }, `Signed in as ${st.account.email}`) : h('span', { class: 'badge' }, 'Not signed in'),
-        relay.state === 'online' ? h('span', { class: 'badge ok' }, 'Online') : h('span', { class: 'badge' }, relay.state === 'retrying' ? 'Offline: retrying' : 'Connecting…'),
-        st.testPattern ? h('span', { class: 'badge' }, 'Test pattern') : null)),
-    n > 1 ? h('button', {
-      class: 'danger', type: 'button', 'data-key': 'home:stop-all',
-      onclick: () => { pendingFocus = 'heading'; post('/sessions/disconnect-all').then(() => refresh({ force: true })); },
-    }, 'Stop all') : null);
+  const sub = waiting ? 'Answer above: Accept, View only or Decline.'
+    : n ? (n > 1 ? 'Each of them can see this screen. Stop anyone below.' : `They can see ${thisPc()}'s screen. Stop them at any time below.`)
+      : missing ? 'Turn on the two permissions below.'
+        : st.account ? 'Ready. Your devices can connect from anywhere.' : 'Ready for codes. Sign in to reach it from your devices too.';
+  // This computer's screen, as your devices see it: lit in its own light; warm while a person is here.
+  const glyph = state === 'live' ? I.user : state === 'warn' ? ICON.warn : mac() ? I.apple : I.windows;
+  const hero = h('div', { class: 'me-block' },
+    h('div', { class: `face me${state === 'live' ? ' lamp' : state === 'warn' ? ' off warn' : ''}${state === 'ready' ? ' os' : ''}`, 'aria-hidden': 'true' }, svg(glyph, 34)),
+    h('div', { class: 'me-text' }, h('p', { class: 'title' }, title), h('p', { class: 'me-sub' }, sub),
+    h('div', { class: 'row me-badges' },
+      st.account ? h('span', { class: 'badge ok' }, `Signed in as ${st.account.email}`) : h('span', { class: 'badge' }, 'Not signed in'),
+      relay.state === 'online' ? h('span', { class: 'badge ok' }, 'Online') : h('span', { class: 'badge' }, relay.state === 'retrying' ? 'Offline: retrying' : 'Connecting…'),
+      st.testPattern ? h('span', { class: 'badge' }, 'Test pattern') : null,
+      n > 1 ? h('button', {
+        class: 'sm danger', type: 'button', 'data-key': 'home:stop-all',
+        onclick: () => { pendingFocus = 'heading'; post('/sessions/disconnect-all').then(() => refresh({ force: true })); },
+      }, 'Stop all') : null)));
   const next = !st.account && !n && !waiting ? h('div', { class: 'card' }, h('h3', {}, 'Get started'),
     h('ul', { class: 'list' },
       h('li', { class: 'li' }, h('div', { class: 'main' }, h('div', { class: 't' }, 'Reach this computer from your other devices'),
@@ -374,8 +381,8 @@ function viewHome() {
   return h('section', {}, h('h2', { tabindex: '-1' }, 'Home'),
     note('request'),
     requestsCard(),
+    hero,
     n ? h('div', { class: 'card' }, h('h3', {}, 'Connected now'), h('ul', { class: 'list' }, ...st.sessions.map(sessionRow))) : null,
-    h('div', { class: 'card' }, hero),
     missing ? permissionsCard() : null,
     next);
 }
@@ -409,9 +416,10 @@ function viewConnect() {
     put(card,
       h('div', { class: 'share-grid' },
         h('div', {},
-          h('p', { class: 'muted small', id: 'code-label' }, 'Your code'),
-          h('p', { class: 'code-big' }, prettyCode(c.code)),
-          h('p', { class: 'muted small' }, 'For one person · expires in ', h('span', { 'data-expires': c.expiresAt, class: 'mono' })),
+          h('div', { class: 'code-screen' },
+            h('p', { class: 'code-label', id: 'code-label' }, 'Your code'),
+            h('p', { class: 'code-big' }, prettyCode(c.code)),
+            h('p', { class: 'code-exp' }, 'For one person. Expires in ', h('span', { 'data-expires': c.expiresAt }))),
           h('p', { class: 'callout' }, 'Only give this code to someone you know. Nobody from Headroom will ever ask you for it.'),
           h('div', { class: 'row' }, copyBtn(c.code, 'Copy code', 'connect:copy-code'), copyBtn(c.link, 'Copy link', 'connect:copy-link'),
             h('button', {
