@@ -7,7 +7,9 @@ Remote desktop for your own computers, and quick help with a code: **Headroom Se
 - **You see what happened:** messages now appear on every screen (and screen readers hear them), errors sit next to the field that's wrong, "Send a new code" really sends one, and deleting your account ends with a clear confirmation.
 - **Simpler Account page:** one row per task — password, two-factor, email, delete.
 - **Keyboard and screen readers:** the Server window no longer drops your place every two seconds; every switch and menu is named; in a session, Ctrl+Alt+Shift+M takes you to the toolbar and Escape back to the remote screen.
-- **Smaller fixes:** a "Get Headroom Server" button when you have no devices yet, a "View only" lamp for guests who can watch but not control, phone layouts that fit, pinch-zoom allowed again, and less motion when your system asks for it.
+- **Safer codes:** **Decline** now also ends the code, so the same code can't ask again (make a new one for the right person). Return and Esc decline in the Mac and Windows prompts. Guests must give a name, and once let in they're told "You're connected… they can stop this at any time".
+- **Clear endings:** when the person at the computer stops a session (or its sign-in is removed, or Headroom Server quits), the other side sees why, instead of "Reconnecting…".
+- **Smaller fixes:** a "Get Headroom Server" button when you have no devices yet, a "View only" lamp for guests who can watch but not control, phone layouts that fit with 44-pixel targets, pinch-zoom allowed again, and less motion when your system asks for it. Signing out no longer undoes itself, the Server window keeps your place in every section, and the session's option panels keep keyboard focus inside them.
 
 ## New in 0.4: one account for your devices, and codes for everyone else
 
