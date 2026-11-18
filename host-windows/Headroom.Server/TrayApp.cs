@@ -262,7 +262,7 @@ public sealed class TrayApp : ApplicationContext
         _ui.Post(_ =>
         {
             if (_window == null || _window.IsDisposed)
-                _window = new SettingsWindow(LoadIconLarge(), StartServerFromWindowAsync) { Updates = _updater, InstallUpdate = RestartToUpdate };
+                _window = new SettingsWindow(LoadIconLarge(), StartServerFromWindowAsync, _updater, RestartToUpdate);
             _window.Navigate(section);
             if (!_window.Visible) _window.Show();
             if (_window.WindowState == FormWindowState.Minimized) _window.WindowState = FormWindowState.Normal;

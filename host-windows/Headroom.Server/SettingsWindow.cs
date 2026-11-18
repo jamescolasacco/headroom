@@ -21,8 +21,8 @@ public sealed class SettingsWindow : Form
     private string _pendingSection = "home";
     private bool _reallyClose;
     /// <summary>The tray app's updater, and its "Restart to update" (which asks first if someone is connected).</summary>
-    public Updater? Updates { get; init; }
-    public Action? InstallUpdate { get; init; }
+    private readonly Updater? _updates;
+    private readonly Action? _installUpdate;
 
     /// <summary>Close for good (app exit) instead of hiding.</summary>
     public void CloseForExit()
@@ -31,9 +31,11 @@ public sealed class SettingsWindow : Form
         Close();
     }
 
-    public SettingsWindow(Icon icon, Func<Task<bool>> startServer)
+    public SettingsWindow(Icon icon, Func<Task<bool>> startServer, Updater? updates = null, Action? installUpdate = null)
     {
         _startServer = startServer;
+        _updates = updates;
+        _installUpdate = installUpdate;
         Text = "Headroom Server";
         Icon = icon;
         ClientSize = new Size(960, 680);
@@ -153,13 +155,13 @@ public sealed class SettingsWindow : Form
                     SendLoginItem();
                     break;
                 case "getUpdate":
-                    if (Updates != null) SendUpdate(Updates.Now);
+                    if (_updates != null) SendUpdate(_updates.Now);
                     break;
                 case "checkUpdate":
-                    Updates?.Check(userInitiated: true);
+                    _updates?.Check(userInitiated: true);
                     break;
                 case "installUpdate":
-                    InstallUpdate?.Invoke();
+                    _installUpdate?.Invoke();
                     break;
             }
         }
