@@ -23,7 +23,7 @@ public static class SessionManager
 
     public static void Register(ClientSession s)
     {
-        if (s.Device?.Id is { } id && id.StartsWith("support:", StringComparison.Ordinal)) SupportService.Shared.SessionStarted(id);
+        if (s.Device?.Id is { } id && id.StartsWith("guest:", StringComparison.Ordinal)) SupportService.Shared.SessionStarted(id);
         lock (Gate)
         {
             Sessions.Add(s);
@@ -35,7 +35,7 @@ public static class SessionManager
 
     public static void Unregister(ClientSession s)
     {
-        if (s.Device?.Id is { } id && id.StartsWith("support:", StringComparison.Ordinal)) SupportService.Shared.SessionEnded(id);
+        if (s.Device?.Id is { } id && id.StartsWith("guest:", StringComparison.Ordinal)) SupportService.Shared.SessionEnded(id);
         bool last;
         lock (Gate)
         {
@@ -54,6 +54,13 @@ public static class SessionManager
     public static void DisconnectDevice(string deviceId)
     {
         foreach (var s in Active.Where(s => s.Device?.Id == deviceId)) s.Disconnect("device revoked");
+    }
+
+    /// <summary>What a session may do changed (a guest's rights, or this PC's settings): tell the running sessions.</summary>
+    public static void RightsChanged(string? deviceId = null)
+    {
+        foreach (var s in Active.Where(s => deviceId == null || s.Device?.Id == deviceId)) s.ApplyRights();
+        Changed?.Invoke();
     }
 
     /// <summary>

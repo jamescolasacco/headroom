@@ -39,6 +39,7 @@ public static class WebHost
             {
                 if (loopbackOnly) k.ListenLocalhost(port, configure); else k.ListenAnyIP(port, configure);
             }
+            // Headroom Viewer on the same network: sessions and file transfer only.
             Listen(cfg.Port, lo =>
             {
                 // HTTP/1.1 only: WebSockets ride on it, and the handshake callback below owns ALPN.
@@ -56,8 +57,9 @@ public static class WebHost
                     }),
                 });
             });
-            if (cfg.HttpHelperPort > 0) Listen(cfg.HttpHelperPort, _ => { });
-            // Where RelayService delivers tunnels from the account server's relay: loopback only, any free port.
+            // The settings window: this PC only, always.
+            if (cfg.HttpHelperPort > 0) k.ListenLocalhost(cfg.HttpHelperPort, lo => lo.Protocols = HttpProtocols.Http1);
+            // Where RelayService delivers tunnels from the relay: loopback only, any free port.
             k.Listen(IPAddress.Loopback, 0, lo => lo.Protocols = HttpProtocols.Http1);
         });
         builder.Services.AddRouting();
@@ -75,38 +77,27 @@ public static class WebHost
 
             if (IsRelayed(ctx))
             {
-                // Through the relay: the viewer's address comes from the relay (a client can't set it: the relay
-                // replaces the header), and only sessions and file transfers are served. The relay forwards nothing
-                // else either; this is the second lock.
-                ctx.Connection.RemoteIpAddress = IPAddress.TryParse(ctx.Request.Headers["X-Headroom-Client"].ToString(), out var viewer) ? viewer : IPAddress.None;
-                if (!RelayAllows(ctx.Request.Path.Value ?? "/"))
-                {
-                    ctx.Response.StatusCode = 403;
-                    await ctx.Response.WriteAsJsonAsync(new { error = "not-relayed" });
-                    return;
-                }
-            }
-            bool isHttps = ctx.Request.IsHttps || IsRelayed(ctx);
-            bool loopback = IsLoopback(ctx);
-            if (!isHttps && !loopback)
-            {
-                // Plain-HTTP helper port, remote caller: only the CA bootstrap is available.
-                var p = ctx.Request.Path.Value ?? "/";
-                if (!(p is "/" or "/trust" or "/headroom-ca.crt" or "/headroom-ca.mobileconfig" or "/trust.css"))
-                {
-                    var host = ctx.Request.Host.Host;
-                    ctx.Response.Redirect($"https://{FormatHost(host)}:{cfg.Port}{ctx.Request.Path}{ctx.Request.QueryString}");
-                    return;
-                }
-                if (p == "/") { ctx.Request.Path = "/trust"; }
+                // Through the relay: who the viewer is comes from the relay (a client can't set it: the relay drops
+                // any X-Headroom-* header the viewer sent, and only the relay reaches this listener).
+                var tunnel = RelayService.Tunnel(ctx.Connection.RemotePort);
+                ctx.Connection.RemoteIpAddress =
+                    IPAddress.TryParse(ctx.Request.Headers["X-Headroom-Client"].ToString(), out var viewer) ? viewer
+                    : IPAddress.TryParse(tunnel?.Ip, out var fromOpen) ? fromOpen
+                    : IPAddress.None;
+                var info = new RelayedViewer(
+                    Guest: ctx.Request.Headers["X-Headroom-Guest"].ToString() == "1" || tunnel?.Guest == true,
+                    Country: RelayService.CountryCode(ctx.Request.Headers["X-Headroom-Country"].ToString()) ?? tunnel?.Country);
+                ctx.Features.Set(info);
             }
 
+            var path = ctx.Request.Path.Value ?? "/";
+            bool api = ctx.Request.Path.StartsWithSegments("/api");
             if (ctx.Request.Path.StartsWithSegments("/api/admin"))
             {
                 // Never CORS here (and no successful preflight): see AdminAllowed.
                 h["Cache-Control"] = "no-store";
             }
-            else if (ctx.Request.Path.StartsWithSegments("/api"))
+            else if (api)
             {
                 h["Cache-Control"] = "no-store";
                 h["Access-Control-Allow-Origin"] = "*";
@@ -121,6 +112,22 @@ public static class WebHost
                     return;
                 }
             }
+
+            if (!IsLoopback(ctx))
+            {
+                // To the network (Headroom Viewer over TLS, and the relay): sessions and their file transfers, nothing
+                // else (the relay forwards nothing else either; this is the second lock).
+                if (!NetworkAllows(path, IsGuest(ctx)) || !(ctx.Request.IsHttps || IsRelayed(ctx)))
+                {
+                    ctx.Response.StatusCode = 403;
+                    await ctx.Response.WriteAsJsonAsync(new { error = "not-available" });
+                    return;
+                }
+            }
+            else if (path == "/")
+            {
+                ctx.Request.Path = "/admin.html"; // the settings window
+            }
             await next();
         });
 
@@ -130,15 +137,13 @@ public static class WebHost
             KeepAliveTimeout = TimeSpan.FromSeconds(20),
         });
 
-        // Static client. no-cache = always revalidate (ETag), so updates land immediately; the
-        // service worker provides offline start.
+        // The settings window's files (this PC only: the network never gets past the middleware above). no-cache =
+        // always revalidate (ETag), so updates land immediately.
         var contentTypes = new FileExtensionContentTypeProvider();
         contentTypes.Mappings[".webmanifest"] = "application/manifest+json";
-        contentTypes.Mappings[".mobileconfig"] = "application/x-apple-aspen-config";
         contentTypes.Mappings[".wasm"] = "application/wasm";
         contentTypes.Mappings[".mjs"] = "text/javascript";
         var files = new PhysicalFileProvider(Paths.WebRoot);
-        app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = files });
         app.UseStaticFiles(new StaticFileOptions
         {
             FileProvider = files,
@@ -151,43 +156,15 @@ public static class WebHost
         });
 
         // ------------------------------------------------------------------ public
-        app.MapGet("/api/info", (HttpContext ctx) => Results.Json(new
-        {
-            host = HostInfo.Describe(),
-            paired = AuthService.HasPassword,
-            totp = ConfigStore.Current.TotpEnabled,
-            port = ConfigStore.Current.Port,
-            tailscale = certs.TailscaleName,
-            loopback = IsLoopback(ctx),
-        }));
+        app.MapGet("/api/info", () => Results.Json(new { host = HostInfo.Describe() }));
 
-        app.MapPost("/api/pair", async (HttpContext ctx) =>
-        {
-            var body = await ReadJson(ctx);
-            var ip = ctx.Connection.RemoteIpAddress;
-            var (result, token, device) = AuthService.Pair(ip, Str(body, "password"), Str(body, "totp"), Str(body, "code"), Str(body, "deviceName") ?? "Device");
-            return result switch
-            {
-                PairResult.Ok => Results.Json(new { token, device = new { id = device!.Id, name = device.Name }, host = HostInfo.Describe() }),
-                PairResult.TotpRequired => Results.Json(new { error = "totp-required" }, statusCode: 401),
-                PairResult.RateLimited => Results.Json(new { error = "rate-limited", retryAfter = (int)(AuthService.RetryAfter(ip)?.TotalSeconds ?? 60) }, statusCode: 429),
-                PairResult.NotConfigured => Results.Json(new { error = "not-configured", message = "No password is set on this host yet. Use a pairing code, or set a password on the host." }, statusCode: 409),
-                _ => Results.Json(new { error = "bad-credentials" }, statusCode: 401),
-            };
-        });
-
-        // Verify a stored token still works (address book health check).
+        // Verify a stored token still works.
         app.MapGet("/api/me", (HttpContext ctx) =>
         {
             var dev = Authenticate(ctx);
             return dev == null ? Results.Json(new { error = "unauthorized" }, statusCode: 401)
                                : Results.Json(new { device = new { id = dev.Id, name = dev.Name }, host = HostInfo.Describe() });
         });
-
-        app.MapGet("/headroom-ca.crt", () => Results.File(certs.CaCertificate.Export(System.Security.Cryptography.X509Certificates.X509ContentType.Cert),
-            "application/x-x509-ca-cert", "headroom-ca.crt"));
-        app.MapGet("/headroom-ca.mobileconfig", () => Results.File(certs.BuildMobileConfig(), "application/x-apple-aspen-config", $"Headroom-{Environment.MachineName}.mobileconfig"));
-        app.MapGet("/trust", (HttpContext ctx) => Results.Content(TrustPage.Render(ctx, certs), "text/html; charset=utf-8"));
 
         // ------------------------------------------------------------------ files
         FileApi.Map(app);
@@ -196,100 +173,38 @@ public static class WebHost
         var admin = app.MapGroup("/api/admin").AddEndpointFilter(async (efc, next) =>
             AdminAllowed(efc.HttpContext) ? await next(efc) : Results.Json(new { error = "admin API is only available on the host itself" }, statusCode: 403));
 
-        admin.MapGet("/status", () =>
+        admin.MapGet("/status", () => Results.Json(Status(), ConfigStore.JsonOptions));
+        admin.MapPost("/sessions/disconnect-all", () =>
         {
-            var c = ConfigStore.Current;
-            return Results.Json(new
-            {
-                host = HostInfo.Describe(),
-                hasPassword = c.Password != null,
-                totpEnabled = c.TotpEnabled,
-                port = c.Port,
-                urls = ServerUrls(certs),
-                tailscale = certs.TailscaleName,
-                devices = c.Devices.Select(d => new { d.Id, d.Name, d.Created, d.LastSeen, d.LastAddress, d.ViewOnly }),
-                sessions = SessionManager.Active.Select(s => new { s.Id, device = s.Device?.Name, deviceId = s.Device?.Id, s.RemoteAddress, s.ConnectedAt }),
-                elevated = Input.InputInjector.IsSystem,
-                serviceInstalled = Service.ServiceInstaller.Exists(),
-                pid = Environment.ProcessId,
-                httpPort = c.HttpHelperPort,
-                lanAddresses = CertificateManager.GetLocalAddresses()
-                    .Where(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork).Select(a => a.ToString()),
-                dataDir = Paths.DataDir,
-                logDir = Paths.LogDir,
-                caThumbprint = certs.CaCertificate.Thumbprint,
-                serverKeyFingerprint = certs.ServerKeyFingerprint,
-                account = AccountService.Shared.Status,
-                relay = RelayService.Shared.Status,
-                support = SupportService.Shared.Status,
-                settings = new { c.Video, c.Audio, c.Permissions, c.LockOnDisconnect, c.NotifyOnConnect, c.DisplayName, c.RelayEnabled, supportAsk = c.Support.AskBeforeAccepting },
-            }, ConfigStore.JsonOptions);
-        });
-        admin.MapPost("/password", async (HttpContext ctx) =>
-        {
-            var body = await ReadJson(ctx);
-            var pw = Str(body, "password") ?? "";
-            if (pw.Length < 8) return Results.Json(new { error = "Password must be at least 8 characters." }, statusCode: 400);
-            AuthService.SetPassword(pw);
-            Log.Info("admin", "password changed");
+            SupportService.Shared.RevokeAll();
+            foreach (var s in SessionManager.Active) s.Disconnect("stopped by the person at the computer");
             return Results.Json(new { ok = true });
-        });
-        // Two-factor (TOTP) for pairing: setup returns a secret + otpauth URI; it only takes effect once a
-        // code from the authenticator app verifies.
-        string? pendingTotp = null;
-        admin.MapPost("/totp/setup", () =>
-        {
-            pendingTotp = Totp.NewSecret();
-            return Results.Json(new { secret = pendingTotp, uri = Totp.ProvisioningUri(pendingTotp, HostInfo.Name) });
-        });
-        admin.MapPost("/totp/enable", async (HttpContext ctx) =>
-        {
-            var body = await ReadJson(ctx);
-            var code = Str(body, "code") ?? "";
-            if (pendingTotp == null) return Results.Json(new { error = "Start setup first." }, statusCode: 400);
-            if (!Totp.Verify(pendingTotp, code)) return Results.Json(new { error = "That code didn't match. Check the time on your phone and try the next code." }, statusCode: 400);
-            var secret = pendingTotp;
-            pendingTotp = null;
-            ConfigStore.Update(c => { c.TotpSecret = secret; c.TotpEnabled = true; });
-            Log.Info("admin", "two-factor pairing enabled");
-            return Results.Json(new { ok = true });
-        });
-        admin.MapPost("/totp/disable", () =>
-        {
-            ConfigStore.Update(c => { c.TotpEnabled = false; c.TotpSecret = null; });
-            Log.Info("admin", "two-factor pairing disabled");
-            return Results.Json(new { ok = true });
-        });
-        admin.MapPost("/paircode", () =>
-        {
-            var code = AuthService.CreatePairCode(TimeSpan.FromMinutes(10));
-            return Results.Json(new { code, expiresInSeconds = 600, urls = ServerUrls(certs).Select(u => $"{u}#pair={code}") });
         });
         admin.MapPost("/sessions/{id}/disconnect", (string id) =>
         {
             var s = SessionManager.Active.FirstOrDefault(x => x.Id == id);
             if (s == null) return Results.NotFound();
-            // A support session ends for good: it may not resume with its key.
-            if (s.Device?.Id is { } did && did.StartsWith("support:", StringComparison.Ordinal)) SupportService.Shared.Revoke(did);
-            s.Disconnect("disconnected from the host");
+            // A guest's access ends for good: it may not come back with its resume key.
+            if (s.Device?.Id is { } did && did.StartsWith("guest:", StringComparison.Ordinal)) SupportService.Shared.Revoke(did);
+            s.Disconnect("stopped by the person at the computer");
             return Results.Json(new { ok = true });
         });
-        admin.MapPost("/sessions/disconnect-all", () =>
+        admin.MapPost("/sessions/{id}/rights", async (string id, HttpContext ctx) =>
         {
-            SupportService.Shared.RevokeAll();
-            foreach (var s in SessionManager.Active) s.Disconnect("disconnected from the host");
+            // A guest's control, files and clipboard, changed while connected.
+            var body = await ReadJson(ctx);
+            var s = SessionManager.Active.FirstOrDefault(x => x.Id == id);
+            if (s?.Device?.Id is not { } did || !did.StartsWith("guest:", StringComparison.Ordinal)) return Results.NotFound();
+            SupportService.Shared.SetRights(did, Bool(body, "input"), Bool(body, "files"), Bool(body, "clipboard"));
             return Results.Json(new { ok = true });
         });
-        // Remote support: a one-time code to give, with this PC's Headroom ID, to the person helping.
-        admin.MapPost("/support/code", () =>
+        // "Let someone connect": a 9-digit code, and a link with it.
+        admin.MapPost("/support/code", async () =>
         {
-            var (code, expires) = SupportService.Shared.CreateCode();
-            var url = RelayService.Shared.CurrentUrl;
-            return Results.Json(new
-            {
-                code, expiresAt = new DateTimeOffset(expires, TimeSpan.Zero), id = RelayService.Shared.CurrentId,
-                url, link = url != null ? url + "&code=" + code : null,
-            });
+            var (code, error) = await SupportService.Shared.CreateCodeAsync();
+            return code != null
+                ? Results.Json(new { code = code.Code, expiresAt = new DateTimeOffset(code.Expires, TimeSpan.Zero), link = code.Link })
+                : Results.Json(new { error = "unavailable", message = error }, statusCode: 503);
         });
         admin.MapDelete("/support/code", () =>
         {
@@ -299,31 +214,18 @@ public static class WebHost
         admin.MapPost("/support/requests/{id}", async (string id, HttpContext ctx) =>
         {
             var body = await ReadJson(ctx);
-            bool Flag(string n) => body.ValueKind == JsonValueKind.Object && body.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.True;
-            return SupportService.Shared.Decide(id, Flag("accept"), Flag("viewOnly"))
+            bool Flag(string n) => Bool(body, n) == true;
+            return SupportService.Shared.Decide(id, Flag("accept"), Flag("viewOnly"), Flag("files"), Flag("clipboard"))
                 ? Results.Json(new { ok = true })
                 : Results.Json(new { error = "That request is no longer waiting." }, statusCode: 404);
         });
-        admin.MapDelete("/devices/{id}", (string id) =>
-        {
-            bool ok = AuthService.RevokeDevice(id);
-            SessionManager.DisconnectDevice(id);
-            return ok ? Results.Json(new { ok = true }) : Results.NotFound();
-        });
-        admin.MapPost("/devices/{id}/viewonly", async (string id, HttpContext ctx) =>
-        {
-            var body = await ReadJson(ctx);
-            bool viewOnly = body.TryGetProperty("viewOnly", out var v) && v.GetBoolean();
-            ConfigStore.Update(c => { var d = c.Devices.FirstOrDefault(x => x.Id == id); if (d != null) d.ViewOnly = viewOnly; });
-            return Results.Json(new { ok = true });
-        });
-        // Headroom account: the password goes to the account server only; this PC keeps its own credential there.
+        // Signing in: the password goes to Headroom only; this PC keeps its own sign-in there.
         admin.MapPost("/account/join", async (HttpContext ctx) =>
         {
             var body = await ReadJson(ctx);
-            var (ok, username, error, message) = await Task.Run(() =>
-                AccountService.Shared.Join(Str(body, "server"), Str(body, "username"), Str(body, "password"), Str(body, "totp")));
-            if (ok) return Results.Json(new { ok = true, username });
+            var (ok, email, error, message) = await Task.Run(() =>
+                AccountService.Shared.Join(Str(body, "email"), Str(body, "password"), Str(body, "totp")));
+            if (ok) return Results.Json(new { ok = true, email });
             int status = error is "bad-credentials" or "totp-required" or "bad-totp" ? 401 : 400;
             return Results.Json(new { error, message = message ?? error }, statusCode: status);
         });
@@ -336,21 +238,29 @@ public static class WebHost
         admin.MapPost("/settings", async (HttpContext ctx) =>
         {
             var body = await ReadJson(ctx);
+            bool rightsChanged = false, renamed = false;
             ConfigStore.Update(c =>
             {
-                if (body.TryGetProperty("lockOnDisconnect", out var l)) c.LockOnDisconnect = l.GetBoolean();
-                if (body.TryGetProperty("notifyOnConnect", out var nc)) c.NotifyOnConnect = nc.GetBoolean();
-                if (body.TryGetProperty("relayEnabled", out var re)) c.RelayEnabled = re.GetBoolean();
-                if (body.TryGetProperty("supportAsk", out var sa)) c.Support.AskBeforeAccepting = sa.GetBoolean();
-                if (body.TryGetProperty("maxFps", out var f)) c.Video.MaxFps = Math.Clamp(f.GetInt32(), 10, 240);
-                if (body.TryGetProperty("maxBitrateKbps", out var b)) c.Video.MaxBitrateKbps = Math.Clamp(b.GetInt32(), 1000, 200000);
-                if (body.TryGetProperty("encoder", out var e) && e.GetString() is "auto" or "hardware" or "software") c.Video.Encoder = e.GetString()!;
-                if (body.TryGetProperty("audio", out var a)) c.Audio.Enabled = a.GetBoolean();
-                if (body.TryGetProperty("clipboard", out var cb)) c.Permissions.Clipboard = cb.GetBoolean();
-                if (body.TryGetProperty("fileTransfer", out var ft)) c.Permissions.FileTransfer = ft.GetBoolean();
-                if (body.TryGetProperty("input", out var inp)) c.Permissions.Input = inp.GetBoolean();
-                if (body.TryGetProperty("displayName", out var dn)) c.DisplayName = string.IsNullOrWhiteSpace(dn.GetString()) ? null : dn.GetString()!.Trim();
+                if (Bool(body, "lockOnDisconnect") is { } l) c.LockOnDisconnect = l;
+                if (Bool(body, "notifyOnConnect") is { } nc) c.NotifyOnConnect = nc;
+                if (Int(body, "maxFps") is { } f) c.Video.MaxFps = Math.Clamp(f, 10, 240);
+                if (Int(body, "maxBitrateKbps") is { } b) c.Video.MaxBitrateKbps = Math.Clamp(b, 1000, 200000);
+                if (Str(body, "encoder") is "auto" or "hardware" or "software") c.Video.Encoder = Str(body, "encoder")!;
+                if (Bool(body, "audio") is { } a) c.Audio.Enabled = a;
+                if (Bool(body, "clipboard") is { } cb) { c.Permissions.Clipboard = cb; rightsChanged = true; }
+                if (Bool(body, "fileTransfer") is { } ft) { c.Permissions.FileTransfer = ft; rightsChanged = true; }
+                if (Bool(body, "input") is { } inp) { c.Permissions.Input = inp; rightsChanged = true; }
+                if (body.ValueKind == JsonValueKind.Object && body.TryGetProperty("displayName", out _))
+                {
+                    var n = (Str(body, "displayName") ?? "").Trim();
+                    c.DisplayName = n.Length == 0 ? null : n[..Math.Min(64, n.Length)];
+                    renamed = true;
+                }
+                // Another Headroom server (self-hosting, testing); takes effect for the next sign-in and the relay.
+                if (Str(body, "server") is { } server) c.Server = AccountService.NormalizeServer(server) ?? HostConfig.DefaultServer;
             });
+            if (rightsChanged) SessionManager.RightsChanged();
+            if (renamed) _ = Task.Run(() => AccountService.Shared.Sync()); // the new name, in the account now
             return Results.Json(new { ok = true });
         });
 
@@ -365,20 +275,42 @@ public static class WebHost
             // Disable Nagle on the underlying socket: input acks and cursor updates must not be delayed.
             ctx.Features.Get<IConnectionSocketFeature>()?.Socket?.NoDelay = true;
             using var ws = await ctx.WebSockets.AcceptWebSocketAsync(new WebSocketAcceptContext { DangerousEnableCompression = false });
-            var session = new ClientSession(ws, ctx.Connection.RemoteIpAddress, IsRelayed(ctx));
+            var session = new ClientSession(ws, ctx.Connection.RemoteIpAddress, IsRelayed(ctx), IsGuest(ctx), ctx.Features.Get<RelayedViewer>()?.Country);
             await session.RunAsync(lifetime.ApplicationStopping);
         });
 
-        // SPA fallback: unknown paths serve the client.
-        app.MapFallback(async ctx =>
-        {
-            if (ctx.Request.Path.StartsWithSegments("/api")) { ctx.Response.StatusCode = 404; return; }
-            ctx.Response.ContentType = "text/html; charset=utf-8";
-            ctx.Response.Headers["Cache-Control"] = "no-cache";
-            await ctx.Response.SendFileAsync(Path.Combine(Paths.WebRoot, "index.html"));
-        });
-
         return app;
+    }
+
+    /// <summary>The settings window's view of this PC (GET /api/admin/status): the same fields as the Mac host's, plus Windows' own.</summary>
+    private static object Status()
+    {
+        var c = ConfigStore.Current;
+        return new
+        {
+            host = HostInfo.Describe(),
+            port = c.Port,
+            sessions = SessionManager.Active.Where(s => s.Device != null).Select(s => new
+            {
+                id = s.Id, device = s.Device?.Name, deviceId = s.Device?.Id, guest = s.Rights.Guest,
+                remoteAddress = s.RemoteAddress, country = s.Country, connectedAt = s.ConnectedAt, rights = s.Rights.Json,
+            }).ToList(),
+            elevated = Input.InputInjector.IsSystem,
+            serviceInstalled = Service.ServiceInstaller.Exists(),
+            pid = Environment.ProcessId,
+            lanAddresses = CertificateManager.GetLocalAddresses()
+                .Where(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork).Select(a => a.ToString()).ToList(),
+            dataDir = Paths.DataDir,
+            logDir = Paths.LogDir,
+            account = AccountService.Shared.Status,
+            relay = RelayService.Shared.Status,
+            support = SupportService.Shared.Status,
+            settings = new
+            {
+                video = c.Video, audio = c.Audio, permissions = c.Permissions,
+                lockOnDisconnect = c.LockOnDisconnect, displayName = c.DisplayName, notifyOnConnect = c.NotifyOnConnect, server = c.Server,
+            },
+        };
     }
 
     // ---------------------------------------------------------------------- helpers
@@ -392,9 +324,19 @@ public static class WebHost
     /// <summary>Arrived on the private port where RelayService delivers the relay's tunnels.</summary>
     public static bool IsRelayed(HttpContext ctx) => RelayService.LocalPort != 0 && ctx.Connection.LocalPort == RelayService.LocalPort;
 
-    /// <summary>What a relayed viewer may reach: sessions and their file transfers. Never pairing, settings or certificate pages.</summary>
-    public static bool RelayAllows(string path) =>
-        path is "/ws" or "/api/info" or "/api/me" or "/api/files/list" or "/api/files/download" or "/api/files/upload" or "/api/files/mkdir";
+    /// <summary>What the relay said about a relayed viewer (set by the first middleware, only on the relay listener).</summary>
+    private sealed record RelayedViewer(bool Guest, string? Country);
+
+    /// <summary>Came with a guest code (the relay's /c/&lt;code&gt;/): only this PC's name and the session are available.</summary>
+    public static bool IsGuest(HttpContext ctx) => IsRelayed(ctx) && ctx.Features.Get<RelayedViewer>()?.Guest == true;
+
+    /// <summary>
+    /// What the network may reach: sessions and their file transfers. With a guest code, before being accepted: only
+    /// this PC's name and the session. Never the settings window or its API.
+    /// </summary>
+    public static bool NetworkAllows(string path, bool guest) => guest
+        ? path is "/ws" or "/api/info"
+        : path is "/ws" or "/api/info" or "/api/me" or "/api/files/list" or "/api/files/download" or "/api/files/upload" or "/api/files/mkdir";
 
     /// <summary>
     /// The admin API is for this PC's own settings window, CLI and browser — not for web pages. A loopback peer
@@ -418,7 +360,7 @@ public static class WebHost
     {
         var auth = ctx.Request.Headers.Authorization.ToString();
         if (!auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)) return null;
-        return AuthService.ValidateToken(auth[7..].Trim(), ctx.Connection.RemoteIpAddress, touch: false);
+        return AuthService.ValidateToken(auth[7..].Trim(), ctx.Connection.RemoteIpAddress);
     }
 
     public static async Task<JsonElement> ReadJson(HttpContext ctx)
@@ -437,8 +379,13 @@ public static class WebHost
     public static string? Str(JsonElement e, string name) =>
         e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
 
-    private static string FormatHost(string host) => host.Contains(':') && !host.StartsWith('[') ? $"[{host}]" : host;
+    private static bool? Bool(JsonElement e, string name) =>
+        e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind is JsonValueKind.True or JsonValueKind.False ? v.GetBoolean() : null;
 
+    private static int? Int(JsonElement e, string name) =>
+        e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var i) ? i : null;
+
+    /// <summary>How Headroom Viewer on the same network reaches this PC directly (reported to the account).</summary>
     public static List<string> ServerUrls(CertificateManager certs)
     {
         int port = ConfigStore.Current.Port;

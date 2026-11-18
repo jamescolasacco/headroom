@@ -9,8 +9,9 @@ namespace Headroom.Host.Web;
 
 /// <summary>
 /// File transfer over plain HTTPS (separate TCP connection, so big transfers never stall the video
-/// socket). Browse/upload use the device bearer token; downloads use a short-lived URL token minted over
-/// the session socket, because browsers open download links themselves (no custom headers).
+/// socket). Browse/upload use the session's bearer token; downloads use a short-lived URL token minted over
+/// the session socket, because browsers open download links themselves (no custom headers). Each checks what
+/// that session may do now (<see cref="AuthService.Allowed"/>), not just this PC's settings.
 /// </summary>
 public static class FileApi
 {
@@ -45,12 +46,11 @@ public static class FileApi
 
         app.MapGet("/api/files/download", (HttpContext ctx, string? t) =>
         {
-            if (!ConfigStore.Current.Permissions.FileTransfer) return Results.StatusCode(403);
             var path = AuthService.RedeemEphemeral(t, "download", out var deviceId);
             if (path == null) return Results.Json(new { error = "link expired" }, statusCode: 401);
-            // The device may have been made view-only since the link was minted.
-            if (AuthService.DeviceStatus(deviceId) is not { } status || status.viewOnly)
-                return Results.Json(new { error = "view-only device" }, statusCode: 403);
+            // File transfer may have been turned off for this session since the link was made.
+            if (AuthService.Allowed(deviceId)?.Files != true)
+                return Results.Json(new { error = "file transfer isn't allowed" }, statusCode: 403);
             if (!File.Exists(path)) return Results.NotFound();
             Log.Info("files", $"download {path} -> {ctx.Connection.RemoteIpAddress}");
             var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16, FileOptions.Asynchronous | FileOptions.SequentialScan);
@@ -97,10 +97,10 @@ public static class FileApi
     private static bool Allowed(HttpContext ctx, out IResult? error)
     {
         error = null;
-        if (!ConfigStore.Current.Permissions.FileTransfer) { error = Results.Json(new { error = "file transfer disabled on host" }, statusCode: 403); return false; }
         var dev = WebHost.Authenticate(ctx);
         if (dev == null) { error = Results.Json(new { error = "unauthorized" }, statusCode: 401); return false; }
-        if (dev.ViewOnly) { error = Results.Json(new { error = "view-only device" }, statusCode: 403); return false; }
+        // What this session's owner may do now: this PC's settings for your devices, what you allowed for a guest.
+        if (AuthService.Allowed(dev.Id)?.Files != true) { error = Results.Json(new { error = "file transfer isn't allowed" }, statusCode: 403); return false; }
         return true;
     }
 

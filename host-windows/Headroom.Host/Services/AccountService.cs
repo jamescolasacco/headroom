@@ -11,14 +11,14 @@ using Headroom.Host.Web;
 namespace Headroom.Host.Services;
 
 /// <summary>
-/// Membership in a Headroom account (account-server/, docs/ACCOUNTS.md). When joined, this computer checks in
-/// every ~20 s with how to reach it (addresses, certificate pin, CA) and receives the account's devices as
-/// (id, name, token hash, view-only). Those devices then connect exactly like paired ones — the token each
-/// presents was derived for this computer alone — without any pairing here.
+/// Signed in to a Headroom account (account-server/, docs/ACCOUNTS.md): this PC is one of the account's devices.
+/// It checks in every ~20 s with its name and how Headroom Viewer can reach it directly (addresses, certificate
+/// pin), and receives the account's sign-ins as (id, name, token hash). Each of those can then connect with a token
+/// the account server derived for this computer alone.
 ///
-/// The device list is cached in the config, so a short account-server outage doesn't lock anyone out; a device
-/// removed from the account disappears at the next successful check-in and its sessions are closed.
-/// Same protocol and config schema as the Mac host's AccountService.
+/// The list is cached in the config, so a short outage doesn't lock anyone out; a sign-in that ends (signed out,
+/// password changed) disappears at the next check-in and its sessions are closed. Same protocol and config schema
+/// as the Mac host's AccountService.
 /// </summary>
 public sealed class AccountService
 {
@@ -64,7 +64,7 @@ public sealed class AccountService
         }
     }
 
-    /// <summary>The account device presenting this token hash, if any.</summary>
+    /// <summary>The account sign-in presenting this token hash, if any.</summary>
     public AccountDevice? DeviceForHash(string hash)
     {
         var h = Encoding.ASCII.GetBytes(hash);
@@ -120,8 +120,13 @@ public sealed class AccountService
             if (status == 401)
             {
                 // This computer was removed from the account (or the account deleted).
-                Log.Warn("account", $"this computer was removed from the account '{link.Username}'; leaving it");
+                Log.Warn("account", $"this computer was removed from the account {link.Email} (or the account was deleted); signed out");
                 Unlink("removed from the account");
+                return false;
+            }
+            if (status == 403 && Str(body?["error"]) == "disabled")
+            {
+                lock (_gate) _lastError = "This account is disabled.";
                 return false;
             }
             if (status != 200 || body == null || body["devices"] is not JsonArray list)
@@ -140,6 +145,8 @@ public sealed class AccountService
             }
             if (body["interval"] is JsonValue iv && iv.TryGetValue<int>(out var secs) && secs >= 5)
                 _interval = TimeSpan.FromSeconds(Math.Min(secs, 300));
+            if (body["account"] is JsonObject acct && Str(acct["email"]) is { Length: > 0 } email && email != link.Email)
+                ConfigStore.Update(c => { if (c.Account != null) c.Account.Email = email; }); // changed on the website
             List<AccountDevice> old;
             bool hadError;
             lock (_gate)
@@ -199,36 +206,39 @@ public sealed class AccountService
         return $"{u.Scheme}://{(u.HostNameType == UriHostNameType.IPv6 ? $"[{u.DnsSafeHost}]" : u.Host)}{(u.IsDefaultPort ? "" : $":{u.Port}")}{path}";
     }
 
-    /// <summary>Signs this computer in to an account (it gets its own credential there; the password isn't stored).</summary>
-    public (bool ok, string? username, string? error, string? message) Join(string? server, string? username, string? password, string? totp)
+    /// <summary>
+    /// Signs this computer in to an account at the Headroom server in the settings (it gets its own credential there;
+    /// the password isn't stored).
+    /// </summary>
+    public (bool ok, string? email, string? error, string? message) Join(string? email, string? password, string? totp)
     {
-        var baseUrl = NormalizeServer(server);
-        if (baseUrl == null) return (false, null, "bad-server", "Enter the account server's address.");
+        var baseUrl = NormalizeServer(ConfigStore.Current.Server);
+        if (baseUrl == null) return (false, null, "bad-server", "The Headroom server in the settings isn't a valid address.");
         var (status, body, err) = Send(HttpMethod.Post, baseUrl + "/api/account/login", new JsonObject
         {
-            ["username"] = username ?? "",
+            ["email"] = (email ?? "").Trim(),
             ["password"] = password ?? "",
             ["totp"] = string.IsNullOrWhiteSpace(totp) ? null : totp.Trim(),
             ["deviceName"] = HostInfo.Name,
             ["platform"] = "windows",
             ["kind"] = "computer",
         }, null);
-        if (err != null) return (false, null, "unreachable", $"Can't reach the account server ({err}).");
+        if (err != null) return (false, null, "unreachable", $"Can't reach Headroom ({err}). Check the internet connection.");
         if (status != 200 || Str(body?["token"]) is not { } token || body?["account"] is not JsonObject account || body["device"] is not JsonObject device)
             return (false, null, Str(body?["error"]) ?? $"HTTP {status}", Str(body?["message"]));
         // Leaving a previous account first keeps it tidy (best effort).
         if (ConfigStore.Current.Account != null) Leave();
-        var name = Str(account["username"]) ?? username ?? "";
+        var name = Str(account["email"]) ?? (email ?? "").Trim();
         ConfigStore.Update(c => c.Account = new AccountLink
         {
             Server = baseUrl,
-            Username = name,
+            Email = name,
             AccountId = Str(account["id"]) ?? "",
             DeviceId = Str(device["id"]) ?? "",
             Token = token,
         });
         lock (_gate) { _devices = new(); _lastError = null; _lastAttempt = DateTime.MinValue; }
-        Log.Info("account", $"joined account '{name}' at {baseUrl}");
+        Log.Info("account", $"signed in to {name} at {baseUrl}");
         Sync();
         return (true, name, null, null);
     }
@@ -270,11 +280,10 @@ public sealed class AccountService
             lock (_gate)
                 return new
                 {
-                    server = link.Server,
-                    username = link.Username,
+                    email = link.Email,
                     lastSync = _lastSync,
                     error = _lastError,
-                    devices = _devices.Select(d => new { id = LocalId(d.Id), name = d.Name, viewOnly = d.ViewOnly }).ToList(),
+                    signIns = _devices.Select(d => new { id = LocalId(d.Id), name = d.Name }).ToList(),
                 };
         }
     }

@@ -71,7 +71,7 @@ public static class ServiceInstaller
         Run("netsh", $"advfirewall firewall add rule name=\"{FirewallRule}\" dir=in action=allow program=\"{exe}\" enable=yes profile=private,domain");
         Console.WriteLine("Added firewall rule for private and domain networks.");
 
-        // The data dir holds the password hash, device tokens and the CA key: SYSTEM + Administrators only.
+        // The data dir holds this PC's account sign-in and the CA key: SYSTEM + Administrators only.
         Directory.CreateDirectory(Paths.DataDir);
         Run("icacls", $"\"{Paths.DataDir}\" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F", quiet: true);
         Console.WriteLine($"Restricted {Paths.DataDir} to SYSTEM and Administrators.");

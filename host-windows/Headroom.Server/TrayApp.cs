@@ -4,8 +4,9 @@ using Microsoft.Win32;
 namespace Headroom.Server;
 
 /// <summary>
-/// Notification-area icon for the Headroom host, like VNC Server's: shows whether anyone is connected,
-/// pops a notification when a viewer connects/disconnects, and gives quick actions.
+/// Notification-area icon for the Headroom host, like VNC Server's: shows whether anyone is connected, pops a
+/// notification when someone connects or leaves, asks before a guest gets in, shows the Stop bar while anyone is
+/// connected, and gives quick actions.
 /// </summary>
 public sealed class TrayApp : ApplicationContext
 {
@@ -19,8 +20,10 @@ public sealed class TrayApp : ApplicationContext
     private readonly System.Windows.Forms.Timer _poll = new() { Interval = 2000 };
     private readonly SynchronizationContext _ui;
     private SettingsWindow? _window;
+    private readonly StopBar _stopBar;
     private ServerStatus? _status;
-    private HashSet<string> _knownViewers = new();
+    private Dictionary<string, ViewerInfo> _knownViewers = new();
+    private readonly bool _launchedInTray;
     private bool _firstPoll = true;
     private bool _startingEngine;
     private bool _userStopped;
@@ -29,6 +32,8 @@ public sealed class TrayApp : ApplicationContext
     public TrayApp(bool showWindow)
     {
         _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
+        _launchedInTray = !showWindow;
+        _stopBar = new StopBar();
         _idleIcon = LoadIcon("headroom.ico");
         _activeIcon = LoadIcon("headroom-active.ico");
         _tray = new NotifyIcon
@@ -39,12 +44,12 @@ public sealed class TrayApp : ApplicationContext
             ContextMenuStrip = new ContextMenuStrip(),
         };
         _tray.ContextMenuStrip.Opening += (_, _) => BuildMenu();
-        _tray.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) ShowWindow("status"); };
-        _tray.BalloonTipClicked += (_, _) => ShowWindow("status");
+        _tray.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) ShowWindow("home"); };
+        _tray.BalloonTipClicked += (_, _) => ShowWindow("home");
         _poll.Tick += async (_, _) => await PollAsync();
         _poll.Start();
         _ = PollAsync();
-        if (showWindow) ShowWindow("status");
+        if (showWindow) ShowWindow("home");
     }
 
     private static Icon LoadIcon(string name)
@@ -69,6 +74,7 @@ public sealed class TrayApp : ApplicationContext
                 _engine.StartUserMode();
                 _ = Task.Delay(4000).ContinueWith(_ => _startingEngine = false);
             }
+            _stopBar.SetViewers(Array.Empty<ViewerInfo>(), "", () => { }, () => { });
             _tray.Icon = _idleIcon;
             _tray.Text = EngineManager.ServiceInstalled ? "Headroom Server — service not running" : "Headroom Server — starting…";
             if (_offlinePolls == 3 && _window is { Visible: true }) _window.ShowOffline();
@@ -78,43 +84,53 @@ public sealed class TrayApp : ApplicationContext
         _offlinePolls = 0;
         _status = st;
 
-        var ids = st.Viewers.Select(v => v.Id).ToHashSet();
-        if (!_firstPoll)
+        var ids = st.Viewers.GroupBy(v => v.Id).ToDictionary(g => g.Key, g => g.First());
+        if (!_firstPoll && st.NotifyOnConnect)
         {
-            foreach (var v in st.Viewers.Where(v => !_knownViewers.Contains(v.Id)))
-                Notify($"{v.Device} connected", $"From {v.Address}. Open Headroom Server to disconnect it.");
-            foreach (var gone in _knownViewers.Except(ids))
-                Notify("Viewer disconnected", "A remote session ended.");
+            foreach (var v in st.Viewers.Where(v => !_knownViewers.ContainsKey(v.Id)))
+                Notify(v.Guest ? $"“{v.Device}” (guest) connected" : $"{v.Device} connected",
+                    $"From {v.Address}. Click Stop in the bar at the top of the screen to end it.");
+            foreach (var (_, v) in _knownViewers.Where(kv => !ids.ContainsKey(kv.Key)))
+                Notify($"{v.Device} disconnected", "The remote session ended.");
         }
-        else if (st.DeviceCount == 0)
+        else if (_firstPoll && !st.SignedIn && _launchedInTray)
         {
-            Notify("Headroom is running", "Click here to pair your phone or another computer.");
+            Notify("Headroom is running", "Click here to sign in, or to let someone connect with a code.");
         }
         _knownViewers = ids;
         _firstPoll = false;
         ShowSupportPrompts(st.SupportRequests);
+        _stopBar.SetViewers(st.Viewers, st.HostName, StopFromBar, () => ShowWindow("home"));
 
         int n = st.Viewers.Count;
         _tray.Icon = n > 0 ? _activeIcon : _idleIcon;
         var text = n switch
         {
-            0 => $"Headroom Server — ready ({st.HostName})",
+            0 => st.Online ? $"Headroom Server — ready ({st.HostName})" : "Headroom Server — connecting to Headroom…",
             1 => $"Headroom — {st.Viewers[0].Device} connected",
-            _ => $"Headroom — {n} viewers connected",
+            _ => $"Headroom — {n} people connected",
         };
         _tray.Text = text.Length > 127 ? text[..127] : text;
-        if (wasOffline && _window is { Visible: true }) _window.Navigate("status", reload: true);
+        if (wasOffline && _window is { Visible: true }) _window.Navigate("home", reload: true);
+    }
+
+    /// <summary>The Stop bar's button: one session ends; with several, everyone's.</summary>
+    private async void StopFromBar()
+    {
+        if (_status?.Viewers is { Count: 1 } only) await _admin.StopAsync(only[0].Id);
+        else await _admin.DisconnectAllAsync();
+        await PollAsync();
     }
 
     private void Notify(string title, string text) => _tray.ShowBalloonTip(5000, title, text, ToolTipIcon.None);
 
-    // ------------------------------------------------------------------ remote support
+    // ------------------------------------------------------------------ guests
 
     private readonly Dictionary<string, SupportPrompt> _prompts = new();
 
     /// <summary>
-    /// Someone typed this PC's Headroom ID and support code: Accept, View only or Decline, like AnyDesk. A prompt closes
-    /// by itself when its request is answered elsewhere (the settings window) or times out.
+    /// Someone entered your guest code: Accept, View only or Decline, and what else they may do (files and clipboard
+    /// start unticked). A prompt closes by itself when its request is answered in the settings window or times out.
     /// </summary>
     private void ShowSupportPrompts(IReadOnlyList<SupportRequest> requests)
     {
@@ -126,9 +142,9 @@ public sealed class TrayApp : ApplicationContext
         }
         foreach (var r in requests.Where(r => !_prompts.ContainsKey(r.Id)))
         {
-            var prompt = new SupportPrompt(r, async (accept, viewOnly) =>
+            var prompt = new SupportPrompt(r, async (accept, viewOnly, files, clipboard) =>
             {
-                await _admin.AnswerSupportAsync(r.Id, accept, viewOnly);
+                await _admin.AnswerSupportAsync(r.Id, accept, viewOnly, files, clipboard);
                 await PollAsync();
             });
             _prompts[r.Id] = prompt;
@@ -147,24 +163,15 @@ public sealed class TrayApp : ApplicationContext
         var st = _status;
         string header = st == null
             ? (EngineManager.ServiceInstalled ? "Service not running" : "Server not running")
-            : st.Viewers.Count == 0 ? "Ready — nobody connected"
-            : string.Join(", ", st.Viewers.Select(v => v.Device)) + " connected";
+            : st.Viewers.Count > 0 ? string.Join(", ", st.Viewers.Select(v => v.Device)) + " connected"
+            : st.Online ? "Ready — nobody connected" : "Connecting to Headroom…";
+        if (header.Length > 80) header = header[..80] + "…";
         m.Items.Add(new ToolStripMenuItem(header) { Enabled = false });
         m.Items.Add(new ToolStripSeparator());
-        m.Items.Add(new ToolStripMenuItem("Open Headroom Server", null, (_, _) => ShowWindow("status")) { Font = new Font(m.Font, FontStyle.Bold) });
-        if (st?.RelayId is { Length: 9 } rid)
-            m.Items.Add(new ToolStripMenuItem($"Headroom ID {rid[..3]} {rid[3..6]} {rid[6..]}") { Enabled = false });
-        m.Items.Add(new ToolStripMenuItem("Remote support…", null, (_, _) => ShowWindow("support")) { Enabled = st != null });
-        m.Items.Add(new ToolStripMenuItem("Pair a device…", null, (_, _) => ShowWindow("pair")) { Enabled = st != null });
-
-        var copy = new ToolStripMenuItem("Copy address") { Enabled = st != null && st.Urls.Count > 0 };
-        if (st != null)
-            foreach (var url in st.Urls)
-                copy.DropDownItems.Add(url, null, (_, _) => Clipboard.SetText(url));
-        m.Items.Add(copy);
-
+        m.Items.Add(new ToolStripMenuItem("Open Headroom Server…", null, (_, _) => ShowWindow("home")) { Font = new Font(m.Font, FontStyle.Bold) });
+        m.Items.Add(new ToolStripMenuItem("Let Someone Connect…", null, (_, _) => ShowWindow("connect")) { Enabled = st != null });
         if (st is { Viewers.Count: > 0 })
-            m.Items.Add(new ToolStripMenuItem("Disconnect everyone", null, async (_, _) => { await _admin.DisconnectAllAsync(); await PollAsync(); }));
+            m.Items.Add(new ToolStripMenuItem("Stop everyone's session", null, async (_, _) => { await _admin.DisconnectAllAsync(); await PollAsync(); }));
 
         m.Items.Add(new ToolStripSeparator());
         if (EngineManager.ServiceInstalled)
@@ -224,7 +231,8 @@ public sealed class TrayApp : ApplicationContext
 
     // ------------------------------------------------------------------ autostart
 
-    private static bool AutostartEnabled
+    /// <summary>Start with Windows (in the notification area): the per-user Run key.</summary>
+    public static bool AutostartEnabled
     {
         get
         {
@@ -254,6 +262,7 @@ public sealed class TrayApp : ApplicationContext
         _tray.Visible = false;
         _engine.Dispose(); // stops a user-mode engine; the service (if any) keeps running
         _window?.CloseForExit();
+        _stopBar.Dispose();
         ExitThread();
     }
 
@@ -264,6 +273,7 @@ public sealed class TrayApp : ApplicationContext
             _tray.Dispose();
             _poll.Dispose();
             _engine.Dispose();
+            _stopBar.Dispose();
         }
         base.Dispose(disposing);
     }

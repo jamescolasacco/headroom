@@ -1,21 +1,26 @@
+using System.Collections.Concurrent;
+using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Net.WebSockets;
-using System.Text;
+using System.Security.Cryptography;
 using System.Text.Json;
 using Headroom.Host.Config;
+using Headroom.Host.Security;
 using Headroom.Host.Util;
 
 namespace Headroom.Host.Services;
 
 /// <summary>
-/// Keeps this PC reachable through its account server's relay (docs/RELAY.md): browsers anywhere open
-/// https://&lt;account server&gt;/r/&lt;Headroom ID&gt;/… without port forwarding, Tailscale or a certificate install.
+/// Keeps this PC reachable through the Headroom relay (docs/RELAY.md), always: signed in to an account, your devices
+/// reach it from anywhere; signed in or not, a guest code finds it. No port forwarding, no setup.
 ///
-/// A control WebSocket stays open to the relay. When a viewer arrives, the relay sends {"t":"open","id":…}; this PC
-/// opens a tunnel WebSocket and pipes its binary messages to and from a private loopback-only Kestrel port
-/// (<see cref="LocalPort"/>). The web host treats connections on that port as relayed: never local, only session
-/// paths, the viewer's address taken from the relay's X-Headroom-Client header. Same protocol as the Mac host.
+/// A control WebSocket stays open to the relay. When a viewer arrives, the relay sends {"t":"open","id":…} (with the
+/// viewer's address, country, and whether they came with a guest code); this PC opens a tunnel WebSocket and pipes
+/// its binary messages to and from a private loopback-only Kestrel port (<see cref="LocalPort"/>). The web host
+/// treats connections on that port as relayed: never local, only session paths, with the viewer's address, country
+/// and guest flag from the relay's X-Headroom-* headers and the "open" message (<see cref="Tunnel"/>). Same protocol
+/// as the Mac host.
 /// </summary>
 public sealed class RelayService
 {
@@ -24,10 +29,21 @@ public sealed class RelayService
     /// <summary>The loopback port where tunnels are delivered (0 until the web host has started).</summary>
     public static int LocalPort { get; private set; }
 
+    /// <summary>A guest code's first 4 digits, from the relay, and until when they route here.</summary>
+    public sealed record Slot(string Digits, DateTime Expires);
+
+    /// <summary>Who a tunnel is for, as the relay's "open" message described them.</summary>
+    public sealed record TunnelInfo(string? Ip, string? Country, bool Guest);
+
+    /// <summary>Open tunnels by the local port of their loopback connection (= the relay listener's remote port).</summary>
+    private static readonly ConcurrentDictionary<int, TunnelInfo> Tunnels = new();
+
     private readonly object _gate = new();
     private int _generation;
-    private string? _target;          // account server + credential of the current control connection
+    private string? _target;          // relay + credential of the current control connection
     private ClientWebSocket? _control;
+    private readonly SemaphoreSlim _sendLock = new(1, 1);
+    private readonly Dictionary<string, TaskCompletionSource<(Slot?, string?)>> _slotWaiters = new();
     private string _state = "off";    // off | connecting | online | retrying
     private string? _relayId;
     private string? _lastError;
@@ -41,17 +57,18 @@ public sealed class RelayService
         _timer = new Timer(_ => Tick(), null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
     }
 
-    private sealed record Target(Uri Base, string Token)
+    /// <param name="Token">This PC's sign-in to its account; null when it isn't signed in (then only guest codes reach it).</param>
+    private sealed record Target(Uri Base, string? Token)
     {
-        public string Key => Base.AbsoluteUri + "|" + Token;
+        public string Key => Base.AbsoluteUri + "|" + (Token ?? "-");
     }
 
     private static Target? Wanted()
     {
         var c = ConfigStore.Current;
-        if (!c.RelayEnabled || c.Account is not { } link) return null;
-        if (!Uri.TryCreate(link.Server, UriKind.Absolute, out var u) || u.Scheme is not ("http" or "https")) return null;
-        return new Target(u, link.Token);
+        var server = c.Account?.Server ?? c.Server;
+        if (!Uri.TryCreate(server, UriKind.Absolute, out var u) || u.Scheme is not ("http" or "https") || u.Host.Length == 0) return null;
+        return new Target(u, c.Account?.Token);
     }
 
     private void Tick()
@@ -61,18 +78,21 @@ public sealed class RelayService
             if (LocalPort == 0) return;
             var want = Wanted();
             ClientWebSocket? toClose = null;
-            bool connectNow = false;
+            bool connectNow = false, switched = false;
             int gen = 0;
+            List<TaskCompletionSource<(Slot?, string?)>> waiters = new();
             lock (_gate)
             {
                 if (_target != null && _target != want?.Key)
                 {
-                    // Left the account, joined another, or turned the relay off.
+                    // Signed in, signed out, or another server in the settings.
                     _generation++;
                     toClose = _control;
                     _target = null; _control = null; _relayId = null; _lastError = null;
                     _backoff = TimeSpan.FromSeconds(1); _nextAttempt = DateTime.MinValue;
                     _state = want == null ? "off" : "connecting";
+                    waiters = TakeWaiters();
+                    switched = true;
                 }
                 else if (want == null) _state = "off";
                 else if (_target == null && DateTime.UtcNow >= _nextAttempt)
@@ -84,6 +104,11 @@ public sealed class RelayService
                 }
             }
             toClose?.Abort();
+            if (switched)
+            {
+                SupportService.Shared.RelayDropped();
+                foreach (var w in waiters) w.TrySetResult((null, Offline(null)));
+            }
             if (connectNow) _ = RunControlAsync(want!, gen);
         }
         catch (Exception ex)
@@ -104,8 +129,9 @@ public sealed class RelayService
     private async Task RunControlAsync(Target t, int gen)
     {
         var ws = new ClientWebSocket();
-        ws.Options.SetRequestHeader("Authorization", "Bearer " + t.Token);
+        if (t.Token != null) ws.Options.SetRequestHeader("Authorization", "Bearer " + t.Token);
         ws.Options.SetRequestHeader("X-Headroom-Host-Id", HostInfo.HostId);
+        ws.Options.SetRequestHeader("X-Headroom-Name", HeaderSafe(HostInfo.Name));
         ws.Options.CollectHttpResponseDetails = true;
         // The relay pings every 25 s too; this side's pings notice a dead path (sleep, network change) on their own.
         ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(25);
@@ -169,12 +195,29 @@ public sealed class RelayService
                         _lastError = null;
                         _backoff = TimeSpan.FromSeconds(1);
                     }
-                    if (first) Log.Info("relay", $"reachable through the relay at {b.AbsoluteUri} as Headroom ID {Pretty(_relayId)}");
+                    if (first) Log.Info("relay", $"connected to {b.Host}{(ConfigStore.Current.Account == null ? " (not signed in: reachable with guest codes)" : "")}");
                     break;
                 case "open":
                     var nonce = Str("id");
                     if (nonce is { Length: > 0 and <= 64 } && nonce.All(ch => char.IsAsciiLetterOrDigit(ch) || ch is '-' or '_'))
-                        _ = TunnelAsync(b, nonce);
+                    {
+                        var ip = Str("client") is { Length: <= 64 } client && IPAddress.TryParse(client, out var parsed) ? parsed.ToString() : null;
+                        var guest = root.TryGetProperty("guest", out var g) && g.ValueKind == JsonValueKind.True;
+                        _ = TunnelAsync(b, nonce, new TunnelInfo(ip, CountryCode(Str("country")), guest));
+                    }
+                    break;
+                case "slot":
+                    var id = Str("id");
+                    if (id == null) break;
+                    TaskCompletionSource<(Slot?, string?)>? waiter;
+                    lock (_gate) _slotWaiters.Remove(id, out waiter);
+                    if (Str("slot") is { Length: 4 } digits && digits.All(char.IsAsciiDigit))
+                    {
+                        var expires = DateTimeOffset.TryParse(Str("expires"), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var e)
+                            ? e.UtcDateTime : DateTime.UtcNow + TimeSpan.FromMinutes(10);
+                        waiter?.TrySetResult((new Slot(digits, expires), null));
+                    }
+                    else waiter?.TrySetResult((null, "Headroom is busy right now. Try again in a minute."));
                     break;
             }
         }
@@ -186,18 +229,27 @@ public sealed class RelayService
         string message;
         TimeSpan wait;
         bool log;
+        List<TaskCompletionSource<(Slot?, string?)>> waiters;
         lock (_gate)
         {
             if (gen != _generation) return;
             var wasOnline = _state == "online";
             _target = null;
             _control = null;
+            _relayId = null;
+            waiters = TakeWaiters();
             wait = _backoff;
             if (status is >= 400 and < 600)
             {
-                // Rejected: removed from the account (it notices at its next check-in) or no relay on that server.
+                // Rejected: removed from the account (it notices at its next check-in), too many computers from this
+                // network without an account, or no relay on that server.
                 wait = TimeSpan.FromSeconds(status == 404 ? 300 : 60);
-                _lastError = status == 404 ? "This account server doesn't run a relay." : $"The relay refused this PC (HTTP {status}).";
+                _lastError = status switch
+                {
+                    404 => "This server doesn't run a relay.",
+                    429 => "Too many computers from this network are connected without an account.",
+                    _ => $"The relay refused this PC (HTTP {status}).",
+                };
             }
             else _lastError = error != null ? $"Can't reach the relay ({error})." : "Connection to the relay closed.";
             _state = "retrying";
@@ -206,17 +258,102 @@ public sealed class RelayService
             message = _lastError;
             log = wasOnline || _backoff.TotalSeconds <= 2;
         }
+        SupportService.Shared.RelayDropped();
+        foreach (var w in waiters) w.TrySetResult((null, Offline(message)));
         if (log) Log.Warn("relay", $"{message} Retrying in {wait.TotalSeconds:0} s.");
+    }
+
+    private List<TaskCompletionSource<(Slot?, string?)>> TakeWaiters() // under lock
+    {
+        var w = _slotWaiters.Values.ToList();
+        _slotWaiters.Clear();
+        return w;
+    }
+
+    private static string Offline(string? why) =>
+        $"This PC isn't connected to Headroom right now{(why != null ? $" ({why.TrimEnd('.')})" : "")}. Check the internet connection and try again.";
+
+    // ---------------------------------------------------------------- guest codes
+
+    /// <summary>Asks the relay for the first 4 digits of a guest code (a "slot" that routes /c/&lt;slot&gt;/ here), or says why not.</summary>
+    public async Task<(Slot? Slot, string? Error)> RequestSlotAsync()
+    {
+        var id = AuthService.Base64Url(RandomNumberGenerator.GetBytes(6));
+        var waiter = new TaskCompletionSource<(Slot?, string?)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        ClientWebSocket? ws;
+        lock (_gate)
+        {
+            ws = _state == "online" ? _control : null;
+            if (ws == null) return (null, Offline(_lastError));
+            _slotWaiters[id] = waiter;
+        }
+        if (!await SendAsync(ws, new { t = "slot", id }))
+        {
+            lock (_gate) _slotWaiters.Remove(id);
+            return (null, Offline(null));
+        }
+        var done = await Task.WhenAny(waiter.Task, Task.Delay(TimeSpan.FromSeconds(10)));
+        lock (_gate) _slotWaiters.Remove(id);
+        return done == waiter.Task ? waiter.Task.Result : (null, "Headroom didn't answer. Try again.");
+    }
+
+    /// <summary>The code was used, cancelled or withdrawn: the relay stops routing it here.</summary>
+    public void ReleaseSlot()
+    {
+        ClientWebSocket? ws;
+        lock (_gate) ws = _control;
+        if (ws != null) _ = SendAsync(ws, new { t = "slot-release" });
+    }
+
+    /// <summary>One message on the control connection (sends never overlap; a failed send ends the connection).</summary>
+    private async Task<bool> SendAsync(ClientWebSocket ws, object message)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(message);
+        await _sendLock.WaitAsync();
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await ws.SendAsync(bytes, WebSocketMessageType.Text, true, cts.Token);
+            return true;
+        }
+        catch (Exception ex) when (ex is WebSocketException or ObjectDisposedException or OperationCanceledException or IOException or InvalidOperationException)
+        {
+            return false;
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
+    }
+
+    /// <summary>Where an accepted guest's session continues (its code is used up): this PC's own path on the relay.</summary>
+    public string? RelayPath
+    {
+        get { lock (_gate) return _state == "online" && _relayId != null ? "/r/" + _relayId : null; }
+    }
+
+    /// <summary>The Headroom website people open (for guest links), without a trailing slash.</summary>
+    public string PublicBase
+    {
+        get
+        {
+            var c = ConfigStore.Current;
+            return (c.Account?.Server ?? c.Server).TrimEnd('/');
+        }
     }
 
     // ---------------------------------------------------------------- tunnels
 
+    /// <summary>Who the relay said a connection on the relay listener is for (by that connection's remote port).</summary>
+    public static TunnelInfo? Tunnel(int remotePort) => Tunnels.TryGetValue(remotePort, out var t) ? t : null;
+
     /// <summary>One viewer connection: the relay's tunnel WebSocket, piped to the private loopback port.</summary>
-    private static async Task TunnelAsync(Uri b, string nonce)
+    private static async Task TunnelAsync(Uri b, string nonce, TunnelInfo who)
     {
         using var ws = new ClientWebSocket();
         using var tcp = new TcpClient { NoDelay = true };
         using var cts = new CancellationTokenSource();
+        int localPort = 0;
         try
         {
             using (var connect = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
@@ -224,6 +361,9 @@ public sealed class RelayService
                 await ws.ConnectAsync(Endpoint(b, "/api/relay/tunnel/" + nonce), connect.Token);
                 await tcp.ConnectAsync(IPAddress.Loopback, LocalPort, connect.Token);
             }
+            // Registered before any of the viewer's bytes are passed on, so the web host always finds it.
+            localPort = (tcp.Client.LocalEndPoint as IPEndPoint)?.Port ?? 0;
+            if (localPort != 0) Tunnels[localPort] = who;
             var stream = tcp.GetStream();
             var fromRelay = Task.Run(async () =>
             {
@@ -255,7 +395,19 @@ public sealed class RelayService
         finally
         {
             cts.Cancel();
+            if (localPort != 0) Tunnels.TryRemove(localPort, out _);
         }
+    }
+
+    /// <summary>A country code as the relay sends it ("US"), or null.</summary>
+    public static string? CountryCode(string? s) =>
+        s is { Length: > 0 and <= 8 } && s.All(char.IsAsciiLetter) ? s.ToUpperInvariant() : null;
+
+    /// <summary>Header values must be plain ASCII (the relay only shows the name in its log).</summary>
+    private static string HeaderSafe(string s)
+    {
+        var t = new string(s.Select(ch => ch is >= ' ' and <= '~' ? ch : '?').ToArray()).Trim();
+        return t.Length == 0 ? "PC" : t[..Math.Min(64, t.Length)];
     }
 
     // ---------------------------------------------------------------- status
@@ -264,36 +416,8 @@ public sealed class RelayService
     {
         get
         {
-            var c = ConfigStore.Current;
-            lock (_gate)
-            {
-                var server = c.Account?.Server;
-                return new
-                {
-                    enabled = c.RelayEnabled,
-                    state = _state,
-                    server,
-                    id = _relayId,
-                    url = server != null && _relayId != null ? server.TrimEnd('/') + "/#id=" + _relayId : null,
-                    error = _state == "online" ? null : _lastError,
-                };
-            }
+            var site = PublicBase;
+            lock (_gate) return new { state = _state, site, error = _state == "online" ? null : _lastError };
         }
     }
-
-    public string? CurrentId
-    {
-        get { lock (_gate) return _state == "online" ? _relayId : null; }
-    }
-
-    public string? CurrentUrl
-    {
-        get
-        {
-            var server = ConfigStore.Current.Account?.Server;
-            lock (_gate) return server != null && _relayId != null ? server.TrimEnd('/') + "/#id=" + _relayId : null;
-        }
-    }
-
-    private static string Pretty(string? id) => id is { Length: 9 } ? $"{id[..3]} {id[3..6]} {id[6..]}" : id ?? "?";
 }

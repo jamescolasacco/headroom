@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Net.WebSockets;
 using System.Text;
@@ -46,11 +47,16 @@ public sealed class ClientSession : IVideoSink
     private VideoPipeline? _pipeline;
     private CaptureSource? _cursorSource;
     private readonly HashSet<uint> _sentShapes = new();
-    private bool _viewOnly;
+    private volatile bool _viewOnly;
+    private volatile SessionRights _rights = new(false, false, false, false);
+    private readonly object _rightsGate = new();
     private bool _audioEnabled;
     private int _epochBase;
     private string? _lastClipboardSent;
     private bool _clipboardSubscribed;
+    private volatile bool _closed;
+    /// <summary>A read started while a guest waited for approval; the receive loop picks it up.</summary>
+    private Task<(WebSocketMessageType Type, byte[] Data)?>? _carriedReceive;
 
     // flow control / congestion state
     private readonly object _flowGate = new();
@@ -75,17 +81,25 @@ public sealed class ClientSession : IVideoSink
     public string Id { get; } = AuthService.Base64Url(System.Security.Cryptography.RandomNumberGenerator.GetBytes(6));
     public PairedDevice? Device => _device;
     public string RemoteAddress => (_remoteIp?.ToString() ?? "?") + (_relayed ? " (via relay)" : "");
-    /// <summary>Came through the account server's relay.</summary>
+    /// <summary>Came through the relay.</summary>
     private readonly bool _relayed;
+    /// <summary>Came with a guest code (through the relay's /c/&lt;code&gt;/): may only start a guest session.</summary>
+    private readonly bool _guest;
+    /// <summary>The viewer's country, as the relay saw it (approximate location for the Accept prompt).</summary>
+    public string? Country { get; }
+    /// <summary>What this session may do (shown, and changeable for guests, in the settings window).</summary>
+    public SessionRights Rights => _rights;
     public DateTime ConnectedAt { get; } = DateTime.UtcNow;
 
     private long NowUs => _clock.ElapsedTicks * 1_000_000 / Stopwatch.Frequency;
 
-    public ClientSession(WebSocket ws, IPAddress? remoteIp, bool relayed = false)
+    public ClientSession(WebSocket ws, IPAddress? remoteIp, bool relayed = false, bool guest = false, string? country = null)
     {
         _ws = ws;
         _remoteIp = remoteIp;
         _relayed = relayed;
+        _guest = guest;
+        Country = country;
         var v = ConfigStore.Current.Video;
         _maxKbps = v.MaxBitrateKbps;
         _minKbps = v.MinBitrateKbps;
@@ -152,45 +166,34 @@ public sealed class ClientSession : IVideoSink
             await CloseAsync(WebSocketCloseStatus.PolicyViolation, "rate limited");
             return false;
         }
-        string? resumeToken = null;
+        string? resumeToken = null, relayPath = null;
         if (root.TryGetProperty("support", out var support) && support.ValueKind == JsonValueKind.Object)
         {
-            // Someone with this PC's ID and a one-time support code: check it, ask the person here, then start a
-            // session that can resume with the key sent in welcome.
-            if (!SupportService.Shared.Verify(Str(support, "code")))
+            // Guest codes only arrive through the relay's code path (which throttles guessing too).
+            if (!_guest)
             {
-                AuthService.RecordFailure(_remoteIp);
-                await SendJsonDirect(new { t = "error", code = "bad-code", message = "That code is wrong or has expired. Ask for a new one." });
-                await CloseAsync(WebSocketCloseStatus.PolicyViolation, "bad code");
+                await SendJsonDirect(new { t = "error", code = "bad-code", message = "Enter the code at the Headroom website." });
+                await CloseAsync(WebSocketCloseStatus.PolicyViolation, "code outside the relay");
                 return false;
             }
-            var given = (Str(support, "name") ?? (root.TryGetProperty("client", out var cl) ? Str(cl, "name") : null) ?? "").Trim();
-            var name = given.Length == 0 ? "Guest" : given[..Math.Min(48, given.Length)];
-            if (ConfigStore.Current.Support.AskBeforeAccepting)
-                await SendJsonDirect(new { t = "pending", message = $"Waiting for someone at {HostInfo.Name} to accept…" });
-            var decision = await SupportService.Shared.RequestApprovalAsync(name, _remoteIp?.ToString(), ct);
-            if (decision == null)
-            {
-                await SendJsonDirect(new { t = "error", code = "declined", message = $"The person at {HostInfo.Name} didn't accept the connection." });
-                await CloseAsync(WebSocketCloseStatus.PolicyViolation, "declined");
-                return false;
-            }
-            AuthService.RecordSuccess(_remoteIp);
-            (_device, resumeToken) = SupportService.Shared.StartSession(name, decision.ViewOnly, _remoteIp?.ToString());
-            Log.Info("support", $"{Id}: support session for '{name}' from {_remoteIp}");
+            if (await GuestHandshakeAsync(support, ct) is not { } accepted) return false;
+            (_device, resumeToken) = accepted;
+            relayPath = RelayService.Shared.RelayPath;
         }
-        else
+        else if (!_guest)
         {
             _device = AuthService.ValidateToken(Str(root, "token"), _remoteIp);
         }
         if (_device == null)
         {
-            await SendJsonDirect(new { t = "error", code = "unauthorized", message = "This device is not paired (or was revoked). Pair again." });
+            await SendJsonDirect(new { t = "error", code = "unauthorized", message = "This computer doesn't accept this sign-in right now." });
             await CloseAsync(WebSocketCloseStatus.PolicyViolation, "unauthorized");
             return false;
         }
         var cfg = ConfigStore.Current;
-        _viewOnly = _device.ViewOnly || !cfg.Permissions.Input;
+        var rights = AuthService.Allowed(_device.Id) ?? new SessionRights(false, false, false, _device.Id.StartsWith("guest:", StringComparison.Ordinal));
+        _rights = rights;
+        _viewOnly = !rights.Input;
         Log.Info("session", $"{Id}: '{_device.Name}' connected from {_remoteIp}");
 
         await SendJsonDirect(new
@@ -203,8 +206,8 @@ public sealed class ClientSession : IVideoSink
             permissions = new
             {
                 input = !_viewOnly,
-                clipboard = cfg.Permissions.Clipboard,
-                files = cfg.Permissions.FileTransfer,
+                clipboard = rights.Clipboard,
+                files = rights.Files,
                 audio = cfg.Permissions.Audio && cfg.Audio.Enabled && !SameMachine,
             },
             limits = new { maxFps = cfg.Video.MaxFps, maxBitrateKbps = cfg.Video.MaxBitrateKbps },
@@ -212,8 +215,120 @@ public sealed class ClientSession : IVideoSink
             hostTimeUs = NowUs,
             resumeToken,
             support = resumeToken != null ? true : (bool?)null,
+            relayPath,
         });
         return true;
+    }
+
+    /// <summary>
+    /// Someone with a guest code: check it, ask the person here (always), then start a session that can resume with
+    /// the key sent in welcome, on this PC's own relay path (the code is used up). Null if it doesn't go ahead.
+    /// </summary>
+    private async Task<(PairedDevice Device, string Token)?> GuestHandshakeAsync(JsonElement support, CancellationToken ct)
+    {
+        if (!SupportService.Shared.Verify(Str(support, "code")))
+        {
+            AuthService.RecordFailure(_remoteIp);
+            await SendJsonDirect(new { t = "error", code = "bad-code", message = "That code is wrong, expired or already used. Ask for a new one." });
+            await CloseAsync(WebSocketCloseStatus.PolicyViolation, "bad code");
+            return null;
+        }
+        var name = GuestName(Str(support, "name"));
+        var ip = _remoteIp?.ToString();
+        var waiting = new { t = "pending", message = $"Waiting for the person at {HostInfo.Name} to accept…" };
+        await SendJsonDirect(waiting);
+        var decided = SupportService.Shared.RequestApprovalAsync(name, ip, Country, ct);
+        // Keep reading while they decide, to notice a guest who leaves (anything they send meanwhile is ignored).
+        var receive = ReceiveMessageAsync(ct);
+        try
+        {
+            while (!decided.IsCompleted)
+            {
+                var tick = Task.Delay(TimeSpan.FromSeconds(20), ct);
+                var first = await Task.WhenAny(decided, receive, tick);
+                if (first == receive)
+                {
+                    if (receive.IsCompletedSuccessfully && receive.Result != null) { receive = ReceiveMessageAsync(ct); continue; }
+                    _ = Swallow(receive);
+                    return null; // gone while waiting: the request is withdrawn below
+                }
+                // Repeated so proxies don't close a connection that's quiet while they decide.
+                if (first == tick && !ct.IsCancellationRequested) await SendJsonDirect(waiting);
+            }
+        }
+        finally
+        {
+            if (!decided.IsCompleted) SupportService.Shared.Withdraw(name, ip);
+        }
+        var decision = await decided;
+        if (decision == null)
+        {
+            _ = Swallow(receive);
+            await SendJsonDirect(new { t = "error", code = "declined", message = $"The person at {HostInfo.Name} didn't accept." });
+            await CloseAsync(WebSocketCloseStatus.PolicyViolation, "declined");
+            return null;
+        }
+        AuthService.RecordSuccess(_remoteIp);
+        var started = SupportService.Shared.StartSession(name, decision, ip);
+        Log.Info("guest", $"{Id}: guest session for '{name}' from {ip ?? "?"}");
+        _carriedReceive = receive;
+        return started;
+    }
+
+    /// <summary>The name a guest typed: shown as unverified. Only printable characters, kept short.</summary>
+    private static string GuestName(string? given)
+    {
+        var sb = new StringBuilder();
+        foreach (var r in (given ?? "").EnumerateRunes())
+        {
+            if (Rune.GetUnicodeCategory(r) is UnicodeCategory.Control or UnicodeCategory.Format or UnicodeCategory.OtherNotAssigned
+                or UnicodeCategory.Surrogate or UnicodeCategory.PrivateUse) continue;
+            sb.Append(r.ToString());
+        }
+        var t = sb.ToString().Trim();
+        if (t.Length == 0) return "Someone";
+        var info = new StringInfo(t);
+        return info.LengthInTextElements > 40 ? info.SubstringByTextElements(0, 40).TrimEnd() : t;
+    }
+
+    /// <summary>What this session may do changed (from the settings window, or this PC's settings): apply it now.</summary>
+    public void ApplyRights()
+    {
+        if (_device is not { } dev || _closed) return;
+        var r = AuthService.Allowed(dev.Id);
+        if (r == null)
+        {
+            Disconnect("access ended");
+            return;
+        }
+        lock (_rightsGate)
+        {
+            if (r == _rights) return;
+            _rights = r;
+            _viewOnly = !r.Input;
+        }
+        if (!r.Input) InputInjector.Instance.ReleaseAll(_input);
+        SyncClipboard();
+        var cfg = ConfigStore.Current;
+        Enqueue(new
+        {
+            t = "permissions",
+            permissions = new { input = r.Input, files = r.Files, clipboard = r.Clipboard, audio = cfg.Permissions.Audio && cfg.Audio.Enabled && !SameMachine },
+        });
+        Log.Info("session", $"{Id}: now control={r.Input} files={r.Files} clipboard={r.Clipboard}");
+    }
+
+    /// <summary>Follows clipboard changes on this PC while the session may share the clipboard and is streaming.</summary>
+    private void SyncClipboard()
+    {
+        lock (_rightsGate)
+        {
+            bool want = !_closed && _rights.Clipboard && _pipeline != null;
+            if (want == _clipboardSubscribed) return;
+            _clipboardSubscribed = want;
+            if (want) ClipboardService.Instance.Changed += OnClipboardChanged;
+            else ClipboardService.Instance.Changed -= OnClipboardChanged;
+        }
     }
 
     public static object MonitorJson(MonitorInfo m) => new
@@ -244,7 +359,9 @@ public sealed class ClientSession : IVideoSink
     {
         while (!ct.IsCancellationRequested && _ws.State == WebSocketState.Open)
         {
-            var msg = await ReceiveMessageAsync(ct);
+            var carried = _carriedReceive;
+            _carriedReceive = null;
+            var msg = carried != null ? await carried : await ReceiveMessageAsync(ct);
             if (msg == null) break;
             _lastReceiveUs = NowUs;
             try
@@ -309,7 +426,7 @@ public sealed class ClientSession : IVideoSink
     {
         using var doc = JsonDocument.Parse(data);
         var root = doc.RootElement;
-        var cfg = ConfigStore.Current;
+        var rights = _rights;
         switch (Str(root, "t"))
         {
             case "ping":
@@ -324,7 +441,7 @@ public sealed class ClientSession : IVideoSink
             case "monitors":
                 Enqueue(new { t = "monitors", monitors = Displays.Enumerate().Select(MonitorJson).ToArray() });
                 break;
-            case "clip" when cfg.Permissions.Clipboard:
+            case "clip" when rights.Clipboard:
             {
                 var text = Str(root, "text");
                 if (text != null)
@@ -334,7 +451,7 @@ public sealed class ClientSession : IVideoSink
                 }
                 break;
             }
-            case "clip-get" when cfg.Permissions.Clipboard:
+            case "clip-get" when rights.Clipboard:
             {
                 var text = ClipboardService.Instance.GetText();
                 Enqueue(new { t = "clip", text = text ?? "", requested = true });
@@ -355,7 +472,7 @@ public sealed class ClientSession : IVideoSink
             case "audio":
                 SetAudio(Bool(root, "enabled"));
                 break;
-            case "file-token" when cfg.Permissions.FileTransfer && !_viewOnly:
+            case "file-token" when rights.Files:
             {
                 var path = Str(root, "path");
                 if (path != null && _device != null)
@@ -429,11 +546,7 @@ public sealed class ClientSession : IVideoSink
         }
         AttachCursor();
         if (root.TryGetProperty("audio", out var a)) SetAudio(a.GetBoolean());
-        if (cfg.Permissions.Clipboard && !_clipboardSubscribed)
-        {
-            _clipboardSubscribed = true;
-            ClipboardService.Instance.Changed += OnClipboardChanged;
-        }
+        SyncClipboard();
         Log.Info("session", $"{Id}: stream {monitor.Id} ({monitor.Name}) max {maxFps} fps, {_maxKbps} kbps cap, view-only={_viewOnly}");
     }
 
@@ -840,7 +953,12 @@ public sealed class ClientSession : IVideoSink
         InputInjector.Instance.ReleaseAll(_input);
         DetachCursor();
         if (_audioEnabled) AudioService.Instance.Unsubscribe(OnAudioPacket);
-        ClipboardService.Instance.Changed -= OnClipboardChanged;
+        lock (_rightsGate)
+        {
+            _closed = true;
+            _clipboardSubscribed = false;
+            ClipboardService.Instance.Changed -= OnClipboardChanged;
+        }
         _pipeline?.Dispose();
         _pipeline = null;
         if (_device != null)

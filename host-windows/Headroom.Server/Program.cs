@@ -33,7 +33,7 @@ public static class Program
         // Second instances signal us to show the window.
         var waiter = new Thread(() =>
         {
-            while (showEvent.WaitOne()) app.ShowWindow("status");
+            while (showEvent.WaitOne()) app.ShowWindow("home");
         }) { IsBackground = true, Name = "show-signal" };
         waiter.Start();
         Application.Run(app);

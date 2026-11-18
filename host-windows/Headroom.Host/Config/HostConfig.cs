@@ -4,24 +4,26 @@ using Headroom.Host.Util;
 
 namespace Headroom.Host.Config;
 
+/// <summary>
+/// config.json: the same JSON schema (camelCase) and defaults as the Mac host's HostConfig.swift. Unknown fields
+/// (including those of older versions) are ignored, so older or newer config files never fail to load.
+/// </summary>
 public sealed class HostConfig
 {
+    public const string DefaultServer = "https://relay.colasac.co";
+
     /// <summary>Stable random id so viewers can recognise this host across address changes.</summary>
     public string? HostId { get; set; }
+    /// <summary>HTTPS port for Headroom Viewer on the same network (sessions and file transfer only).</summary>
     public int Port { get; set; } = 7443;
-    /// <summary>Plain-HTTP helper port that only serves the CA certificate/profile and redirects to HTTPS. 0 disables it.</summary>
+    /// <summary>Loopback-only port for this PC's settings window. 0 disables it.</summary>
     public int HttpHelperPort { get; set; } = 7080;
+    /// <summary>The name shown in your account and to people who connect (default: the computer's name).</summary>
     public string? DisplayName { get; set; }
-
-    public PasswordRecord? Password { get; set; }
-    /// <summary>Base32 TOTP secret. When set (and TotpEnabled), pairing a new device needs a 6-digit code.</summary>
-    public string? TotpSecret { get; set; }
-    public bool TotpEnabled { get; set; }
-
-    public List<PairedDevice> Devices { get; set; } = new();
 
     public VideoSettings Video { get; set; } = new();
     public AudioSettings Audio { get; set; } = new();
+    /// <summary>What your own devices (signed in to your account) may do. Guests get what you allow when you accept them.</summary>
     public PermissionSettings Permissions { get; set; } = new();
     public TlsSettings Tls { get; set; } = new();
 
@@ -30,35 +32,27 @@ public sealed class HostConfig
     /// <summary>Show a Windows toast/tray notice when someone connects.</summary>
     public bool NotifyOnConnect { get; set; } = true;
 
-    /// <summary>Membership in a Headroom account (account-server/), if joined.</summary>
+    /// <summary>The Headroom service: accounts, and the relay that makes this computer reachable from anywhere.</summary>
+    public string Server { get; set; } = DefaultServer;
+    /// <summary>Signed in to a Headroom account (with this computer's own sign-in there), if it is.</summary>
     public AccountLink? Account { get; set; }
-    /// <summary>While joined, stay reachable through the account server's relay (browsers anywhere, no port forwarding).</summary>
-    public bool RelayEnabled { get; set; } = true;
-    public SupportSettings Support { get; set; } = new();
-}
-
-/// <summary>Remote support: someone without an account connects with this PC's Headroom ID and a one-time code.</summary>
-public sealed class SupportSettings
-{
-    /// <summary>Show Accept / Decline on this PC before a support session starts. Off = the code alone lets them in.</summary>
-    public bool AskBeforeAccepting { get; set; } = true;
 }
 
 /// <summary>
-/// This computer's link to an account: its own credential there (not the account password) and the last device
-/// list it received, so it keeps working through a short account-server outage.
+/// This computer's sign-in to an account: its own credential there (not the account password) and the last list
+/// of sign-ins it received, so it keeps working through a short outage.
 /// </summary>
 public sealed class AccountLink
 {
     public string Server { get; set; } = "";
-    public string Username { get; set; } = "";
+    public string Email { get; set; } = "";
     public string AccountId { get; set; } = "";
     public string DeviceId { get; set; } = "";
     public string Token { get; set; } = "";
     public List<AccountDevice> Devices { get; set; } = new();
 }
 
-/// <summary>A device signed in to the account, as the account server describes it to this computer.</summary>
+/// <summary>A sign-in of the account (a browser, a phone, Headroom Viewer), as the account server describes it to this computer.</summary>
 public sealed record AccountDevice
 {
     public string Id { get; init; } = "";
@@ -68,14 +62,7 @@ public sealed record AccountDevice
     public bool ViewOnly { get; init; }
 }
 
-public sealed class PasswordRecord
-{
-    public string Algorithm { get; set; } = "pbkdf2-sha256";
-    public int Iterations { get; set; }
-    public string Salt { get; set; } = "";
-    public string Hash { get; set; } = "";
-}
-
+/// <summary>Who a session belongs to: one of your account's sign-ins ("account:&lt;id&gt;") or a guest ("guest:&lt;id&gt;"). Never saved.</summary>
 public sealed class PairedDevice
 {
     public string Id { get; set; } = "";
@@ -154,7 +141,14 @@ public static class ConfigStore
             if (File.Exists(Paths.ConfigFile))
             {
                 var json = File.ReadAllText(Paths.ConfigFile);
-                return JsonSerializer.Deserialize<HostConfig>(json, JsonOptions) ?? new HostConfig();
+                var cfg = JsonSerializer.Deserialize<HostConfig>(json, JsonOptions) ?? new HostConfig();
+                // Fields of older versions (password, paired devices, ...) are simply ignored.
+                if (string.IsNullOrWhiteSpace(cfg.Server)) cfg.Server = HostConfig.DefaultServer;
+                // Sign-ins from before email accounts (usernames) don't work any more: start signed out.
+                if (cfg.Account is { } a && (string.IsNullOrWhiteSpace(a.Email) || string.IsNullOrEmpty(a.Token) || string.IsNullOrEmpty(a.Server)))
+                    cfg.Account = null;
+                if (cfg.Account is { } b) b.Devices ??= new();
+                return cfg;
             }
         }
         catch (Exception ex)

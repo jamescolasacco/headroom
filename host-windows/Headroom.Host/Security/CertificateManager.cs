@@ -16,9 +16,9 @@ namespace Headroom.Host.Security;
 /// Provides the TLS certificate for every incoming connection (selected by SNI):
 ///   * *.ts.net names     -> a real Let's Encrypt cert obtained with `tailscale cert` (no device setup needed)
 ///   * custom cert files  -> whatever the user configured
-///   * everything else    -> a server cert issued by a per-host "Headroom Local CA". Install the CA once on
-///                           each viewing device (iOS: download the profile from http://host:7080/).
-/// Browsers require a secure context for WebCodecs, service workers and wss://, so this matters.
+///   * everything else    -> a server cert issued by a per-host "Headroom Local CA", whose key Headroom Viewer
+///                           on the same network pins (this PC reports it to its account).
+/// Connections through the relay don't use these: the relay's own HTTPS covers them.
 /// </summary>
 public sealed class CertificateManager
 {

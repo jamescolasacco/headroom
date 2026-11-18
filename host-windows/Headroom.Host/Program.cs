@@ -35,10 +35,6 @@ public static class Program
                 "service-run" => RunService(rest),
                 "service" => Service.ServiceInstaller.Run(rest),
                 "selftest" => SelfTest.Run(rest),
-                "set-password" => SetPassword(rest),
-                "pair" => Pair(),
-                "devices" => Devices(),
-                "revoke" => Revoke(rest),
                 "help" or "--help" or "-h" or "/?" => Usage(0),
                 _ => Usage(1),
             };
@@ -60,14 +56,13 @@ public static class Program
             Headroom remote desktop host
 
               headroom [run]              start the host (default)
-              headroom set-password       set the password used to pair new devices
-              headroom pair               show a one-time pairing code (host must be running)
-              headroom devices            list paired devices
-              headroom revoke <id>        revoke a paired device
               headroom selftest [secs]    capture + encode test, writes an .h264 file
               headroom service install    run as a Windows service (lock screen, UAC, Ctrl+Alt+Del) [admin]
-              headroom service uninstall  remove the service (--purge also deletes pairings/certs)  [admin]
+              headroom service uninstall  remove the service (--purge also deletes settings/certs)  [admin]
               headroom service status|start|stop
+
+            Sign in to your Headroom account and let someone connect with a code from the settings:
+            Headroom Server, or http://localhost:7080/ on this PC.
 
             Environment: HEADROOM_DATA (data dir), HEADROOM_WEBROOT (client dir), HEADROOM_DEBUG=1
             """);
@@ -116,117 +111,27 @@ public static class Program
             .FirstOrDefault(p => p > 0 && p != cfg.Port && p != cfg.HttpHelperPort);
         if (relayPort > 0) RelayService.Shared.Start(relayPort);
         else Log.Warn("relay", "no loopback port for relay tunnels; the relay is unavailable");
-        if (banner) PrintBanner(certs);
+        if (banner) PrintBanner();
         else Log.Info("main", $"agent running in session {Process.GetCurrentProcess().SessionId} as {(Input.InputInjector.IsSystem ? "SYSTEM" : Environment.UserName)}");
         app.WaitForShutdown();
         return 0;
     }
 
-    private static void PrintBanner(CertificateManager certs)
+    private static void PrintBanner()
     {
         var cfg = ConfigStore.Current;
         var sb = new StringBuilder();
         sb.AppendLine();
         sb.AppendLine($"  Headroom {HostInfo.Version} — {HostInfo.Name}{(Input.InputInjector.IsSystem ? " (service mode)" : "")}");
         sb.AppendLine();
-        sb.AppendLine("  Open from another device:");
-        foreach (var url in WebHost.ServerUrls(certs)) sb.AppendLine($"    {url}");
-        if (cfg.HttpHelperPort > 0)
-        {
-            var ip = CertificateManager.GetLocalAddresses().FirstOrDefault(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork);
-            sb.AppendLine();
-            sb.AppendLine($"  First time on a device? Trust this host's certificate: http://{ip?.ToString() ?? "localhost"}:{cfg.HttpHelperPort}/");
-            sb.AppendLine($"  On this PC: http://localhost:{cfg.HttpHelperPort}/  (settings: http://localhost:{cfg.HttpHelperPort}/admin.html)");
-        }
-        sb.AppendLine();
-        if (!AuthService.HasPassword)
-        {
-            var code = AuthService.CreatePairCode(TimeSpan.FromMinutes(15));
-            sb.AppendLine($"  No password set yet. One-time pairing code (15 min): {code[..5]}-{code[5..]}");
-            sb.AppendLine("  Set a permanent one with:  headroom set-password");
-        }
+        if (cfg.Account is { } a)
+            sb.AppendLine($"  Signed in as {a.Email}: open {a.Server} on any device and sign in to connect.");
+        else if (cfg.HttpHelperPort > 0)
+            sb.AppendLine($"  Not signed in to a Headroom account. Sign in from the settings: http://localhost:{cfg.HttpHelperPort}/");
         else
-        {
-            sb.AppendLine($"  {cfg.Devices.Count} paired device(s). New devices pair with the password, or run:  headroom pair");
-        }
+            sb.AppendLine("  Not signed in to a Headroom account. Sign in from Headroom Server's settings.");
+        sb.AppendLine("  To let someone connect with a code, use the settings (Let someone connect).");
         sb.AppendLine();
         Console.Write(sb.ToString());
-    }
-
-    private static int SetPassword(string[] args)
-    {
-        string? pw = args.Length > 0 ? args[0] : null;
-        if (pw == null)
-        {
-            pw = ReadSecret("New password (min 8 chars): ");
-            var again = ReadSecret("Repeat: ");
-            if (pw != again) { Console.WriteLine("Passwords don't match."); return 1; }
-        }
-        try
-        {
-            AuthService.SetPassword(pw);
-        }
-        catch (ArgumentException ex)
-        {
-            Console.WriteLine(ex.Message);
-            return 1;
-        }
-        Console.WriteLine("Password saved. Use it to pair new devices (paired devices keep working).");
-        return 0;
-    }
-
-    private static string ReadSecret(string prompt)
-    {
-        Console.Write(prompt);
-        if (Console.IsInputRedirected) return Console.ReadLine() ?? "";
-        var sb = new StringBuilder();
-        while (true)
-        {
-            var k = Console.ReadKey(intercept: true);
-            if (k.Key == ConsoleKey.Enter) break;
-            if (k.Key == ConsoleKey.Backspace) { if (sb.Length > 0) sb.Length--; continue; }
-            if (!char.IsControl(k.KeyChar)) sb.Append(k.KeyChar);
-        }
-        Console.WriteLine();
-        return sb.ToString();
-    }
-
-    private static int Pair()
-    {
-        var port = ConfigStore.Current.HttpHelperPort;
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-        try
-        {
-            var resp = http.PostAsync($"http://127.0.0.1:{port}/api/admin/paircode", null).GetAwaiter().GetResult();
-            resp.EnsureSuccessStatusCode();
-            using var doc = JsonDocument.Parse(resp.Content.ReadAsStringAsync().GetAwaiter().GetResult());
-            var code = doc.RootElement.GetProperty("code").GetString()!;
-            Console.WriteLine($"Pairing code (valid 10 minutes, single use): {code[..5]}-{code[5..]}");
-            Console.WriteLine("Or open one of these on the new device:");
-            foreach (var u in doc.RootElement.GetProperty("urls").EnumerateArray()) Console.WriteLine("  " + u.GetString());
-            return 0;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Could not reach the running host on port {port}: {ex.Message}");
-            return 1;
-        }
-    }
-
-    private static int Devices()
-    {
-        var devices = ConfigStore.Current.Devices;
-        if (devices.Count == 0) { Console.WriteLine("No paired devices."); return 0; }
-        foreach (var d in devices)
-            Console.WriteLine($"{d.Id}  {d.Name,-28} paired {d.Created.LocalDateTime:g}  last seen {(d.LastSeen?.LocalDateTime.ToString("g") ?? "never")}  {d.LastAddress}{(d.ViewOnly ? "  [view-only]" : "")}");
-        return 0;
-    }
-
-    private static int Revoke(string[] args)
-    {
-        if (args.Length == 0) { Console.WriteLine("usage: headroom revoke <device-id>"); return 1; }
-        bool ok = AuthService.RevokeDevice(args[0]);
-        Console.WriteLine(ok ? "Revoked. (A running host disconnects it on its next reconnect attempt.)" : "No such device.");
-        return ok ? 0 : 1;
     }
 }

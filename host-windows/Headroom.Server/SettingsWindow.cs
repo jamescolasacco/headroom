@@ -8,7 +8,7 @@ using Microsoft.Win32;
 namespace Headroom.Server;
 
 /// <summary>
-/// The "Headroom Server" window: the settings panel (served by the engine at /admin.html) in WebView2,
+/// The "Headroom Server" window: the settings page (served by the engine at /admin.html, this PC only) in WebView2,
 /// inside a native window. Closing it only hides it — the tray icon keeps running.
 /// </summary>
 public sealed class SettingsWindow : Form
@@ -17,7 +17,7 @@ public sealed class SettingsWindow : Form
     private readonly Func<Task<bool>> _startServer;
     private bool _ready;
     private bool _onAdminPage;
-    private string _pendingSection = "status";
+    private string _pendingSection = "home";
     private bool _reallyClose;
 
     /// <summary>Close for good (app exit) instead of hiding.</summary>
@@ -70,6 +70,15 @@ public sealed class SettingsWindow : Form
                 e.Handled = true;
                 OpenExternal(e.Uri);
             };
+            _web.CoreWebView2.NavigationStarting += (_, e) =>
+            {
+                // Anything off this PC (the Headroom website: create an account, forgot password) opens in the browser.
+                if (Uri.TryCreate(e.Uri, UriKind.Absolute, out var u) && u.Scheme is "http" or "https" && !IsLocal(u))
+                {
+                    e.Cancel = true;
+                    OpenExternal(e.Uri);
+                }
+            };
             _web.CoreWebView2.NavigationCompleted += (_, e) =>
             {
                 _onAdminPage = e.IsSuccess && _web.Source?.AbsolutePath.EndsWith("/admin.html", StringComparison.OrdinalIgnoreCase) == true;
@@ -89,7 +98,7 @@ public sealed class SettingsWindow : Form
         }
     }
 
-    /// <summary>Show a settings section ("status", "pair", "devices", ...).</summary>
+    /// <summary>Show a section ("home", "connect", "account", "settings").</summary>
     public void Navigate(string section, bool reload = false)
     {
         _pendingSection = section;
@@ -126,13 +135,31 @@ public sealed class SettingsWindow : Form
                     var text = root.GetProperty("text").GetString();
                     if (text != null) Clipboard.SetText(text);
                     break;
+                case "openUrl":
+                    if (root.TryGetProperty("url", out var url) && url.ValueKind == JsonValueKind.String) OpenExternal(url.GetString()!);
+                    break;
                 case "startServer":
                     if (await _startServer()) Navigate(_pendingSection, reload: true);
+                    break;
+                case "getLoginItem":
+                    SendLoginItem();
+                    break;
+                case "loginItem":
+                    TrayApp.SetAutostart(root.TryGetProperty("enabled", out var on) && on.ValueKind == JsonValueKind.True);
+                    SendLoginItem();
                     break;
             }
         }
         catch { }
     }
+
+    /// <summary>Tells the page whether Headroom Server starts with Windows (its "Start at login" switch).</summary>
+    private void SendLoginItem()
+    {
+        if (_ready) _web.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { cmd = "loginItem", enabled = TrayApp.AutostartEnabled }));
+    }
+
+    private static bool IsLocal(Uri u) => u.IsLoopback || u.Host is "127.0.0.1" or "localhost" or "[::1]";
 
     private static void OpenExternal(string uri)
     {
