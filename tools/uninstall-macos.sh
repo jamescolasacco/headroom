@@ -3,7 +3,7 @@
 #
 #   tools/uninstall-macos.sh [--purge]
 #
-#   --purge  also deletes pairings, certificates, logs, the viewer's saved computers and pinned keys, and
+#   --purge  also deletes settings, certificates, logs, the viewer's saved computers and pinned keys, and
 #            resets the Screen Recording / Accessibility permissions macOS granted to Headroom Server
 set -euo pipefail
 PURGE=0

@@ -23,7 +23,7 @@ Headroom for macOS 13 or later (Apple silicon and Intel).
 
 Install: open Terminal in this folder and run   bash install.sh
   (copies Headroom Server and Headroom Viewer to /Applications and starts Headroom Server)
-Remove:  bash uninstall.sh   (add --purge to also delete settings, pairings and certificates)
+Remove:  bash uninstall.sh   (add --purge to also delete settings and certificates)
 
 These builds aren't notarized by Apple, so double-clicking the apps straight from a downloaded zip makes
 macOS refuse to open them. install.sh clears that flag on the installed copies.

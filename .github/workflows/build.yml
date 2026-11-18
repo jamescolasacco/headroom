@@ -27,19 +27,24 @@ jobs:
         run: for f in web/js/*.js web/js/*/*.js web/sw.js tools/*.mjs account-server/*.mjs; do node --check "$f"; done
       - name: Linux service install (tools/install-account-server-linux.sh)
         run: |
-          # Installed first without an account (the service is running), then the account added: it must survive.
+          login() {
+            curl -fs -X POST -H 'Content-Type: application/json' -d '{"email":"ci-admin@example.com","password":"quartz-lantern-ferry-81","deviceName":"ci"}' \
+              http://127.0.0.1:8790/api/account/login | grep -q '"token"'
+          }
+          sudo tools/install-account-server-linux.sh --port 8790 --url https://relay.example.com
+          curl -fs http://127.0.0.1:8790/api/info | grep -q '"signup":true'
+          sudo test -f /etc/headroom-accounts.env
+          test "$(sudo stat -c %a /etc/headroom-accounts.env)" = 600
+          # An account made from the command line (the running service is stopped and started around it).
+          echo 'quartz-lantern-ferry-81' | sudo headroom-accounts add-user ci-admin@example.com
+          sudo headroom-accounts list-users | grep -q ci-admin@example.com
+          for i in $(seq 20); do curl -fs http://127.0.0.1:8790/api/info > /dev/null && break; sleep 0.5; done
+          login
+          # Settings in the env file are kept and applied; updating keeps the account.
+          echo 'SIGNUP=closed' | sudo tee -a /etc/headroom-accounts.env > /dev/null
           sudo tools/install-account-server-linux.sh --port 8790
-          curl -fs http://127.0.0.1:8790/api/info | grep -q '"firstAccount":true'
-          echo 'quartz-lantern-ferry-81' | sudo tools/install-account-server-linux.sh --admin ci-admin --port 8790
-          curl -fs http://127.0.0.1:8790/api/info | grep -q '"firstAccount":false' 
-          curl -fs -X POST -H 'Content-Type: application/json' -d '{"username":"ci-admin","password":"quartz-lantern-ferry-81","deviceName":"ci"}' \
-            http://127.0.0.1:8790/api/account/login | grep -q '"token"'
-          status=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
-            -d '{"username":"eve","password":"longenough1"}' http://127.0.0.1:8790/api/account/register)
-          test "$status" = 403 || { echo "public sign-up should be closed, got $status"; exit 1; }
-          sudo tools/install-account-server-linux.sh --port 8790   # updating keeps the account
-          curl -fs -X POST -H 'Content-Type: application/json' -d '{"username":"ci-admin","password":"quartz-lantern-ferry-81","deviceName":"ci"}' \
-            http://127.0.0.1:8790/api/account/login | grep -q '"token"'
+          curl -fs http://127.0.0.1:8790/api/info | grep -q '"signup":false'
+          login
           sudo tools/install-account-server-linux.sh --uninstall
 
   macos:
@@ -64,18 +69,18 @@ jobs:
         run: tools/package-macos.sh
       - name: Start the host (test pattern) and an account server
         run: |
-          DATA_DIR="$RUNNER_TEMP/accounts" PORT=8780 BIND=127.0.0.1 nohup node account-server/server.mjs > "$RUNNER_TEMP/accounts.log" 2>&1 &
+          # DEV_MAIL: emailed codes go to a test mailbox. The host uses this account server, never the public one.
+          DATA_DIR="$RUNNER_TEMP/accounts" PORT=8780 BIND=127.0.0.1 DEV_MAIL=1 nohup node account-server/server.mjs > "$RUNNER_TEMP/accounts.log" 2>&1 &
+          mkdir -p "$RUNNER_TEMP/host" && echo '{"server":"http://127.0.0.1:8780"}' > "$RUNNER_TEMP/host/config.json"
           nohup "dist/Headroom Server.app/Contents/MacOS/headroom" run --data="$RUNNER_TEMP/host" --loopback --test-pattern=1280x720 > "$RUNNER_TEMP/host.log" 2>&1 &
           for i in $(seq 60); do
             curl -fs http://127.0.0.1:7080/api/info > /dev/null && curl -fs http://127.0.0.1:8780/api/info > /dev/null && exit 0
             sleep 1
           done
           echo "the host or the account server didn't start"; cat "$RUNNER_TEMP/host.log" "$RUNNER_TEMP/accounts.log"; exit 1
-      - name: Accounts check
-        run: node tools/account-check.mjs --account=http://127.0.0.1:8780 --username=ci-test --password=quartz-lantern-ferry-81 --register
-      - name: Relay and remote support check
-        run: node tools/relay-check.mjs --account=http://127.0.0.1:8780 --username=ci-test --password=quartz-lantern-ferry-81
-      - name: Protocol check
+      - name: Accounts and relay check
+        run: node tools/account-check.mjs --account=http://127.0.0.1:8780 --email=ci-test@example.com --password=quartz-lantern-ferry-81 --register
+      - name: Guest code and protocol check
         run: node tools/protocol-check.mjs --url=http://127.0.0.1:7080 --seconds=4 --out="$RUNNER_TEMP/check.h264"
       - name: Host log
         if: always()
@@ -109,14 +114,17 @@ jobs:
           Compress-Archive -Path dist/Headroom -DestinationPath dist/release/Headroom-Server-Windows-x64.zip
           Compress-Archive -Path dist/HeadroomViewer -DestinationPath dist/release/Headroom-Viewer-Windows-x64.zip
           Get-ChildItem dist/release | Format-Table Name, Length
-      - name: Accounts, relay and protocol checks
+      - name: Accounts, relay and guest code checks
         # One step: on Windows runners, processes started in a step end with it.
         shell: pwsh
         run: |
           $t = $env:RUNNER_TEMP
-          $env:DATA_DIR = "$t\accounts"; $env:PORT = '8780'; $env:BIND = '127.0.0.1'
+          $env:DATA_DIR = "$t\accounts"; $env:PORT = '8780'; $env:BIND = '127.0.0.1'; $env:DEV_MAIL = '1'
           $acct = Start-Process node -ArgumentList 'account-server/server.mjs' -PassThru -RedirectStandardOutput "$t\accounts.log" -RedirectStandardError "$t\accounts.err"
           $env:HEADROOM_BIND = 'loopback'
+          # The host uses this account server, never the public one.
+          New-Item -ItemType Directory -Force "$t\host" | Out-Null
+          Set-Content -Path "$t\host\config.json" -Value '{"server":"http://127.0.0.1:8780"}' -Encoding ascii
           $hostProc = Start-Process dist\Headroom\headroom.exe -ArgumentList 'run', "--data=$t\host" -PassThru -RedirectStandardOutput "$t\host.out" -RedirectStandardError "$t\host.err"
           $up = $false
           for ($i = 0; $i -lt 90 -and -not $up; $i++) {
@@ -124,15 +132,14 @@ jobs:
           }
           $code = 1
           if ($up) {
-            node tools/account-check.mjs --account=http://127.0.0.1:8780 --username=ci-test --password=quartz-lantern-ferry-81 --register
+            # Video can't stream on a runner without a desktop: the checks skip it; everything else must pass.
+            node tools/account-check.mjs --account=http://127.0.0.1:8780 --email=ci-test@example.com --password=quartz-lantern-ferry-81 --register --frames=0
             $code = $LASTEXITCODE
-            # Video can't stream on a runner without a desktop, so the relay check's streaming step is informational
-            # here; everything else in it must pass.
-            node tools/relay-check.mjs --account=http://127.0.0.1:8780 --username=ci-test --password=quartz-lantern-ferry-81 --frames=0
+            node tools/protocol-check.mjs --url=http://127.0.0.1:7080 --no-video
             if ($LASTEXITCODE -ne 0) { $code = $LASTEXITCODE }
-            # A hosted runner may have no desktop to capture: this shows how far the stream gets, without failing the build.
+            # This shows how far a stream gets on the runner, without failing the build.
             node tools/protocol-check.mjs --url=http://127.0.0.1:7080 --seconds=4 --out="$t\check.h264"
-            Write-Host "protocol-check exit code: $LASTEXITCODE (informational)"
+            Write-Host "protocol-check with video exit code: $LASTEXITCODE (informational)"
           } else { Write-Host "the host or the account server didn't start" }
           Write-Host "`n--- host log"; Get-Content "$t\host.out", "$t\host.err" -Tail 80 -ErrorAction SilentlyContinue
           Write-Host "`n--- account server log"; Get-Content "$t\accounts.log", "$t\accounts.err" -Tail 30 -ErrorAction SilentlyContinue

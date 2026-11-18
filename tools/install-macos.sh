@@ -60,9 +60,9 @@ if [ "$ONLY" != "viewer" ] && [ "$LAUNCH" = 1 ]; then
   cat <<EOF
 
 Headroom Server is running in the menu bar. Next:
-  1. Allow Screen Recording and Accessibility when asked (or from its Status page). macOS restarts the app
+  1. Allow Screen Recording and Accessibility when asked (or from its Settings). macOS restarts the app
      after Screen Recording is turned on.
-  2. Pair your devices from "Pair a device" (or join your Headroom account under "Account"), and turn on
-     "Start at Login" in the menu-bar menu.
+  2. Sign in under "Account" to add this Mac to your devices (or use "Let someone connect" for a code), and
+     turn on "Start at login" in Settings.
 EOF
 fi

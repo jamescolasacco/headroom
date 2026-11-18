@@ -49,5 +49,5 @@ Start-Process explorer.exe -ArgumentList "`"$(Join-Path $dst 'HeadroomServer.exe
 
 Write-Host ""
 Write-Host "Done. Headroom Server is running as a service and in your notification area."
-Write-Host "Open it from the tray icon (or Start > Headroom Server) to pair your devices."
+Write-Host "Open it from the tray icon (or Start > Headroom Server) to sign in, or to let someone connect with a code."
 Read-Host "Press Enter to close"

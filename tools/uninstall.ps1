@@ -1,4 +1,4 @@
-# Removes the Headroom service, tray app and program files. Add -Purge to also delete pairings,
+# Removes the Headroom service, tray app and program files. Add -Purge to also delete settings,
 # certificates and settings.
 param([switch]$Purge)
 $ErrorActionPreference = "Stop"
@@ -21,5 +21,5 @@ if (Test-Path $exe) {
 }
 Start-Sleep -Seconds 1
 if (Test-Path $dst) { Remove-Item -Recurse -Force $dst }
-Write-Host ("Headroom removed." + $(if ($Purge) { " Data deleted." } else { " Pairings kept in $env:ProgramData\Headroom (use -Purge to delete)." }))
+Write-Host ("Headroom removed." + $(if ($Purge) { " Data deleted." } else { " Settings kept in $env:ProgramData\Headroom (use -Purge to delete)." }))
 Read-Host "Press Enter to close"

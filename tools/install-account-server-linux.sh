@@ -1,31 +1,35 @@
 #!/bin/bash
 # Runs the Headroom account server and relay on a Linux server as a systemd service, listening on 127.0.0.1 for a
 # tunnel or reverse proxy that adds HTTPS (Cloudflare Tunnel, Caddy, nginx). Run it from a checkout of the
-# repository; run it again after `git pull` to update (data and accounts are kept).
+# repository; run it again after `git pull` to update (data, accounts and settings are kept).
 #
-#   sudo tools/install-account-server-linux.sh [--admin <username>] [--port 8780] [--name "Headroom"]
+#   sudo tools/install-account-server-linux.sh [--port 8780] [--name "Headroom"] [--url https://relay.example.com]
 #   sudo tools/install-account-server-linux.sh --uninstall          stop and remove the service (keeps the data)
 #
-#   --admin <username>  create this account if the server has none yet (asks for the password; or pipe it in).
-#                       Public sign-up stays off, so nobody else can claim the server first.
+# Settings (email, the human check) live in /etc/headroom-accounts.env, created once and never overwritten: put your
+# Resend API key and Cloudflare Turnstile keys there, then `sudo systemctl restart headroom-accounts`.
+# Accounts from the command line (as the service user): sudo headroom-accounts list-users | add-user <email> |
+# disable-user <email> | enable-user <email> | reset-2fa <email> | reset-password <email> | delete-user <email>
 #
 # Needs Node.js 20 or later and systemd. Data: /var/lib/headroom-accounts (back it up: secret.key derives every
-# device's keys). Logs: journalctl -u headroom-accounts
+# computer's keys). Logs: journalctl -u headroom-accounts
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP=/opt/headroom-accounts
 DATA=/var/lib/headroom-accounts
 UNIT=/etc/systemd/system/headroom-accounts.service
+ENVFILE=/etc/headroom-accounts.env
+CLI=/usr/local/bin/headroom-accounts
 PORT=8780
 NAME=Headroom
-ADMIN=""
+URL=""
 UNINSTALL=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --admin) ADMIN="$2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
     --name) NAME="$2"; shift 2 ;;
+    --url) URL="$2"; shift 2 ;;
     --uninstall) UNINSTALL=1; shift ;;
     *) echo "unknown option: $1" >&2; exit 1 ;;
   esac
@@ -36,9 +40,9 @@ command -v systemctl > /dev/null || { echo "systemd is required (or use the Dock
 
 if [ "$UNINSTALL" = 1 ]; then
   systemctl disable --now headroom-accounts 2>/dev/null || true
-  rm -f "$UNIT"
+  rm -f "$UNIT" "$CLI"
   systemctl daemon-reload
-  echo "Removed the service. Data kept in $DATA (delete it yourself if you mean to)."
+  echo "Removed the service. Data kept in $DATA and settings in $ENVFILE (delete them yourself if you mean to)."
   exit 0
 fi
 
@@ -57,24 +61,47 @@ install -d -o headroom -g headroom -m 700 "$DATA"
 install -m 644 "$ROOT/account-server/server.mjs" "$APP/server.mjs"
 rm -rf "$APP/web.new"
 cp -R "$ROOT/web" "$APP/web.new"
-rm -f "$APP/web.new/admin.html" "$APP/web.new/js/admin.js" "$APP/web.new/css/admin.css" # the computers' settings page
+rm -f "$APP/web.new/admin.html" "$APP/web.new/js/admin.js" "$APP/web.new/css/admin.css" # the computers' settings window
 rm -rf "$APP/web" && mv "$APP/web.new" "$APP/web"
 chmod -R a+rX "$APP"
 
-run_as_service_user() { # the CLI, with the service's data directory
-  if command -v runuser > /dev/null; then runuser -u headroom -- env DATA_DIR="$DATA" "$NODE" "$APP/server.mjs" "$@"
-  else sudo -u headroom env DATA_DIR="$DATA" "$NODE" "$APP/server.mjs" "$@"; fi
-}
+if [ ! -f "$ENVFILE" ]; then
+  umask 077
+  cat > "$ENVFILE" <<EOF
+# Headroom account server settings. Apply with: sudo systemctl restart headroom-accounts
 
-accounts="$(run_as_service_user list-users | grep -c . || true)"
-if [ -n "$ADMIN" ] && [ "$accounts" = 0 ]; then
-  # The running server keeps the accounts in memory and would overwrite the new one when it stops: stop it first.
-  systemctl stop headroom-accounts 2>/dev/null || true
-  echo "Creating the account '$ADMIN'."
-  run_as_service_user add-user "$ADMIN"
-  accounts="$(run_as_service_user list-users | grep -c . || true)"
-  [ "$accounts" != 0 ] || { echo "The account wasn't created (see above)." >&2; exit 1; }
+# Email: sign-up codes, password resets, sign-in alerts. A Resend (https://resend.com) API key, and a From address
+# on a domain you verified there. Until this is set, codes are only written to the log (journalctl).
+RESEND_API_KEY=
+EMAIL_FROM="$NAME <no-reply@example.com>"
+
+# The address people open (shown in emails).
+PUBLIC_URL=${URL}
+
+# Cloudflare Turnstile (dash.cloudflare.com → Turnstile; add your domain): stops bots on sign-up and password resets.
+TURNSTILE_SITEKEY=
+TURNSTILE_SECRET=
+
+# Anyone can create an account. Uncomment to allow only accounts made with: sudo headroom-accounts add-user <email>
+#SIGNUP=closed
+EOF
+  chmod 600 "$ENVFILE"
+  echo "Created $ENVFILE: add your email and Turnstile keys there."
 fi
+
+cat > "$CLI" <<EOF
+#!/bin/bash
+# The Headroom account server's command line, as its service user (accounts change only while it's stopped).
+set -e
+[ "\$(id -u)" = 0 ] || { echo "Run it with sudo." >&2; exit 1; }
+case "\${1:-}" in
+  ""|list-users|help) ;;
+  *) systemctl stop headroom-accounts; trap 'systemctl start headroom-accounts' EXIT ;;
+esac
+if command -v runuser > /dev/null; then runuser -u headroom -- env DATA_DIR="$DATA" "$NODE" "$APP/server.mjs" "\$@"
+else sudo -u headroom env DATA_DIR="$DATA" "$NODE" "$APP/server.mjs" "\$@"; fi
+EOF
+chmod 755 "$CLI"
 
 cat > "$UNIT" <<EOF
 [Unit]
@@ -88,10 +115,10 @@ Group=headroom
 Environment=PORT=$PORT
 Environment=BIND=127.0.0.1
 Environment=TRUST_PROXY=1
-Environment=SIGNUP=closed
 Environment="NAME=$NAME"
 Environment=DATA_DIR=$DATA
 Environment=WEB_ROOT=$APP/web
+EnvironmentFile=-$ENVFILE
 ExecStart=$NODE $APP/server.mjs
 Restart=always
 RestartSec=2
@@ -118,15 +145,13 @@ else
   echo "Installed, but it isn't answering yet: journalctl -u headroom-accounts -n 50" >&2
   exit 1
 fi
-if [ "$accounts" = 0 ]; then
-  echo
-  echo "No account yet (public sign-up is off). Create yours:  sudo $0 --admin <username>"
-fi
+grep -q '^RESEND_API_KEY=.\+' "$ENVFILE" || echo "Email isn't set up yet: add RESEND_API_KEY and EMAIL_FROM to $ENVFILE, then: sudo systemctl restart headroom-accounts"
+grep -q '^TURNSTILE_SECRET=.\+' "$ENVFILE" || echo "The human check isn't set up yet: add TURNSTILE_SITEKEY and TURNSTILE_SECRET to $ENVFILE (recommended)."
 cat <<EOF
 
 Point your tunnel or reverse proxy at http://localhost:$PORT, e.g. in cloudflared's config.yml:
     ingress:
       - hostname: relay.example.com
         service: http://localhost:$PORT
-Then join each computer in Headroom Server → Settings → Account using https://relay.example.com.
+Accounts: sudo headroom-accounts list-users   (also add-user, disable-user, enable-user, reset-2fa, delete-user)
 EOF
