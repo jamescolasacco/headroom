@@ -58,8 +58,7 @@ Name: "{commonprograms}\Headroom Server"; Filename: "{app}\HeadroomServer.exe"; 
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Headroom Server"; ValueData: """{app}\HeadroomServer.exe"" --tray"; Flags: uninsdeletevalue; Check: IsFirstInstall
 
 [Run]
-; Creates (or recreates) and starts the service, its firewall rule and its data folder.
-Filename: "{app}\headroom.exe"; Parameters: "service install"; Flags: runhidden waituntilterminated; StatusMsg: "Starting the Headroom service…"
+; (The service itself is set up in [Code], CurStepChanged, so its result is checked and logged.)
 ; The tray app, as you (not as administrator): Explorer opens it in your session. Also after a silent update.
 Filename: "{win}\explorer.exe"; Parameters: """{app}\HeadroomServer.exe"""; Description: "Open Headroom Server"; Flags: postinstall nowait
 
@@ -71,6 +70,21 @@ Filename: "{app}\headroom.exe"; Parameters: "service uninstall"; Flags: runhidde
 Type: filesandordirs; Name: "{app}"
 
 [Code]
+// Creates (or recreates) and starts the service, its firewall rule and its data folder: `headroom service install`.
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  Code: Integer;
+begin
+  if CurStep <> ssPostInstall then Exit;
+  WizardForm.StatusLabel.Caption := 'Starting the Headroom service...';
+  if not Exec(ExpandConstant('{app}\headroom.exe'), 'service install', ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, Code) then
+    Code := -1;
+  Log(Format('headroom service install: exit code %d', [Code]));
+  if Code <> 0 then
+    SuppressibleMsgBox('Headroom Server is installed, but its service didn''t start (code ' + IntToStr(Code) + '). ' +
+      'Restart the PC, or open Headroom Server from the Start menu to try again.', mbError, MB_OK, IDOK);
+end;
+
 function IsFirstInstall: Boolean;
 begin
   Result := not RegKeyExists(HKLM, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{6F3A2C1E-8B4D-4E7A-9C25-3D1B7E0A4F62}_is1');

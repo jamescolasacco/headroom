@@ -204,21 +204,30 @@ jobs:
         run: |
           $silent = '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
           # WaitForExit, not Start-Process -Wait: -Wait also waits for the apps the installers open at the end.
-          function Run($exe) { $p = Start-Process $exe -ArgumentList $silent -PassThru; $p.WaitForExit(); Write-Host "$exe exited $($p.ExitCode)" }
-          Run dist\release\Headroom-Viewer-Setup.exe
+          function Run($exe, $log) {
+            $p = Start-Process $exe -ArgumentList ($silent + "/LOG=$log") -PassThru; $p.WaitForExit()
+            Write-Host "$exe exited $($p.ExitCode)"
+          }
+          Run dist\release\Headroom-Viewer-Setup.exe "$env:RUNNER_TEMP\viewer-setup.log"
           $viewer = Join-Path $env:LOCALAPPDATA 'Programs\Headroom Viewer'
           if (-not (Test-Path "$viewer\HeadroomViewer.exe")) { throw "Headroom Viewer wasn't installed" }
           if (-not (Test-Path "$viewer\update-signing.cer") -and (Test-Path assets\headroom-signing.cer)) { throw "Headroom Viewer has no update-signing.cer" }
           Get-Process HeadroomViewer -ErrorAction SilentlyContinue | Stop-Process -Force
-          Run dist\release\Headroom-Server-Setup.exe
+          Run dist\release\Headroom-Server-Setup.exe "$env:RUNNER_TEMP\server-setup.log"
           $dst = Join-Path $env:ProgramFiles 'Headroom'
+          Select-String -Path "$env:RUNNER_TEMP\server-setup.log" -Pattern 'headroom service install|Exception|error' | ForEach-Object { $_.Line }
           if (-not (Test-Path "$dst\HeadroomServer.exe")) { throw "Headroom Server wasn't installed" }
-          $svc = Get-Service Headroom -ErrorAction Stop
+          $svc = Get-Service Headroom -ErrorAction SilentlyContinue
+          if (-not $svc) {
+            Get-Content "$env:RUNNER_TEMP\server-setup.log" -Tail 40
+            & "$dst\headroom.exe" service status
+            throw "the installer didn't create the Headroom service"
+          }
           Write-Host "Headroom service: $($svc.Status), start $($svc.StartType)"
           Get-Process HeadroomServer, explorer -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           # The uninstallers hand over to a copy of themselves and return at once: give them a moment.
-          Run "$dst\unins000.exe"
-          Run "$viewer\unins000.exe"
+          Run "$dst\unins000.exe" "$env:RUNNER_TEMP\server-uninstall.log"
+          Run "$viewer\unins000.exe" "$env:RUNNER_TEMP\viewer-uninstall.log"
           for ($i = 0; $i -lt 30 -and ((Test-Path $dst) -or (Get-Service Headroom -ErrorAction SilentlyContinue)); $i++) { Start-Sleep 1 }
           Write-Host "after uninstall: service $(if (Get-Service Headroom -ErrorAction SilentlyContinue) { 'still there' } else { 'removed' }), Program Files\Headroom $(if (Test-Path $dst) { 'still there' } else { 'removed' })"
       - uses: actions/upload-artifact@v4
