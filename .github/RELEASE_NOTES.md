@@ -1,5 +1,14 @@
 Remote desktop for your own computers, and quick help with a code: **Headroom Server** on the computer you want to reach; **Headroom Viewer**, any browser, or an iPhone/iPad on the device you use.
 
+## New in 0.4.1: a new look, and everything easier to use
+
+- **A new look** for the website and Headroom Server's window: a quiet studio console at night, warm paper by day, and type designed so codes can't be misread (0/O, 1/l/I). Colour now only means something: green is ready, amber means a person is connected or asking, red is stop. See [DESIGN.md](https://github.com/jamescolasacco/headroom/blob/master/DESIGN.md).
+- **Accepting someone is unmistakable:** a warning card with their (unverified) name and rough location, the scam warning at full size, and the same Accept · View only · Decline order on Mac, Windows and in the window, with Decline as the strong button.
+- **You see what happened:** messages now appear on every screen (and screen readers hear them), errors sit next to the field that's wrong, "Send a new code" really sends one, and deleting your account ends with a clear confirmation.
+- **Simpler Account page:** one row per task — password, two-factor, email, delete.
+- **Keyboard and screen readers:** the Server window no longer drops your place every two seconds; every switch and menu is named; in a session, Ctrl+Alt+Shift+M takes you to the toolbar and Escape back to the remote screen.
+- **Smaller fixes:** a "Get Headroom Server" button when you have no devices yet, a "View only" lamp for guests who can watch but not control, phone layouts that fit, pinch-zoom allowed again, and less motion when your system asks for it.
+
 ## New in 0.4: one account for your devices, and codes for everyone else
 
 - **Your devices, signed in with your email.** Create an account at https://relay.colasac.co (email, password, and a code we email you). Sign in with it in Headroom Server on each computer and it's one of your devices, listed even while it's off. Sign in at the website or in Headroom Viewer and click a computer to connect, from anywhere. No addresses, no pairing, no port forwarding. Rename a computer in Headroom Server.
