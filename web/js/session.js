@@ -15,14 +15,17 @@ import { StatsOverlay } from './ui/stats.js';
 import { loadPrefs, savePrefs, touchHost } from './store.js';
 import { isIPhone, isIPad, isTouchPrimary, hasWebCodecs, secure, canFullscreen, isApple, postNative, onNative } from './platform.js';
 import { toast, closeSheet, h } from './ui/dom.js';
+import { lightOf } from './ui/light.js';
 
 const $ = id => document.getElementById(id);
 
 export class Session {
-  constructor(host, { onExit, onUnauthorized }) {
+  constructor(host, { onExit, onUnauthorized, leaveWith }) {
     this.host = host;
     this.onExit = onExit;
     this.onUnauthorized = onUnauthorized;
+    this.leaveWith = leaveWith; // wraps the last step of leaving (the screen shrinks back into its tile)
+    this.light = lightOf(host.hostId || host.id); // the computer's own light (ui/light.js)
     this.prefs = loadPrefs(host.id);
     this.monitors = [];
     this.monitorId = this.prefs.monitor || null;
@@ -44,6 +47,20 @@ export class Session {
     if (this.prefs.audio) this.audio.unlock();
   }
 
+  /**
+   * The session screen, at once (inside the tap, so the tile can grow into it): it wakes up in this computer's
+   * light while the connection is still being found. Cancel leaves; start() takes over from here.
+   */
+  prepare() {
+    if (this.disposed) return;
+    $('home').hidden = true;
+    const viewer = $('viewer');
+    viewer.dataset.light = String(this.light);
+    viewer.hidden = false;
+    document.title = `${this.host.name} — Headroom`;
+    if (!this.conn) this._overlay('Connecting…', this.host.support ? '' : this.host.name, true, [{ label: 'Cancel', onClick: () => this.stop() }]);
+  }
+
   async start() {
     if (!secure || !hasWebCodecs) {
       this._overlay('This browser can\'t decode the stream', !secure
@@ -52,6 +69,7 @@ export class Session {
       return;
     }
     $('home').hidden = true;
+    $('viewer').dataset.light = String(this.light);
     $('viewer').hidden = false;
     document.title = `${this.host.name} — Headroom`;
 
@@ -611,11 +629,14 @@ export class Session {
     this._lockPageZoom(false);
     for (const k of ['top', 'left', 'width', 'height', 'right', 'bottom']) $('viewer').style.removeProperty(k);
     document.documentElement.style.removeProperty('--inset-bottom');
-    $('overlay').hidden = true;
-    $('stats').hidden = true;
-    $('toolbar').replaceChildren();
-    $('viewer').hidden = true;
-    document.title = 'Headroom';
-    this.onExit?.();
+    const leave = () => {
+      $('overlay').hidden = true;
+      $('stats').hidden = true;
+      $('toolbar').replaceChildren();
+      $('viewer').hidden = true;
+      document.title = 'Headroom';
+      this.onExit?.();
+    };
+    if (this.leaveWith && !$('viewer').hidden) this.leaveWith(leave); else leave();
   }
 }

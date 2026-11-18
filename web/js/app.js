@@ -3,6 +3,7 @@
 import { Session } from './session.js';
 import { h, svg, dialog, toast, announce, field, busy, nextId, plural } from './ui/dom.js';
 import { I } from './ui/icons.js';
+import { lightOf } from './ui/light.js';
 import { qrSvg } from './qr.js';
 import { deviceLabel, platformId, secure, hasWebCodecs, isStandalone, isIOS, isMac, nativeViewer, postNative } from './platform.js';
 import * as Account from './account.js';
@@ -121,11 +122,10 @@ function renderDevices(acct) {
   const focused = document.activeElement?.closest?.('.host')?.dataset.id;
   $('host-list').replaceChildren(...hosts.map(hostCard));
   if (focused) $('host-list').querySelector(`.host[data-id="${CSS.escape(focused)}"] .host-main`)?.focus({ preventScroll: true });
-  $('devices-heading').hidden = !hosts.length;
   const empty = $('home-empty');
   empty.hidden = hosts.length > 0;
   if (!empty.querySelector('.empty-actions')) {
-    empty.append(h('div', { class: 'empty-actions' },
+    empty.querySelector('.empty-text').append(h('div', { class: 'empty-actions' },
       h('a', { class: 'button primary', href: DOWNLOAD_URL, target: '_blank', rel: 'noopener' }, 'Get Headroom Server', svg(EXTERNAL, 16)),
       h('p', { class: 'muted small' }, 'Free, for Mac and Windows.')));
   }
@@ -137,23 +137,49 @@ const ago = d => {
   return sec < 90 ? 'just now' : sec < 3600 ? `${Math.round(sec / 60)} min ago` : sec < 86400 ? `${Math.round(sec / 3600)} h ago` : new Date(d).toLocaleDateString();
 };
 
+/** A device is its screen: lit in its own light while it's online, dark glass while it isn't. */
 function hostCard(host) {
-  const status = host.online ? 'Online' : `Offline · last seen ${ago(host.lastSeen)}`;
-  // Named with its status too ("Studio Mac, Online"); the tooltip shows a name the row had to cut short.
+  const status = host.online ? 'Online' : `Offline, last seen ${ago(host.lastSeen)}`;
+  const face = h('span', { class: 'face', 'aria-hidden': 'true' }, svg(host.os === 'macos' ? I.apple : I.windows, 28));
+  // Named with its status too ("Studio Mac, Online"); the tooltip shows a name the caption had to cut short.
   const main = h('button', { class: 'host-main', type: 'button', title: host.name, 'aria-label': `${host.name}, ${status}` },
-    h('span', { class: 'os', 'aria-hidden': 'true' }, svg(host.os === 'macos' ? I.apple : I.windows, 24)),
+    face,
     h('span', { class: 'host-text' },
       h('span', { class: 'name' }, host.name, host.viewOnly ? h('span', { class: 'tag' }, 'view only') : null),
       h('span', { class: 'addr' }, h('span', { class: `dot ${host.online ? 'online' : 'offline'}`, 'aria-hidden': 'true' }), status)));
-  main.addEventListener('click', () => connect(host));
-  return h('div', { class: `host${host.online ? '' : ' offline'}`, role: 'listitem', 'data-id': host.id }, main,
+  main.addEventListener('click', () => connect(host, face));
+  return h('div', { class: `host${host.online ? '' : ' offline'}`, role: 'listitem', 'data-id': host.id, 'data-light': lightOf(host.id) }, main,
     nativeViewer && host.online ? h('button', {
       class: 'icon-btn', type: 'button', 'aria-label': `Open ${host.name} in a new window`, title: 'Open in a new window',
       onclick: () => postNative({ cmd: 'newWindow', url: `${location.origin}/index.html#connect=${encodeURIComponent(host.id)}` }),
     }, svg(EXTERNAL)) : null);
 }
 
-function connect(host) {
+/**
+ * The one authored motion: the screen you tap grows into the session, and shrinks back into its tile when you
+ * leave (View Transitions, where the browser has them and motion is welcome; otherwise it simply cuts).
+ */
+function morph(update, { from = null, to = () => null, leaving = false } = {}) {
+  if (!document.startViewTransition || matchMedia('(prefers-reduced-motion: reduce)').matches) { update(); return Promise.resolve(); }
+  const root = document.documentElement;
+  root.classList.toggle('leaving', leaving);
+  if (from) from.style.viewTransitionName = 'screen';
+  const t = document.startViewTransition(() => {
+    if (from) from.style.viewTransitionName = '';
+    update();
+    const target = to();
+    if (target) target.style.viewTransitionName = 'screen';
+  });
+  t.finished.catch(() => { }).finally(() => {
+    root.classList.remove('leaving');
+    const target = to();
+    if (target) target.style.viewTransitionName = '';
+  });
+  return t.updateCallbackDone.catch(() => { }); // the new state is in the page (a frame from now)
+}
+const tileOf = id => id && $('host-list').querySelector(`.host[data-id="${CSS.escape(id)}"] .face`);
+
+function connect(host, face = null) {
   if (session) return;
   if (cantShow()) { toast(cantShow()); return; }
   if (!host.online && !host.support) {
@@ -161,19 +187,25 @@ function connect(host) {
     return;
   }
   const s = session = new Session(host, {
+    // Leaving: the session shrinks back into its tile (the code box has no tile: it just cuts).
+    leaveWith: finish => morph(finish, { to: () => (host.computerId ? tileOf(host.id) : null), leaving: true }),
     onExit: () => {
       session = null;
       renderHome();
       refreshAccount();
       // Back where you were: on the device you left, or on the code box.
       const card = host.computerId && $('host-list').querySelector(`.host[data-id="${CSS.escape(host.id)}"] .host-main`);
-      (card || $('devices-heading') || document.querySelector('#code-slot input'))?.focus({ preventScroll: true });
+      (card || (Account.loadAccount() ? $('devices-heading') : document.querySelector('#code-slot input')))?.focus({ preventScroll: true });
     },
     onUnauthorized: () => refreshAccount(),
   });
   globalThis.__headroomSession = s; // handy for debugging from the console
   s.unlockFromGesture(); // audio must be unlocked inside this tap (iOS): before any await
+  // At once: the screen wakes up while the connection is found (and nothing changes the page before it has).
+  const shown = morph(() => s.prepare(), { from: face });
   (async () => {
+    await shown;
+    if (session !== s) return;
     if (host.account) {
       const url = await Account.reachableUrl(host);
       if (session !== s) return;
@@ -231,7 +263,7 @@ function codeForm({ inline = false, code = '', onDone, onCancel } = {}) {
     nameRow.append(submit);
   };
   if (inline) { codeLabel.classList.add('sr-only'); codeIn.addEventListener('focus', revealName); }
-  const form = h('form', { class: inline ? 'signin-card code-card' : null, novalidate: true },
+  const form = h('form', { class: inline ? 'code-screen' : 'code-screen code-dialog', novalidate: true },
     h('h2', {}, 'Got a code?'),
     h('p', { class: 'muted small' }, 'Enter the code from the person at the other computer. They\'ll be asked to accept.'),
     ...(inline ? [codeLabel, codeRow, codeErr] : codeField.nodes), nameWrap, err,
@@ -255,7 +287,7 @@ function codeForm({ inline = false, code = '', onDone, onCancel } = {}) {
       codeIn.value = '';
       // A one-off: nothing is saved. Once accepted, the session continues with a key only it holds.
       connect({
-        id: `guest:${c.slice(0, 4)}`, name: hi.host?.name || 'Remote computer', os: hi.host?.os, url, online: true,
+        id: `guest:${c.slice(0, 4)}`, hostId: hi.host?.id, name: hi.host?.name || 'Remote computer', os: hi.host?.os, url, online: true,
         support: { code: c, name },
       });
     } catch (ex) {

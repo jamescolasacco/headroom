@@ -5,8 +5,8 @@
   <title>Headroom</title>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="description" content="Reach your computers from any browser, or let someone connect to yours with a code.">
-  <meta name="theme-color" content="#131312" media="(prefers-color-scheme: dark)">
-  <meta name="theme-color" content="#f6f4ef" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#090b10" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#eef1f5" media="(prefers-color-scheme: light)">
   <meta name="color-scheme" content="dark light">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
@@ -16,6 +16,8 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <link rel="preload" href="/fonts/FunnelSans-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="/fonts/FunnelDisplay-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/css/app.css">
   <script type="module" src="/js/app.js" data-cfasync="false"></script>
 </head>
@@ -24,26 +26,34 @@
   <main id="home" class="screen" hidden>
     <header class="home-head">
       <div class="brand">
-        <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="6" width="26" height="17" rx="3.5" fill="none" stroke="currentColor" stroke-width="2.4"/><path d="M11 27h10" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M10 14.5l4 4 8-8" fill="none" stroke="var(--ready)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <svg class="mark" viewBox="0 0 28 20" aria-hidden="true"><rect x="1.25" y="1.25" width="25.5" height="17.5" rx="4.75" fill="none" stroke="currentColor" stroke-width="2.5"/><rect class="mark-light" x="5.5" y="5.5" width="17" height="3.5" rx="1.75"/></svg>
         <h1>Headroom</h1>
       </div>
       <button class="account-chip" id="account-chip" type="button" hidden></button>
     </header>
     <!-- signed out: a guest code, or your account -->
-    <div id="signed-out" hidden>
-      <p class="tagline">Reach your computers from any browser, or connect to someone else's with the code they give you.</p>
-      <div id="code-slot"></div>
+    <div id="signed-out" class="welcome" hidden>
+      <div>
+        <p class="hero-line">Your computers, from any browser.</p>
+        <p class="tagline">Sign in to reach your own Mac or PC. Or enter the code someone gave you to connect to theirs.</p>
+        <div id="code-slot"></div>
+      </div>
       <div id="signin-slot"></div>
     </div>
     <!-- signed in: your devices -->
     <div id="signed-in" hidden>
-      <h2 class="list-heading" id="devices-heading" tabindex="-1">Your devices</h2>
+      <div class="shelf-head">
+        <h2 class="list-heading" id="devices-heading" tabindex="-1">Your devices</h2>
+        <button id="btn-code" type="button">Got a code?</button>
+      </div>
       <div id="host-list" class="host-list" role="list" aria-labelledby="devices-heading"></div>
       <div id="home-empty" class="empty" hidden>
-        <p class="empty-title">No devices yet</p>
-        <p class="muted">Install Headroom Server on the Mac or Windows PC you want to reach, then sign in there with this email. It appears here.</p>
+        <div class="face slot" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 7v10M7 12h10"/></svg></div>
+        <div class="empty-text">
+          <p class="empty-title">No devices yet</p>
+          <p class="muted">Install Headroom Server on the Mac or Windows PC you want to reach, then sign in there with this email. It appears here, lit up when it's on.</p>
+        </div>
       </div>
-      <p class="home-links"><button class="link" id="btn-code" type="button">Got a code?</button></p>
     </div>
     <p class="muted small center" id="home-hint"></p>
   </main>

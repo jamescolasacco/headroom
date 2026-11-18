@@ -119,7 +119,9 @@ export class Toolbar {
       this.fit();
       return;
     }
-    const items = [this.btn(I.close, 'Disconnect', () => s.stop(), { danger: true })];
+    // Disconnect, then which computer this is: its screen in its own light, and its name (wide screens).
+    const items = [this.btn(I.close, 'Disconnect', () => s.stop(), { danger: true }),
+      h('span', { class: 'tb-screen', title: s.host.name }, h('span', { class: 'face', 'aria-hidden': 'true' }), h('span', { class: 'tb-name' }, s.host.name))];
     // Until the computer lets this session in, there's nothing to use yet but leaving.
     if (s.conn?.welcome) {
       const tools = this.tools();

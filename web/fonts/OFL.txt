@@ -1,4 +1,7 @@
-Copyright 2020-2024 The Atkinson Hyperlegible Next Project Authors (https://github.com/googlefonts/atkinson-hyperlegible-next)
+Funnel Sans and Funnel Display (FunnelSans-*.woff2, FunnelDisplay-*.woff2):
+Copyright 2024 The Funnel Project Authors (https://github.com/Dicotype/Funnel)
+
+Atkinson Hyperlegible Mono (AtkinsonHyperlegibleMono-*.woff2):
 Copyright 2020-2024 The Atkinson Hyperlegible Mono Project Authors (https://github.com/googlefonts/atkinson-hyperlegible-next-mono)
 
 This Font Software is licensed under the SIL Open Font License, Version 1.1.
