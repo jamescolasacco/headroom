@@ -313,7 +313,8 @@ function serveStatic(req, res) {
   }
   const stat = fs.statSync(file);
   const etag = `"${stat.mtimeMs.toString(36)}-${stat.size.toString(36)}"`;
-  const headers = { 'Content-Type': TYPES[path.extname(file).toLowerCase()] || 'application/octet-stream', 'Cache-Control': 'no-cache', ETag: etag };
+  // no-transform: a proxy in front (Cloudflare's Rocket Loader, script injection, minifying) must not rewrite the app.
+  const headers = { 'Content-Type': TYPES[path.extname(file).toLowerCase()] || 'application/octet-stream', 'Cache-Control': 'no-cache, no-transform', ETag: etag };
   if (path.basename(file) === 'sw.js') headers['Service-Worker-Allowed'] = '/';
   if (req.headers['if-none-match'] === etag) { res.writeHead(304, headers); res.end(); return true; }
   res.writeHead(200, { ...headers, 'Content-Length': stat.size });
