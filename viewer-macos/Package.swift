@@ -8,5 +8,6 @@ let package = Package(
     name: "HeadroomViewer",
     platforms: [.macOS(.v13)],
     products: [.executable(name: "HeadroomViewer", targets: ["HeadroomViewer"])],
-    targets: [.executableTarget(name: "HeadroomViewer")]
+    dependencies: [.package(path: "../update-macos")],
+    targets: [.executableTarget(name: "HeadroomViewer", dependencies: [.product(name: "HeadroomUpdate", package: "update-macos")])]
 )

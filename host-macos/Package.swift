@@ -15,6 +15,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.30.0"),
         .package(url: "https://github.com/apple/swift-certificates.git", from: "1.10.0"),
         .package(url: "https://github.com/apple/swift-asn1.git", from: "1.3.0"),
+        .package(path: "../update-macos"),
     ],
     targets: [
         // The engine: HTTPS/WSS server, pairing, capture, encode, input, clipboard, audio, files.
@@ -31,7 +32,8 @@ let package = Package(
             ]
         ),
         .executableTarget(name: "headroom", dependencies: ["HeadroomKit"]),
-        // Menu-bar app: status item, notifications, settings window (the engine's admin page in a WKWebView).
-        .executableTarget(name: "HeadroomServer"),
+        // Menu-bar app: status item, notifications, settings window (the engine's admin page in a WKWebView),
+        // and updates (../update-macos).
+        .executableTarget(name: "HeadroomServer", dependencies: [.product(name: "HeadroomUpdate", package: "update-macos")]),
     ]
 )

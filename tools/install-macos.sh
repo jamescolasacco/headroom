@@ -3,11 +3,13 @@
 # writable — then starts Headroom Server. Works from the repository (apps built by tools/build-macos.sh in dist/)
 # and from an unzipped release (the apps next to this script, where it's called install.sh).
 #
-#   tools/install-macos.sh [--only server|viewer] [--cli] [--no-launch]
+#   tools/install-macos.sh [--only server|viewer] [--cli] [--no-launch] [--relaunch-viewer]
 #
-#   --cli        also link the `headroom` command into /usr/local/bin (asks for your password if needed)
-#   --no-launch  don't start Headroom Server afterwards
-#   HEADROOM_INSTALL_DIR=<dir> installs somewhere else (testing)
+#   --cli              also link the `headroom` command into /usr/local/bin (asks for your password if needed)
+#   --no-launch        don't start Headroom Server afterwards
+#   --relaunch-viewer  open Headroom Viewer afterwards (the updater: it was open)
+#   HEADROOM_INSTALL_DIR=<dir> installs somewhere else (the updater: where the apps are; or testing)
+#   HEADROOM_INSTALL_WAIT=1    give running copies 10 seconds to quit by themselves first (the updater)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -15,11 +17,13 @@ if [ -d "$HERE/Headroom Server.app" ] || [ -d "$HERE/Headroom Viewer.app" ]; the
 ONLY=""
 CLI=0
 LAUNCH=1
+VIEWER=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --only) ONLY="$2"; shift 2 ;;
     --cli) CLI=1; shift ;;
     --no-launch) LAUNCH=0; shift ;;
+    --relaunch-viewer) VIEWER=1; shift ;;
     *) echo "unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -36,7 +40,10 @@ install_app() { # name
   local exe
   exe="$(defaults read "$src/Contents/Info" CFBundleExecutable)"
   if [ -n "${HEADROOM_INSTALL_DIR:-}" ]; then
-    # Somewhere else: only stop a copy running from there.
+    # Somewhere else: only stop a copy running from there (after it's had a chance to quit by itself).
+    if [ -n "${HEADROOM_INSTALL_WAIT:-}" ]; then
+      for _ in $(seq 20); do pgrep -f "$dst/Contents/MacOS/$exe" >/dev/null || break; sleep 0.5; done
+    fi
     if pgrep -f "$dst/Contents/MacOS/$exe" >/dev/null; then pkill -f "$dst/Contents/MacOS/$exe"; sleep 1; fi
   elif pgrep -x "$exe" >/dev/null; then pkill -x "$exe"; sleep 1; fi
   rm -rf "$dst"
@@ -54,6 +61,7 @@ if [ "$ONLY" != "viewer" ]; then
   fi
 fi
 [ "$ONLY" != "server" ] && install_app "Headroom Viewer"
+[ "$VIEWER" = 1 ] && [ "$ONLY" != "server" ] && open "$DEST/Headroom Viewer.app"
 
 if [ "$ONLY" != "viewer" ] && [ "$LAUNCH" = 1 ]; then
   open "$DEST/Headroom Server.app"

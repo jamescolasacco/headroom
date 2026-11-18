@@ -24,8 +24,11 @@ func item(_ title: String, _ action: Selector?, _ key: String = "", _ mods: NSEv
 }
 
 let mainMenu = NSMenu()
+let updateItem = item("Check for Updates…", #selector(AppDelegate.updateMenuAction(_:)), target: AppDelegate.shared)
+AppDelegate.shared.updateItem = updateItem
 mainMenu.addItem(menu("Headroom Viewer", [
     item("About Headroom Viewer", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
+    updateItem,
     .separator(),
     item("Hide Headroom Viewer", #selector(NSApplication.hide(_:)), "h"),
     item("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option]),

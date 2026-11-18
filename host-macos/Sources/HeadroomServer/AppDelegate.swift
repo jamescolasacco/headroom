@@ -1,4 +1,5 @@
 import AppKit
+import HeadroomUpdate
 import ServiceManagement
 import UserNotifications
 
@@ -20,6 +21,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private var askedRequests = Set<String>()
     private var alertRequest: String?
     private var pendingStart: [(Bool) -> Void] = []
+    /// Updates: the version we've told the user about (once), and whether we're quitting to install one.
+    private var announcedUpdate: String?
+    private var updating = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         // Launched as a login item: stay in the menu bar unless something needs the user.
@@ -40,6 +44,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         UNUserNotificationCenter.current().delegate = self
 
         engine.onExit = { [weak self] in self?.poll() }
+        NotificationCenter.default.addObserver(forName: Updater.didChange, object: Updater.shared, queue: .main) { [weak self] n in
+            if let s = n.userInfo?["state"] as? Updater.State { self?.updateChanged(s) }
+        }
+        Updater.shared.start()
         engine.start()
         poll()
         let t = Timer(timeInterval: 2, repeats: true) { [weak self] _ in self?.poll() }
@@ -54,6 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if updating { return .terminateNow } // asked already: the installer is waiting for us to quit
         if let st = status, !st.viewers.isEmpty, engine.running {
             NSApp.activate(ignoringOtherApps: true)
             let a = NSAlert()
@@ -207,6 +216,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         done()
     }
 
+    // ------------------------------------------------------------------ updates
+
+    private func updateChanged(_ s: Updater.State) {
+        settings?.sendUpdate(s)
+        guard s.phase == .ready, let v = s.available, announcedUpdate != v else { return }
+        announcedUpdate = v
+        notify("Headroom \(v) is ready", "Restart Headroom Server to update: from the menu bar, or in its window. It takes a few seconds.")
+    }
+
+    @objc private func checkForUpdates() { Updater.shared.check(userInitiated: true) }
+
+    /// Installs the downloaded update: Headroom Server (and Headroom Viewer, if it's here) quit, are replaced, and
+    /// open again. If someone is connected, ask first: their session ends.
+    @objc func restartToUpdate() {
+        guard Updater.shared.state.phase == .ready, let v = Updater.shared.state.available else { return }
+        if let st = status, !st.viewers.isEmpty {
+            NSApp.activate(ignoringOtherApps: true)
+            let a = NSAlert()
+            a.messageText = "Restart to update to \(v)?"
+            a.informativeText = "Headroom Server restarts, which ends the session with \(st.viewers.map(\.device).joined(separator: ", ")). They can connect again once it's back, in a few seconds."
+            a.alertStyle = .warning
+            a.addButton(withTitle: "Restart and Update")
+            a.addButton(withTitle: "Cancel")
+            if a.runModal() != .alertFirstButtonReturn { return }
+        }
+        do {
+            try Updater.shared.install()
+        } catch {
+            let a = NSAlert()
+            a.messageText = "Couldn't install the update"
+            a.informativeText = "\(error)\n\nYou can install it by hand from https://github.com/jamescolasacco/headroom/releases/latest."
+            a.runModal()
+            return
+        }
+        updating = true
+        NSApp.terminate(nil)
+    }
+
     // ------------------------------------------------------------------ menu
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -221,6 +268,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         let h = NSMenuItem(title: header, action: nil, keyEquivalent: "")
         h.isEnabled = false
         menu.addItem(h)
+        let up = Updater.shared.state
+        if up.phase == .ready, let v = up.available {
+            let r = item("Restart to Update to \(v)", #selector(restartToUpdate))
+            r.attributedTitle = NSAttributedString(string: r.title, attributes: [.font: NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)])
+            menu.addItem(r)
+        }
         menu.addItem(.separator())
         menu.addItem(item("Open Headroom Server…", #selector(openWindow)))
         menu.addItem(item("Let Someone Connect…", #selector(openConnect), enabled: st != nil))
@@ -241,6 +294,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         let login = item("Start at Login", #selector(toggleLogin))
         login.state = loginEnabled ? .on : .off
         menu.addItem(login)
+        switch up.phase {
+        case .checking: menu.addItem(item("Checking for Updates…", #selector(checkForUpdates), enabled: false))
+        case .downloading: menu.addItem(item("Downloading Update \(up.available ?? "")… \(Int(up.progress * 100))%", #selector(checkForUpdates), enabled: false))
+        case .ready: break
+        default: menu.addItem(item("Check for Updates…", #selector(checkForUpdates)))
+        }
         menu.addItem(.separator())
         menu.addItem(item("Quit Headroom Server", #selector(quit), key: "q"))
     }
@@ -314,6 +373,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     func showWindow(_ section: String) {
         if settings == nil {
             settings = SettingsWindow { [weak self] done in self?.startServer(done) }
+            settings?.installUpdate = { [weak self] in self?.restartToUpdate() }
         }
         settings?.show(section)
     }

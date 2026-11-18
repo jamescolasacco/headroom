@@ -1,4 +1,5 @@
 import AppKit
+import HeadroomUpdate
 import UniformTypeIdentifiers
 import WebKit
 
@@ -116,6 +117,12 @@ final class ViewerWindow: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUI
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(t, forType: .string)
             }
+        case "getUpdate":
+            post(Updater.shared.state.json)
+        case "checkUpdate":
+            Updater.shared.check(userInitiated: true)
+        case "installUpdate":
+            AppDelegate.shared.restartToUpdate()
         default:
             break
         }

@@ -1,4 +1,5 @@
 import AppKit
+import HeadroomUpdate
 import WebKit
 
 /// The "Headroom Server" window: the settings panel (served by the engine at /admin.html) in a WKWebView,
@@ -10,6 +11,8 @@ final class SettingsWindow: NSObject, NSWindowDelegate, WKNavigationDelegate, WK
     private var onAdminPage = false
     private var pendingSection = "home"
     var onClose: (() -> Void)?
+    /// "Restart to update" in the page (the app asks first if someone is connected).
+    var installUpdate: (() -> Void)?
 
     init(startServer: @escaping (@escaping (Bool) -> Void) -> Void) {
         self.startServer = startServer
@@ -60,6 +63,11 @@ final class SettingsWindow: NSObject, NSWindowDelegate, WKNavigationDelegate, WK
         web.evaluateJavaScript("window.dispatchEvent(new CustomEvent('headroom-native', { detail: \(json) }))")
     }
 
+    /// The updater's state, for the page's update line (Settings) and banner (Home).
+    func sendUpdate(_ s: Updater.State) {
+        if onAdminPage { sendToPage(s.json) }
+    }
+
     func reloadIfOffline() {
         if !onAdminPage { navigate(pendingSection, reload: true) }
     }
@@ -94,6 +102,12 @@ final class SettingsWindow: NSObject, NSWindowDelegate, WKNavigationDelegate, WK
         case "loginItem":
             AppDelegate.setLogin(body["enabled"] as? Bool ?? false)
             sendToPage(["cmd": "loginItem", "enabled": AppDelegate.loginEnabled])
+        case "getUpdate":
+            sendToPage(Updater.shared.state.json)
+        case "checkUpdate":
+            Updater.shared.check(userInitiated: true)
+        case "installUpdate":
+            installUpdate?()
         default:
             break
         }
