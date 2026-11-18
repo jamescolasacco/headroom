@@ -26,6 +26,7 @@ body { overflow: hidden; }
 .content .lead { color: var(--muted); margin: 0 0 18px; }
 .card { background: var(--bg-elev); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; margin: 0 0 14px; }
 .card h3 { font-size: 15px; margin: 0 0 10px; }
+.card.attention { border-color: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 18%, transparent); }
 .card p { margin: 6px 0; }
 .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .grow { flex: 1 1 200px; }

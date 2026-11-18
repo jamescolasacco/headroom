@@ -213,9 +213,18 @@ export class Session {
         this._hideOverlay();
       }
     });
+    c.addEventListener('pending', e => {
+      this._overlay('Waiting for approval', e.detail.message || 'Someone at the computer needs to accept.', true,
+        [{ label: 'Cancel', onClick: () => this.stop() }]);
+    });
     c.addEventListener('fatal', e => {
       const m = e.detail;
-      if (m.code === 'unauthorized') {
+      const back = [{ label: 'Back', primary: true, onClick: () => this.stop() }];
+      if (this.host.support && (m.code === 'unauthorized' || m.code === 'bad-code' || m.code === 'declined')) {
+        // Remote support: a wrong or used code, a "Decline", or the session ended from the computer.
+        const titles = { 'bad-code': 'Code not accepted', declined: 'Not accepted', unauthorized: 'Session ended' };
+        this._overlay(titles[m.code], m.code === 'unauthorized' ? 'The person at the computer ended the session. Ask for a new code to connect again.' : m.message, false, back);
+      } else if (m.code === 'unauthorized') {
         const acct = this.host.account;
         this._overlay(acct ? 'No access' : 'Not paired', acct
           ? 'This computer doesn\'t accept this device right now (it may have left the account, or this device was removed).'
@@ -225,6 +234,8 @@ export class Session {
         ]);
       } else if (m.code === 'rate-limited') {
         this._overlay('Too many attempts', `Try again in ${m.retryAfter || 60} seconds.`, false, [{ label: 'Back', onClick: () => this.stop() }]);
+      } else {
+        this._overlay('Can\'t connect', m.message || m.code, false, back);
       }
     });
     c.addEventListener('state', e => {

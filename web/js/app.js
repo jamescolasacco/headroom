@@ -24,6 +24,7 @@ async function main() {
 
   $('btn-add-host').addEventListener('click', () => addHostFlow());
   $('btn-sign-in').addEventListener('click', () => signInFlow());
+  $('btn-support').addEventListener('click', () => supportFlow());
   $('btn-app-settings').addEventListener('click', () => appSettings());
 
   try { sameOriginInfo = await getInfo(location.origin, { timeout: 3000 }); } catch { sameOriginInfo = null; }
@@ -50,10 +51,11 @@ async function main() {
   const connectId = hash.get('connect');
   const toConnect = connectId && hosts.find(x => x.id === connectId);
   if (toConnect) { connect(toConnect); return; }
-  if (!hosts.length && !code && !Account.loadAccount()) {
-    if (servedByAccount()) signInFlow();
-    else if (servedByComputer()) addHostFlow({ url: location.origin, info: sameOriginInfo });
-  }
+  // A remote-support link: https://<relay>/#id=<Headroom ID>[&code=<support code>]
+  if (hash.get('id')) { supportFlow({ id: hash.get('id'), code: hash.get('code') || '' }); return; }
+  // Served by a computer with nothing saved yet: offer to pair with it. (On the relay's own address, the home
+  // screen offers both signing in and connecting with an ID, so nothing pops up.)
+  if (!hosts.length && !code && !Account.loadAccount() && servedByComputer()) addHostFlow({ url: location.origin, info: sameOriginInfo });
 }
 
 /** Account computers first, then paired ones (a computer that's both shows once, as the account's). */
@@ -111,7 +113,7 @@ function renderHome() {
   }
   $('home-empty-text').textContent = acct
     ? `Signed in as ${acct.username}, but no computers have joined the account yet: in Headroom Server on each computer, open Settings → Account and sign in there.`
-    : '';
+    : servedByAccount() ? 'Helping someone? Use “Connect with an ID” with the Headroom ID and code they give you.' : '';
   const hint = [];
   if (!secure) hint.push('Not a secure connection: video needs HTTPS.');
   else if (!hasWebCodecs) hint.push('This browser lacks WebCodecs (needs Safari 16.4+, Chrome/Edge 94+, Firefox 130+).');
@@ -129,7 +131,9 @@ function hostCard(host) {
     h('div', { class: 'os' }, svg(host.os === 'macos' ? I.apple : I.windows, 24)),
     h('div', { style: { minWidth: 0 } },
       h('div', { class: 'name' }, host.name, host.viewOnly ? h('span', { class: 'tag' }, 'view only') : null),
-      h('div', { class: 'addr' }, dot, (host.url || 'no address yet').replace(/^https?:\/\//, '').replace(/\/$/, ''))),
+      h('div', { class: 'addr' }, dot, host.url && host.url === host.relayUrl
+        ? `via relay · ID ${Account.prettyId(host.relayId)}`
+        : (host.url || 'no address yet').replace(/^https?:\/\//, '').replace(/\/$/, ''))),
     h('button', {
       class: 'icon-btn', type: 'button', 'aria-label': 'More', title: 'More',
       onclick: e => { e.stopPropagation(); hostMenu(host); },
@@ -179,6 +183,7 @@ function accountHostMenu(host) {
     dlg.append(h('div', { class: 'body' },
       h('h2', {}, host.name),
       h('p', { class: 'muted small' }, `In your Headroom account · ${seen}${host.viewOnly ? ' · view only from this device' : ''}`),
+      host.relayId ? h('p', { class: 'small' }, `Headroom ID ${Account.prettyId(host.relayId)} · ${host.relayOnline ? 'reachable from anywhere through the relay' : 'not on the relay right now'}`) : null,
       h('p', { class: 'small muted' }, 'Addresses it reported (the first that answers is used):'),
       h('div', { class: 'small mono', style: { wordBreak: 'break-all' } }, ...host.urls.map(u => h('div', {}, u))),
       h('div', { class: 'actions' },
@@ -207,9 +212,11 @@ function connect(host) {
       if (!url) {
         s.stop();
         const where = host.urls.map(u => u.replace(/^https:\/\//, '').replace(/\/$/, '')).join(', ');
-        toast(host.online
-          ? `Can't reach ${host.name} from this network (${where || 'no address'}).${nativeViewer ? '' : ' First time on this device? Install its certificate from http://<its address>:7080/ — or use Tailscale.'}`
-          : `${host.name} is offline (it hasn't checked in with your account recently).`, 9000);
+        toast(!host.online
+          ? `${host.name} is offline (it hasn't checked in with your account recently).`
+          : host.relayUrl
+            ? `${host.name} answers neither directly nor through the relay right now. Try again in a moment.`
+            : `Can't reach ${host.name} from this network (${where || 'no address'}).${nativeViewer ? '' : ' First time on this device? Install its certificate from http://<its address>:7080/ — or use Tailscale.'}`, 9000);
         return;
       }
       host.url = url;
@@ -379,6 +386,78 @@ function appSettings() {
         }, 'Forget all'),
         h('button', { type: 'button', onclick: () => { done(); acct ? accountDialog() : signInFlow(); } }, acct ? 'Account' : 'Sign in'),
         h('button', { type: 'button', class: 'primary', onclick: () => done() }, 'Done'))));
+  });
+}
+
+// ---------------------------------------------------------------------------------------------- remote support
+
+const pref = (k, v) => { try { if (v === undefined) return localStorage.getItem(k) || ''; localStorage.setItem(k, v); } catch { } return ''; };
+
+/** AnyDesk-style: reach someone's computer with its Headroom ID and the one-time code they read out to you. */
+function supportFlow({ id = '', code = '' } = {}) {
+  const acct = Account.loadAccount();
+  const knownRelay = servedByAccount() ? location.origin : acct?.server || pref('headroom.lastRelay');
+  return dialog((dlg, done) => {
+    const err = h('div', { class: 'error', role: 'alert' });
+    const idIn = h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'off', placeholder: '123 456 789', value: Account.prettyId(id), 'aria-label': 'Headroom ID' });
+    const codeIn = h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code', placeholder: '123456', maxlength: '7', value: code.replace(/\D/g, ''), 'aria-label': 'Support code' });
+    const nameIn = h('input', { type: 'text', value: pref('headroom.supportName'), placeholder: 'Shown to the person at the computer', autocomplete: 'name' });
+    const relayIn = h('input', { type: 'text', inputmode: 'url', value: knownRelay, placeholder: 'accounts.example.com', autocapitalize: 'off', spellcheck: 'false' });
+    const relayWrap = h('div', { hidden: !!knownRelay }, h('label', { class: 'field' }, 'Relay server'), relayIn,
+      h('p', { class: 'muted small' }, 'The Headroom account server the computer uses (its owner knows it).'));
+    idIn.addEventListener('input', () => { idIn.value = Account.prettyId(idIn.value).slice(0, 11); });
+    const submit = h('button', { type: 'submit', class: 'primary' }, 'Connect');
+    const form = h('form', {},
+      h('h2', {}, 'Connect with an ID'),
+      h('p', { class: 'muted small' }, 'Ask the person at the computer for its Headroom ID and a support code (Headroom Server → Remote support). They\'ll be asked to accept.'),
+      h('label', { class: 'field' }, 'Headroom ID'), idIn,
+      h('label', { class: 'field' }, 'Support code'), codeIn,
+      h('label', { class: 'field' }, 'Your name'), nameIn, relayWrap, err,
+      h('div', { class: 'actions' },
+        knownRelay ? h('button', { type: 'button', class: 'link', onclick: () => { relayWrap.hidden = false; relayIn.focus(); } }, 'Other relay…') : null,
+        h('span', { style: { flex: '1' } }),
+        h('button', { type: 'button', onclick: () => done() }, 'Cancel'), submit));
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      err.textContent = '';
+      const rid = idIn.value.replace(/\D/g, ''), c = codeIn.value.replace(/\D/g, '');
+      if (!/^\d{9}$/.test(rid)) { err.textContent = 'A Headroom ID has 9 digits.'; return; }
+      if (!/^\d{6}$/.test(c)) { err.textContent = 'A support code has 6 digits.'; return; }
+      let relay;
+      try { relay = Account.normalizeServer(relayIn.value); } catch { relayWrap.hidden = false; err.textContent = 'Enter the relay server.'; relayIn.focus(); return; }
+      const u = new URL(relay);
+      if (u.protocol === 'http:' && location.protocol !== 'http:' && !/^(localhost|127\.0\.0\.1|\[::1\])$/.test(u.hostname)) {
+        err.textContent = 'The relay server needs HTTPS (https://…).';
+        return;
+      }
+      const url = `${relay}/r/${rid}`;
+      submit.disabled = true;
+      let info;
+      try {
+        const r = await fetch(`${url}/api/info`, { cache: 'no-store' });
+        info = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          err.textContent = info.error === 'unknown-id' ? 'No computer has that ID on this relay.'
+            : info.error === 'offline' ? 'That computer isn\'t connected right now. Is Headroom Server running on it?'
+              : info.message || `The relay answered ${r.status}.`;
+          return;
+        }
+      } catch {
+        relayWrap.hidden = false;
+        err.textContent = 'Can\'t reach the relay server. Check its address and your connection.';
+        return;
+      } finally { submit.disabled = false; }
+      pref('headroom.lastRelay', relay);
+      if (nameIn.value.trim()) pref('headroom.supportName', nameIn.value.trim());
+      done(true);
+      // A one-off: not saved with your computers. The session reconnects with the key it gets once accepted.
+      connect({
+        id: `support:${rid}`, name: info.host?.name || `Computer ${Account.prettyId(rid)}`, os: info.host?.os, url,
+        support: { code: c, name: nameIn.value.trim() || deviceLabel() },
+      });
+    });
+    dlg.append(form);
+    setTimeout(() => (id ? (code ? submit : codeIn) : idIn).focus(), 50);
   });
 }
 

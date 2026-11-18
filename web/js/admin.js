@@ -15,6 +15,7 @@ const ICON = {
   pair: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 20h4v-3"/>',
   devices: '<rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/>',
   account: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+  support: '<path d="M3 11a9 9 0 0 1 18 0v5a2 2 0 0 1-2 2h-1v-6h3M3 11v5a2 2 0 0 0 2 2h1v-6H3"/>',
   security: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/>',
   features: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
   quality: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
@@ -27,7 +28,7 @@ const ICON = {
 };
 
 const SECTIONS = [
-  ['status', 'Status'], ['account', 'Account'], ['pair', 'Pair a device'], ['devices', 'Devices'], ['security', 'Security'],
+  ['status', 'Status'], ['account', 'Account'], ['support', 'Remote support'], ['pair', 'Pair a device'], ['devices', 'Devices'], ['security', 'Security'],
   ['features', 'Features'], ['quality', 'Quality'], ['connection', 'Connection'], ['about', 'About'],
 ];
 
@@ -87,7 +88,7 @@ function renderOffline(message) {
 
 function render() {
   const c = document.getElementById('content');
-  const views = { status: viewStatus, account: viewAccount, pair: viewPair, devices: viewDevices, security: viewSecurity, features: viewFeatures, quality: viewQuality, connection: viewConnection, about: viewAbout };
+  const views = { status: viewStatus, account: viewAccount, support: viewSupport, pair: viewPair, devices: viewDevices, security: viewSecurity, features: viewFeatures, quality: viewQuality, connection: viewConnection, about: viewAbout };
   c.replaceChildren(views[current]());
 }
 
@@ -161,12 +162,81 @@ function viewStatus() {
 
   return h('section', {},
     h('h2', {}, 'Status'), h('p', { class: 'lead' }, `Headroom lets your other devices see and control ${thisPc()}.`),
+    supportRequestsCard(),
     h('div', { class: 'card' }, hero, modeTip),
     mac() ? permissionsCard() : null,
     h('div', { class: 'card' }, h('div', { class: 'row' }, h('h3', { class: 'grow', style: { margin: 0 } }, 'Connected viewers'),
       n > 1 ? h('button', { class: 'sm danger', type: 'button', onclick: () => post('/sessions/disconnect-all').then(refresh) }, 'Disconnect everyone') : null), viewers),
     h('div', { class: 'card' }, h('h3', {}, 'Connect from another device'), addrs,
       h('p', { class: 'small muted' }, 'New device? Use “Pair a device” to get a code or scan a QR code.')));
+}
+
+// ------------------------------------------------------------------ remote support
+const prettyId = id => String(id || '').replace(/(\d{3})(?=\d)/g, '$1 ');
+
+/** Someone with a support code is waiting: Accept, View only or Decline (shown on Status and Remote support). */
+function supportRequestsCard() {
+  const reqs = st.support?.requests || [];
+  if (!reqs.length) return null;
+  const answer = (r, accept, viewOnly) => post(`/support/requests/${r.id}`, { accept, viewOnly }).catch(() => { }).then(refresh);
+  return h('div', { class: 'card attention' }, h('h3', {}, 'Someone wants to connect'),
+    h('div', { class: 'list' }, ...reqs.map(r => h('div', { class: 'li' },
+      h('div', { class: 'main' }, h('div', { class: 't' }, `${r.name} wants to see and control ${thisPc()}`),
+        h('div', { class: 's' }, `With your support code · from ${r.address || 'unknown address'} · asked ${ago(r.created)}`)),
+      h('div', { class: 'row' },
+        h('button', { class: 'sm danger', type: 'button', onclick: () => answer(r, false, false) }, 'Decline'),
+        h('button', { class: 'sm', type: 'button', onclick: () => answer(r, true, true) }, 'View only'),
+        h('button', { class: 'sm primary', type: 'button', onclick: () => answer(r, true, false) }, 'Accept'))))));
+}
+
+function viewSupport() {
+  const relay = st.relay || {}, sup = st.support || {};
+  const lead = h('p', { class: 'lead' }, `Let someone without an account help — or reach ${thisPc()} yourself — from any browser, anywhere: they enter its Headroom ID and a one-time code, and you accept.`);
+  if (!st.account) {
+    return h('section', {}, h('h2', {}, 'Remote support'), lead,
+      h('div', { class: 'card' }, h('h3', {}, 'Join a Headroom account first'),
+        h('p', { class: 'small muted' }, `Connections from outside your network go through your account server's relay, so ${thisPc()} needs to be in an account (Account section). Nothing else to set up: no port forwarding.`),
+        h('button', { class: 'primary', type: 'button', onclick: () => go('account') }, 'Set up an account')));
+  }
+  const stateBadge = relay.state === 'online' ? h('span', { class: 'badge ok' }, 'On the relay')
+    : relay.state === 'off' ? h('span', { class: 'badge' }, 'Relay off')
+      : h('span', { class: 'badge warn' }, relay.state === 'retrying' ? 'Reconnecting' : 'Connecting…');
+  const idCard = h('div', { class: 'card' }, h('h3', {}, 'This computer'),
+    relay.id ? h('div', {}, h('div', { class: 'muted small' }, 'Headroom ID'), h('div', { class: 'code-big' }, prettyId(relay.id))) : null,
+    h('div', { class: 'row' }, stateBadge, relay.error ? h('span', { class: 'small muted' }, relay.error) : null),
+    relay.url ? h('div', { class: 'row', style: { marginTop: '10px' } }, h('span', { class: 'small mono grow', style: { wordBreak: 'break-all' } }, relay.url), copyBtn(relay.url)) : null,
+    h('p', { class: 'small muted' }, 'Your own devices don\'t need codes: sign in to your account at that address (or in the Headroom app) and connect without anyone accepting.'));
+
+  const codeCard = h('div', { class: 'card' });
+  const drawCode = () => {
+    const c = sup.code;
+    const left = c ? Math.max(0, Math.round((new Date(c.expiresAt) - Date.now()) / 1000)) : 0;
+    codeCard.replaceChildren(h('h3', {}, 'Support code'));
+    if (!c || !left) {
+      codeCard.append(h('p', { class: 'small muted' }, 'A 6-digit code for one connection, valid for an hour. Give it, with the Headroom ID, to the person helping you.'),
+        h('button', { class: 'primary', type: 'button', disabled: relay.state !== 'online' || null, onclick: async () => { const r = await post('/support/code'); sup.code = { code: r.code, expiresAt: r.expiresAt }; refresh(); } }, 'Create a code'),
+        relay.state !== 'online' ? h('p', { class: 'small muted' }, 'Available once this computer is on the relay.') : null);
+      return;
+    }
+    const link = relay.url ? `${relay.url}&code=${c.code}` : null;
+    codeCard.append(h('div', { class: 'pair-grid' }, link ? qrBox(link) : h('div'),
+      h('div', {},
+        h('div', { class: 'muted small' }, 'Read out the ID and this code, or send the link:'),
+        h('div', { class: 'code-big' }, `${c.code.slice(0, 3)} ${c.code.slice(3)}`),
+        h('div', { class: 'muted small' }, `Works once · expires in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`),
+        link ? h('p', { class: 'small mono', style: { wordBreak: 'break-all' } }, link) : null,
+        h('div', { class: 'row' }, link ? copyBtn(link) : null,
+          h('button', { class: 'sm', type: 'button', onclick: () => post('/support/code').then(refresh) }, 'New code'),
+          h('button', { class: 'sm', type: 'button', onclick: () => api('/support/code', { method: 'DELETE' }).then(refresh) }, 'Cancel')))));
+  };
+  drawCode();
+  const tick = setInterval(() => { if (!codeCard.isConnected) clearInterval(tick); else if (sup.code) drawCode(); }, 1000);
+
+  return h('section', {}, h('h2', {}, 'Remote support'), lead,
+    supportRequestsCard(), idCard, codeCard,
+    h('div', { class: 'card' },
+      switchRow('Ask before someone connects with a code', 'Show Accept / Decline here first. Turn off only for unattended use: then the code alone lets them in.', st.settings.supportAsk !== false, v => saveSettings({ supportAsk: v })),
+      switchRow('Reachable through the relay', `While ${thisPc()} is in your account, browsers anywhere can reach it at its Headroom ID (each session still needs your account or a code).`, st.settings.relayEnabled !== false, v => saveSettings({ relayEnabled: v }))));
 }
 
 /** Mac: the two privacy permissions, with shortcuts to grant them. */
@@ -480,4 +550,4 @@ if (SECTIONS.some(([id]) => id === fromHash)) current = fromHash;
 window.addEventListener('hashchange', () => go(location.hash.slice(1)));
 native?.on(m => { if (m?.cmd === 'navigate') go(m.section); });
 refresh();
-pollTimer = setInterval(() => { if (current === 'status' || current === 'devices' || (current === 'account' && st?.account)) refresh(); else api('/status').then(s => { st = s; renderNav(); postNative({ cmd: 'status', viewers: st.sessions.length, names: st.sessions.map(x => x.device) }); }).catch(() => renderOffline('not reachable')); }, 2000);
+pollTimer = setInterval(() => { if (current === 'status' || current === 'devices' || current === 'support' || (current === 'account' && st?.account)) refresh(); else api('/status').then(s => { st = s; renderNav(); postNative({ cmd: 'status', viewers: st.sessions.length, names: st.sessions.map(x => x.device) }); }).catch(() => renderOffline('not reachable')); }, 2000);

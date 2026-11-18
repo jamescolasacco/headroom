@@ -109,11 +109,15 @@ function trustPins(computers) {
 /** The account's computers as address-book entries (same shape the session uses). */
 export function accountHosts(a = loadAccount()) {
   if (!a) return [];
-  return a.computers.map(c => ({
-    id: c.hostId || c.id, name: c.name, os: c.os, token: c.token, url: c.lastUrl || c.urls[0] || '',
-    urls: c.urls, online: c.online, lastSeen: c.lastSeen, account: true, computerId: c.id,
-    deviceId: a.deviceId, deviceName: a.deviceName, lastConnected: c.lastConnected || 0, viewOnly: c.viewOnly,
-  }));
+  return a.computers.map(c => {
+    const relayUrl = c.relayId ? `${a.server}/r/${c.relayId}` : null;
+    return {
+      id: c.hostId || c.id, name: c.name, os: c.os, token: c.token, url: c.lastUrl || c.urls[0] || relayUrl || '',
+      urls: c.urls, relayUrl, relayId: c.relayId, relayOnline: !!c.relayOnline,
+      online: c.online, lastSeen: c.lastSeen, account: true, computerId: c.id,
+      deviceId: a.deviceId, deviceName: a.deviceName, lastConnected: c.lastConnected || 0, viewOnly: c.viewOnly,
+    };
+  });
 }
 
 /** Remembers which address worked (tried first next time) and when it was last used. */
@@ -127,21 +131,51 @@ export function noteConnected(computerId, url) {
 }
 
 /**
- * Picks the computer's address that answers from here: all are tried at once; the last one that worked wins,
- * then the computer's own order (Tailscale, .local name, LAN addresses).
+ * Picks the computer's address that answers from here. All are tried at once, in order of preference: the one
+ * that worked last time, the computer's own (Tailscale, .local name, LAN addresses), then the relay, which
+ * works from anywhere. Once something answers, slower better choices get a moment more, not the full timeout.
  */
 export async function reachableUrl(host) {
-  const urls = [...new Set([host.url, ...(host.urls || [])].filter(Boolean))];
-  const probe = u => new Promise(resolve => {
-    const ctl = new AbortController();
-    const t = setTimeout(() => { ctl.abort(); resolve(false); }, 3500);
-    fetch(`${u.replace(/\/$/, '')}/api/info`, { signal: ctl.signal, cache: 'no-store' })
-      .then(r => resolve(r.ok)).catch(() => resolve(false)).finally(() => clearTimeout(t));
+  const urls = [...new Set([host.url, ...(host.urls || []), host.relayOnline ? host.relayUrl : null].filter(Boolean).map(u => u.replace(/\/$/, '')))];
+  if (host.relayUrl && urls.indexOf(host.relayUrl) !== urls.length - 1 && host.relayOnline) {
+    // The relay goes last even if it was last time's choice: a direct path, when there is one, is faster.
+    urls.splice(urls.indexOf(host.relayUrl), 1);
+    urls.push(host.relayUrl);
+  }
+  const results = urls.map(() => undefined);
+  return new Promise(resolve => {
+    let grace = null, settled = false;
+    const pick = () => {
+      // The best answer so far, if everything ranked above it has failed.
+      for (let i = 0; i < urls.length; i++) {
+        if (results[i] === true) return urls[i];
+        if (results[i] === undefined) return null;
+      }
+      return undefined; // all failed
+    };
+    const decide = force => {
+      if (settled) return;
+      const p = pick();
+      if (p || p === undefined) { settled = true; clearTimeout(grace); resolve(p || null); return; }
+      if (force) { settled = true; resolve(urls.find((u, i) => results[i] === true) || null); }
+    };
+    urls.forEach((u, i) => {
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), 3500);
+      fetch(`${u}/api/info`, { signal: ctl.signal, cache: 'no-store' })
+        .then(r => r.ok).catch(() => false)
+        .then(ok => {
+          clearTimeout(t);
+          results[i] = ok;
+          if (ok && !grace) grace = setTimeout(() => decide(true), 700);
+          decide(false);
+        });
+    });
   });
-  const results = urls.map(u => ({ u, ok: probe(u) }));
-  for (const r of results) if (await r.ok) return r.u.replace(/\/$/, '');
-  return null;
 }
+
+/** "123456789" as AnyDesk-style groups: 123 456 789. */
+export const prettyId = id => String(id || '').replace(/\D/g, '').replace(/(\d{3})(?=\d)/g, '$1 ');
 
 // ------------------------------------------------------------------ management (account dialog)
 

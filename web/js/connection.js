@@ -35,7 +35,7 @@ export class Connection extends EventTarget {
   _wsUrl() {
     const u = new URL(this.host.url);
     u.protocol = u.protocol === 'http:' ? 'ws:' : 'wss:';
-    u.pathname = '/ws';
+    u.pathname = u.pathname.replace(/\/$/, '') + '/ws'; // through the relay the address is …/r/<Headroom ID>
     return u.toString();
   }
 
@@ -56,11 +56,10 @@ export class Connection extends EventTarget {
     ws.onopen = () => {
       clearTimeout(openTimeout);
       this.lastMessageAt = performance.now();
-      this.sendJson({
-        t: 'hello',
-        token: this.host.token,
-        client: { name: this.host.deviceName || deviceLabel(), platform: platformId(), ua: navigator.userAgent.slice(0, 200) },
-      });
+      const client = { name: this.host.deviceName || deviceLabel(), platform: platformId(), ua: navigator.userAgent.slice(0, 200) };
+      // Remote support: the first connection uses the one-time code; reconnects use the resume key from welcome.
+      if (this.host.support && !this.host.token) this.sendJson({ t: 'hello', support: this.host.support, client });
+      else this.sendJson({ t: 'hello', token: this.host.token, client });
     };
     ws.onmessage = ev => this._onMessage(ev.data);
     ws.onerror = () => { /* onclose follows */ };
@@ -148,7 +147,11 @@ export class Connection extends EventTarget {
 
   _onJson(msg) {
     switch (msg.t) {
+      case 'pending':
+        this.emit('pending', msg);
+        break;
       case 'welcome':
+        if (msg.resumeToken) this.host.token = msg.resumeToken;
         this.welcome = msg;
         this.attempt = 0;
         this._fatal = null;
