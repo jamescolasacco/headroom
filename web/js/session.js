@@ -114,7 +114,7 @@ export class Session {
     this.touch.attach();
     this.audio.setEnabled(this.prefs.audio);
     if (!isTouchPrimary) sink.focus({ preventScroll: true });
-    this._overlay('Connecting…', this.host.url.replace(/^https?:\/\//, ''), true);
+    this._overlay('Connecting…', this.host.support ? '' : this.host.name, true);
     // Headroom Viewer for Windows: its keyboard hook captures Win/Alt+Tab/PrtScn while a session is up. (The Mac
     // viewer switches the system shortcuts off instead, so ⌘Tab and friends arrive as ordinary key events.)
     this._offNative = onNative(m => {
@@ -127,7 +127,7 @@ export class Session {
     touchHost(this.host.id, { lastConnected: Date.now() });
   }
 
-  /** 'windows' | 'macos': from the host's welcome, else what was stored when it was paired. */
+  /** 'windows' | 'macos': from the host's welcome, else what the account says. */
   get hostOs() { return this.hostInfo?.os || this.host.os || 'windows'; }
   get macHost() { return this.hostOs === 'macos'; }
 
@@ -198,6 +198,15 @@ export class Session {
     c.addEventListener('clip', e => this.clipboard.onRemote(e.detail.text || ''));
     c.addEventListener('stats', e => { this.hostStats = e.detail; });
     c.addEventListener('notice', e => toast(e.detail.message, 5000));
+    // The person at the other computer changed what this session may do (control, clipboard, files).
+    c.addEventListener('permissions', e => {
+      const p = e.detail.permissions || {};
+      const was = this.permissions;
+      this.permissions = { ...this.permissions, ...p };
+      if (was.input && !this.permissions.input) { this.keyboard?.releaseAll(); toast('View only: they turned off control.', 5000); }
+      else if (!was.input && this.permissions.input) toast('You can control the screen now.', 4000);
+      this.toolbar?.refresh();
+    });
     c.addEventListener('monitors', e => { this.monitors = e.detail.monitors; this.toolbar.refresh(); });
     c.addEventListener('status', e => {
       const s = e.detail;
@@ -214,23 +223,20 @@ export class Session {
       }
     });
     c.addEventListener('pending', e => {
-      this._overlay('Waiting for approval', e.detail.message || 'Someone at the computer needs to accept.', true,
+      this._overlay('Waiting for them to accept…', e.detail.message || 'The person at the other computer needs to click Accept.', true,
         [{ label: 'Cancel', onClick: () => this.stop() }]);
     });
     c.addEventListener('fatal', e => {
       const m = e.detail;
       const back = [{ label: 'Back', primary: true, onClick: () => this.stop() }];
       if (this.host.support && (m.code === 'unauthorized' || m.code === 'bad-code' || m.code === 'declined')) {
-        // Remote support: a wrong or used code, a "Decline", or the session ended from the computer.
+        // A guest: a wrong or used code, "Decline", or the session ended from the other computer.
         const titles = { 'bad-code': 'Code not accepted', declined: 'Not accepted', unauthorized: 'Session ended' };
-        this._overlay(titles[m.code], m.code === 'unauthorized' ? 'The person at the computer ended the session. Ask for a new code to connect again.' : m.message, false, back);
+        const text = { 'bad-code': 'That code is wrong or was already used. Ask for a new one.', declined: 'They declined, or didn\'t answer in time.', unauthorized: 'The person at the other computer ended the session. Ask for a new code to connect again.' };
+        this._overlay(titles[m.code], m.message || text[m.code], false, back);
       } else if (m.code === 'unauthorized') {
-        const acct = this.host.account;
-        this._overlay(acct ? 'No access' : 'Not paired', acct
-          ? 'This computer doesn\'t accept this device right now (it may have left the account, or this device was removed).'
-          : m.message || 'This device is no longer paired with the computer.', false, [
-          { label: acct ? 'Refresh account' : 'Pair again', primary: true, onClick: () => { this.stop(); this.onUnauthorized?.(this.host); } },
-          { label: 'Back', onClick: () => this.stop() },
+        this._overlay('No access', 'This device doesn\'t accept your sign-in right now. It may have left your account; check it\'s still signed in with your email.', false, [
+          { label: 'Back', primary: true, onClick: () => { this.stop(); this.onUnauthorized?.(this.host); } },
         ]);
       } else if (m.code === 'rate-limited') {
         this._overlay('Too many attempts', `Try again in ${m.retryAfter || 60} seconds.`, false, [{ label: 'Back', onClick: () => this.stop() }]);

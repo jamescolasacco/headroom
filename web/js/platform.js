@@ -63,13 +63,16 @@ export function onNative(handler) {
   return bridge.on(handler);
 }
 
+/** What this sign-in is called in "Where you're signed in": "Safari on iPhone", "Headroom Viewer on Mac". */
 export function deviceLabel() {
-  if (isIPad) return 'iPad';
-  if (isIPhone) return 'iPhone';
-  if (isAndroid) return 'Android';
-  if (isMac) return 'Mac';
-  if (isWindows) return 'Windows PC';
-  return 'Browser';
+  const os = isIPad ? 'iPad' : isIPhone ? 'iPhone' : isAndroid ? 'Android' : isMac ? 'Mac' : isWindows ? 'Windows' : /CrOS/.test(ua) ? 'Chromebook' : /Linux/.test(ua) ? 'Linux' : '';
+  const app = nativeViewer ? 'Headroom Viewer'
+    : /Edg(e|A|iOS)?\//.test(ua) ? 'Edge'
+      : /OPR\/|Opera/.test(ua) ? 'Opera'
+        : /Firefox|FxiOS/.test(ua) ? 'Firefox'
+          : /Chrome|CriOS|Chromium/.test(ua) ? 'Chrome'
+            : /Safari/.test(ua) ? 'Safari' : 'Browser';
+  return os ? `${app} on ${os}` : app;
 }
 
 export function platformId() {

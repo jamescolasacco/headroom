@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <title>Headroom</title>
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-  <meta name="description" content="Remote desktop for your own computers.">
+  <meta name="description" content="Reach your computers from any browser, or let someone connect to yours with a code.">
   <meta name="theme-color" content="#0b0d11">
   <meta name="color-scheme" content="dark light">
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -19,7 +19,7 @@
   <script type="module" src="/js/app.js"></script>
 </head>
 <body>
-  <!-- ======================================================== home: saved computers -->
+  <!-- ======================================================== home -->
   <section id="home" class="screen" hidden>
     <header class="home-head">
       <div class="brand">
@@ -27,17 +27,21 @@
         <h1>Headroom</h1>
       </div>
       <button class="account-chip" id="account-chip" type="button" hidden></button>
-      <button class="icon-btn" id="btn-app-settings" title="Settings" aria-label="Settings"><svg viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.6 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg></button>
     </header>
-    <div id="signin-slot" hidden></div>
-    <div id="host-list" class="host-list" aria-live="polite"></div>
-    <div id="home-empty" class="empty" hidden>
-      <p class="empty-title">No computers yet</p>
-      <p class="muted">Install Headroom Server on a Windows PC or a Mac. Then sign in to your Headroom account, or add the computer by its address with a password or pairing code.</p>
-      <p class="muted small" id="home-empty-text"></p>
+    <!-- signed out: a guest code, or your account -->
+    <div id="signed-out" hidden>
+      <div id="code-slot"></div>
+      <div id="signin-slot"></div>
     </div>
-    <button class="primary wide" id="btn-sign-in" hidden>Sign in to your account</button>
-    <p class="home-links"><button class="link" id="btn-support" type="button">Connect with an ID</button><span aria-hidden="true"> · </span><button class="link" id="btn-add-host" type="button">Add a computer by address</button></p>
+    <!-- signed in: your devices -->
+    <div id="signed-in" hidden>
+      <div id="host-list" class="host-list" aria-live="polite"></div>
+      <div id="home-empty" class="empty" hidden>
+        <p class="empty-title">No devices yet</p>
+        <p class="muted">Install Headroom Server on your Mac or Windows PC and sign in there with this email. It shows up here.</p>
+      </div>
+      <p class="home-links"><button class="link" id="btn-code" type="button">Got a code?</button></p>
+    </div>
     <p class="muted small center" id="home-hint"></p>
   </section>
 

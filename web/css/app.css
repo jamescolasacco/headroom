@@ -58,7 +58,7 @@ button:disabled { opacity: .5; cursor: default; }
 .icon-btn { padding: 0; width: 40px; height: 40px; display: inline-grid; place-items: center; background: transparent; border-color: transparent; }
 .icon-btn svg, .tb svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 
-input[type=text], input[type=password], input[type=url], input[type=number], select {
+input[type=text], input[type=password], input[type=email], input[type=url], input[type=number], select {
   width: 100%; padding: 11px 12px; border-radius: 10px; border: 1px solid var(--line);
   background: var(--bg); min-height: 44px; font-size: 16px; /* 16px stops iOS focus-zoom */
 }
@@ -86,7 +86,9 @@ label.field { display: block; margin: 12px 0 4px; font-size: 14px; color: var(--
 .host .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .host .addr { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; vertical-align: 1px; }
-.dot.online { background: var(--ok); } .dot.offline { background: var(--bad); } .dot.unauth { background: var(--warn); }
+.dot.online { background: var(--ok); } .dot.offline { background: var(--muted); }
+.host.offline { opacity: .55; }
+.host.offline:hover { border-color: var(--line); }
 .empty { text-align: center; padding: 28px 12px; border: 1px dashed var(--line); border-radius: var(--radius); margin-bottom: 16px; }
 .empty-title { font-weight: 600; margin: 0 0 6px; }
 #home > button.wide + button.wide { margin-top: 10px; }
@@ -97,11 +99,17 @@ label.field { display: block; margin: 12px 0 4px; font-size: 14px; color: var(--
 .signin-card .error { color: var(--bad); font-size: 14px; min-height: 20px; margin: 8px 0; }
 .signin-card button.primary.wide { margin-top: 4px; }
 .row-center { display: flex; justify-content: center; margin-top: 8px; }
+.row-center.links { gap: 6px; align-items: baseline; color: var(--muted); font-size: 14px; }
+.row-center.links button.link { font-size: 14px; }
+.code-input { font-size: 22px; letter-spacing: .12em; text-align: center; font-variant-numeric: tabular-nums; }
+.turnstile { margin: 12px 0 4px; min-height: 65px; }
+.turnstile[hidden] { display: none; }
+.account-chip span { overflow: hidden; text-overflow: ellipsis; }
 .home-links { text-align: center; margin: 4px 0 10px; font-size: 14px; color: var(--muted); }
 .home-links button.link { font-size: 14px; }
 .home-head .spacer { flex: 1; }
 .account-chip {
-  display: inline-flex; align-items: center; gap: 6px; max-width: 60%; margin-left: auto; margin-right: 8px;
+  display: inline-flex; align-items: center; gap: 6px; max-width: 60%; margin-left: auto;
   min-height: 36px; padding: 6px 12px; border-radius: 999px; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .account-chip svg { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; }

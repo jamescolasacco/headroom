@@ -35,7 +35,7 @@ export class Connection extends EventTarget {
   _wsUrl() {
     const u = new URL(this.host.url);
     u.protocol = u.protocol === 'http:' ? 'ws:' : 'wss:';
-    u.pathname = u.pathname.replace(/\/$/, '') + '/ws'; // through the relay the address is …/r/<Headroom ID>
+    u.pathname = u.pathname.replace(/\/$/, '') + '/ws'; // through the relay: …/r/<device>/ws, or …/c/<code>/ws for a guest
     return u.toString();
   }
 
@@ -57,7 +57,7 @@ export class Connection extends EventTarget {
       clearTimeout(openTimeout);
       this.lastMessageAt = performance.now();
       const client = { name: this.host.deviceName || deviceLabel(), platform: platformId(), ua: navigator.userAgent.slice(0, 200) };
-      // Remote support: the first connection uses the one-time code; reconnects use the resume key from welcome.
+      // A guest: the first connection uses the code; reconnects use the key from welcome.
       if (this.host.support && !this.host.token) this.sendJson({ t: 'hello', support: this.host.support, client });
       else this.sendJson({ t: 'hello', token: this.host.token, client });
     };
@@ -152,6 +152,8 @@ export class Connection extends EventTarget {
         break;
       case 'welcome':
         if (msg.resumeToken) this.host.token = msg.resumeToken;
+        // A guest code is used up once accepted: reconnects and file transfers go to the device's own relay path.
+        if (msg.relayPath && this.host.support) this.host.url = new URL(msg.relayPath, this.host.url).toString().replace(/\/$/, '');
         this.welcome = msg;
         this.attempt = 0;
         this._fatal = null;

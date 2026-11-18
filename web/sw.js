@@ -1,6 +1,6 @@
-// Offline-capable app shell. Network-first so a host update is picked up immediately; the cache
-// lets the home-screen app open (and reach *other* computers) even when this host is off.
-const CACHE = 'headroom-shell-v3';
+// Offline-capable app shell. Network-first so an update is picked up immediately; the cache lets the home-screen
+// app open when the network is flaky.
+const CACHE = 'headroom-shell-v4';
 const SHELL = [
   '/', '/index.html', '/manifest.webmanifest', '/css/app.css',
   '/js/app.js', '/js/account.js', '/js/config.js', '/js/qr.js', '/js/api.js', '/js/store.js', '/js/platform.js', '/js/protocol.js', '/js/connection.js',
@@ -25,7 +25,8 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET' || url.origin !== location.origin) return;
-  if (url.pathname.startsWith('/api/') || url.pathname === '/ws' || url.pathname.startsWith('/headroom-ca')) return;
+  // Only the app's own files: never the API, sessions, or anything relayed to a device (/r/…, /c/…).
+  if (/^\/(api|r|c)\//.test(url.pathname) || url.pathname === '/ws') return;
   e.respondWith((async () => {
     try {
       const fresh = await fetch(e.request);
