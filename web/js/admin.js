@@ -1,55 +1,48 @@
-// Headroom Server settings window. Runs on the host (loopback-only /api/admin) — inside the tray app's
-// WebView2 window (Windows), the menu-bar app's WKWebView window (Mac), or any browser at
-// http://localhost:7080/admin.html.
+// Headroom Server's window. Runs on the host (loopback-only /api/admin) — inside the tray app's WebView2 window
+// (Windows), the menu-bar app's WKWebView window (Mac), or any browser on the computer at http://localhost:7080/.
+// Four sections: Home (who's connected), Let someone connect (guest codes), Account, Settings.
 import { h, svg } from './ui/dom.js';
 import { QrCode } from './qr.js';
 import { bridge } from './platform.js';
-import { DEFAULT_ACCOUNT_SERVER } from './config.js';
 
 const native = bridge;   // present when hosted by Headroom Server's own window
 const postNative = msg => native?.post(msg);
 const mac = () => st?.host?.os === 'macos';
 const thisPc = () => (mac() ? 'this Mac' : 'this PC');
+const ThisPc = () => (mac() ? 'This Mac' : 'This PC');
 
 const ICON = {
-  status: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
-  pair: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 20h4v-3"/>',
-  devices: '<rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/>',
+  home: '<path d="M3 11 12 3l9 8M5 9.5V21h14V9.5"/>',
+  connect: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/>',
   account: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
-  support: '<path d="M3 11a9 9 0 0 1 18 0v5a2 2 0 0 1-2 2h-1v-6h3M3 11v5a2 2 0 0 0 2 2h1v-6H3"/>',
-  security: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/>',
-  features: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
-  quality: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
-  connection: '<path d="M5 12.55a11 11 0 0 1 14 0M1.42 9a16 16 0 0 1 21.16 0M8.53 16.11a6 6 0 0 1 6.95 0M12 20h.01"/>',
-  about: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>',
+  settings: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
   warn: '<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0ZM12 9v4M12 17h.01"/>',
   live: '<rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/><circle cx="12" cy="10.5" r="2.5"/>',
   down: '<circle cx="12" cy="12" r="10"/><path d="M15 9l-6 6M9 9l6 6"/>',
 };
 
-const SECTIONS = [
-  ['status', 'Status'], ['account', 'Account'], ['support', 'Remote support'], ['pair', 'Pair a device'], ['devices', 'Devices'], ['security', 'Security'],
-  ['features', 'Features'], ['quality', 'Quality'], ['connection', 'Connection'], ['about', 'About'],
-];
+const SECTIONS = [['home', 'Home'], ['connect', 'Let someone connect'], ['account', 'Account'], ['settings', 'Settings']];
+const OLD_SECTIONS = { status: 'home', support: 'connect', pair: 'connect', devices: 'account', security: 'account', features: 'settings', quality: 'settings', connection: 'settings', about: 'settings' };
 
 let st = null;            // last /status
-let current = 'status';
-let pairState = null;     // { code, expires, urls }
-let totpSetup = null;     // { secret, uri }
+let current = 'home';
 let accountNote = null;   // { ok, text } — result of the last account action, shown until the next one
-let pollTimer = 0;
+let codeError = '';
+let loginItem = null;     // Start at login (native window only): true/false, or null when unknown
+const choices = {};       // request id -> { files, clipboard }: kept while the page redraws
 
 // ------------------------------------------------------------------ api
 async function api(path, opts = {}) {
   const r = await fetch(`/api/admin${path}`, { headers: { 'Content-Type': 'application/json' }, cache: 'no-store', ...opts });
   const body = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
+  if (!r.ok) { const e = new Error(body.message || body.error || `HTTP ${r.status}`); e.body = body; throw e; }
   return body;
 }
 const post = (path, body) => api(path, { method: 'POST', body: body ? JSON.stringify(body) : undefined });
 const saveSettings = patch => post('/settings', patch).then(refresh);
 
+/** What's on screen depends on the status; while typing, only Home redraws (others keep their fields). */
 async function refresh() {
   try {
     st = await api('/status');
@@ -61,17 +54,19 @@ async function refresh() {
   renderNav();
   document.getElementById('side-host').textContent = st.host.name;
   document.getElementById('side-foot').textContent = `v${st.host.version}`;
-  if (!document.activeElement || !document.getElementById('content').contains(document.activeElement) || current === 'status') render();
+  const typing = document.activeElement && document.getElementById('content').contains(document.activeElement) && document.activeElement.matches('input[type=text], input[type=email], input[type=password]');
+  if (!typing) render();
   postNative({ cmd: 'status', viewers: st.sessions.length, names: st.sessions.map(s => s.device) });
 }
 
 // ------------------------------------------------------------------ chrome
 function renderNav() {
   const nav = document.getElementById('nav');
+  const waiting = st?.support?.requests?.length || 0;
   nav.replaceChildren(...SECTIONS.map(([id, label]) => {
+    const n = id === 'home' ? (st?.sessions.length || 0) + waiting : 0;
     const b = h('button', { class: 'nav-item', type: 'button', 'aria-current': id === current ? 'page' : null },
-      svg(ICON[id === 'pair' ? 'pair' : id], 18), label,
-      id === 'status' && st?.sessions.length ? h('span', { class: 'count' }, st.sessions.length) : null);
+      svg(ICON[id], 18), label, n ? h('span', { class: 'count' }, n) : null);
     b.onclick = () => { go(id); document.getElementById('content').focus(); };
     return b;
   }));
@@ -82,14 +77,14 @@ function renderOffline(message) {
   const c = document.getElementById('content');
   c.replaceChildren(h('section', {},
     h('div', { class: 'card' }, h('div', { class: 'hero down' }, h('div', { class: 'ring' }, svg(ICON.down, 28)),
-      h('div', {}, h('div', { class: 'title' }, 'The Headroom server isn\'t running'),
-        h('div', { class: 'muted small' }, native ? 'Start it here, or from the Headroom icon in the menu bar / notification area.' : `This page talks to the Headroom server on this computer (${message}).`))),
+      h('div', {}, h('div', { class: 'title' }, 'Headroom Server isn\'t running'),
+        h('div', { class: 'muted small' }, native ? 'Start it here, or from the Headroom icon in the menu bar / notification area.' : `This page talks to Headroom Server on this computer (${message}).`))),
       native ? h('div', { class: 'row', style: { marginTop: '14px' } }, h('button', { class: 'primary', onclick: () => postNative({ cmd: 'startServer' }) }, 'Start server')) : null)));
 }
 
 function render() {
   const c = document.getElementById('content');
-  const views = { status: viewStatus, account: viewAccount, support: viewSupport, pair: viewPair, devices: viewDevices, security: viewSecurity, features: viewFeatures, quality: viewQuality, connection: viewConnection, about: viewAbout };
+  const views = { home: viewHome, connect: viewConnect, account: viewAccount, settings: viewSettings };
   c.replaceChildren(views[current]());
 }
 
@@ -102,12 +97,20 @@ const ago = d => {
   if (s < 86400) return `${Math.round(s / 3600)} h ago`;
   return new Date(d).toLocaleDateString();
 };
+const countryName = code => {
+  if (!code) return '';
+  try { return new Intl.DisplayNames(undefined, { type: 'region' }).of(code) || code; } catch { return code; }
+};
+const where = x => [x.country ? `${countryName(x.country)} (approximate)` : '', (x.address || x.remoteAddress || '').replace(' (via relay)', '')].filter(Boolean).join(' · ');
+const prettyCode = c => String(c || '').replace(/(\d{3})(?=\d)/g, '$1 ');
+const site = () => (st?.relay?.site || '').replace(/^https?:\/\//, '');
 
-function copyBtn(text) {
-  const b = h('button', { class: 'sm copy', type: 'button' }, 'Copy');
+function copyBtn(text, label = 'Copy') {
+  const b = h('button', { class: 'sm copy', type: 'button' }, label);
   b.onclick = async () => {
-    try { await navigator.clipboard.writeText(text); b.textContent = 'Copied'; } catch { postNative({ cmd: 'copy', text }); b.textContent = 'Copied'; }
-    setTimeout(() => { b.textContent = 'Copy'; }, 1500);
+    try { await navigator.clipboard.writeText(text); } catch { postNative({ cmd: 'copy', text }); }
+    b.textContent = 'Copied';
+    setTimeout(() => { b.textContent = label; }, 1500);
   };
   return b;
 }
@@ -123,122 +126,214 @@ function switchRow(title, sub, checked, onChange) {
   return h('div', { class: 'switch-row' }, h('div', { class: 'main' }, h('div', { class: 't' }, title), sub ? h('div', { class: 's' }, sub) : null), toggle(checked, onChange));
 }
 
+function checkbox(label, checked, onChange) {
+  const input = h('input', { type: 'checkbox' });
+  input.checked = !!checked;
+  input.onchange = () => onChange(input.checked);
+  return { input, el: h('label', { class: 'check' }, input, ' ', label) };
+}
+
 function qrBox(text) {
   const box = h('div', { class: 'qr', title: text });
   box.innerHTML = QrCode.encode(text, 'M').toSvg({ border: 2 });
   return box;
 }
 
-function preferredUrl() {
-  return st.urls.find(u => u.includes('.ts.net')) || st.urls.find(u => /https:\/\/\d+\.\d+\.\d+\.\d+/.test(u)) || st.urls[0];
+function openExternal(url) {
+  if (native) postNative({ cmd: 'openUrl', url }); else window.open(url, '_blank', 'noopener');
 }
 
-// ------------------------------------------------------------------ views
-function viewStatus() {
+// ------------------------------------------------------------------ Home
+
+/** Someone with your code is waiting: Accept, View only or Decline, choosing what else they may do. */
+function requestsCard() {
+  const reqs = st.support?.requests || [];
+  if (!reqs.length) return null;
+  return h('div', { class: 'card attention' }, h('h3', {}, 'Someone wants to connect'),
+    h('div', { class: 'list' }, ...reqs.map(r => {
+      const ch = choices[r.id] ||= { files: false, clipboard: false };
+      const files = checkbox('Let them transfer files', ch.files, v => { ch.files = v; });
+      const clip = checkbox('Share clipboard', ch.clipboard, v => { ch.clipboard = v; });
+      const answer = (accept, viewOnly) => post(`/support/requests/${r.id}`, { accept, viewOnly, files: files.input.checked, clipboard: clip.input.checked }).catch(() => { }).then(refresh);
+      return h('div', { class: 'li request' },
+        h('div', { class: 'main' },
+          h('div', { class: 't' }, `“${r.name}” wants to see and control ${thisPc()}`),
+          h('div', { class: 's' }, 'Name not verified', where(r) ? ` · from ${where(r)}` : '', ` · asked ${ago(r.created)}`),
+          h('div', { class: 's warn-line' }, svg(ICON.warn, 14), ' Only accept if you know them and asked for help. Scammers pretend to be support and ask for codes.'),
+          h('div', { class: 'row checks' }, files.el, clip.el)),
+        h('div', { class: 'row' },
+          h('button', { class: 'sm danger', type: 'button', onclick: () => answer(false, false) }, 'Decline'),
+          h('button', { class: 'sm', type: 'button', onclick: () => answer(true, true) }, 'View only'),
+          h('button', { class: 'sm primary', type: 'button', onclick: () => answer(true, false) }, 'Accept')));
+    })));
+}
+
+function sessionRow(s) {
+  const r = s.rights || {};
+  const set = patch => post(`/sessions/${s.id}/rights`, patch).then(refresh).catch(() => { });
+  return h('div', { class: 'li' },
+    h('div', { class: 'main' },
+      h('div', { class: 't' }, s.device || 'Someone', h('span', { class: `badge ${s.guest ? 'warn' : 'ok'}`, style: { marginLeft: '8px' } }, s.guest ? 'Guest (code)' : 'Your account')),
+      h('div', { class: 's' }, `${where(s)} · since ${new Date(s.connectedAt).toLocaleTimeString()}`),
+      s.guest ? h('div', { class: 'row checks' },
+        h('span', { class: 'small' }, 'Control'), toggle(r.input, v => set({ input: v })),
+        h('span', { class: 'small' }, 'Files'), toggle(r.files, v => set({ files: v })),
+        h('span', { class: 'small' }, 'Clipboard'), toggle(r.clipboard, v => set({ clipboard: v }))) : null),
+    h('button', { class: 'sm danger', type: 'button', onclick: () => post(`/sessions/${s.id}/disconnect`).then(refresh) }, 'Stop'));
+}
+
+function viewHome() {
   const n = st.sessions.length;
   const perms = st.permissions;
   const missing = mac() && perms && (!perms.screenRecording || !perms.accessibility);
+  const relay = st.relay || {};
   const hero = h('div', { class: `hero ${n ? 'live' : 'ready'}` },
     h('div', { class: 'ring' }, svg(n ? ICON.live : ICON.check, 28)),
     h('div', { class: 'grow' },
-      h('div', { class: 'title' }, n ? `${n} viewer${n > 1 ? 's' : ''} connected` : 'Ready for connections'),
+      h('div', { class: 'title' }, n ? `${n === 1 ? `${st.sessions[0].device || 'Someone'} is` : `${n} people are`} connected` : 'Nobody is connected'),
       h('div', { class: 'row', style: { marginTop: '6px' } },
-        mac() ? null : st.elevated ? h('span', { class: 'badge ok' }, 'Service mode') : h('span', { class: 'badge warn' }, 'User mode'),
+        st.account ? h('span', { class: 'badge ok' }, `Signed in as ${st.account.email}`) : h('span', { class: 'badge' }, 'Not signed in'),
+        relay.state === 'online' ? h('span', { class: 'badge ok' }, 'Online') : h('span', { class: 'badge warn' }, relay.state === 'retrying' ? 'Offline — retrying' : 'Connecting…'),
         missing ? h('span', { class: 'badge warn' }, 'Needs permission') : null,
-        st.testPattern ? h('span', { class: 'badge warn' }, 'Test pattern') : null,
-        h('span', { class: 'badge' }, `${st.devices.length} paired device${st.devices.length === 1 ? '' : 's'}`),
-        st.tailscale ? h('span', { class: 'badge ok' }, 'Tailscale') : null)));
-  const modeTip = st.elevated || mac() ? null : h('p', { class: 'small muted', style: { marginTop: '12px' } },
-    st.serviceInstalled
-      ? 'The Headroom service is installed but this window is talking to a user-mode server. Stop it so the service can take over.'
-      : 'In user mode, UAC prompts and the lock screen can\'t be shown or controlled. Install service mode (run install.ps1 as administrator) for full unattended access.');
-
-  const viewers = h('div', { class: 'list' }, ...(n ? st.sessions.map(s => h('div', { class: 'li' },
-    h('div', { class: 'main' }, h('div', { class: 't' }, s.device || 'Viewer'), h('div', { class: 's' }, `${s.remoteAddress} · since ${new Date(s.connectedAt).toLocaleTimeString()}`)),
-    h('button', { class: 'sm danger', type: 'button', onclick: () => post(`/sessions/${s.id}/disconnect`).then(refresh) }, 'Disconnect'))) : [h('div', { class: 'empty' }, 'Nobody is connected.')]));
-
-  const addrs = h('div', { class: 'list' }, ...st.urls.map(u => h('div', { class: 'li' },
-    h('div', { class: 'main' }, h('div', { class: 't mono' }, u), h('div', { class: 's' }, u.includes('.ts.net') ? 'Tailscale — works anywhere, no certificate setup' : u.includes('.local') ? 'Local network name' : 'Local network address')),
-    copyBtn(u))));
-
-  return h('section', {},
-    h('h2', {}, 'Status'), h('p', { class: 'lead' }, `Headroom lets your other devices see and control ${thisPc()}.`),
-    supportRequestsCard(),
-    h('div', { class: 'card' }, hero, modeTip),
-    mac() ? permissionsCard() : null,
-    h('div', { class: 'card' }, h('div', { class: 'row' }, h('h3', { class: 'grow', style: { margin: 0 } }, 'Connected viewers'),
-      n > 1 ? h('button', { class: 'sm danger', type: 'button', onclick: () => post('/sessions/disconnect-all').then(refresh) }, 'Disconnect everyone') : null), viewers),
-    h('div', { class: 'card' }, h('h3', {}, 'Connect from another device'), addrs,
-      h('p', { class: 'small muted' }, 'New device? Use “Pair a device” to get a code or scan a QR code.')));
+        st.testPattern ? h('span', { class: 'badge warn' }, 'Test pattern') : null)),
+    n ? h('button', { class: 'danger', type: 'button', onclick: () => post('/sessions/disconnect-all').then(refresh) }, n > 1 ? 'Stop all' : 'Stop') : null);
+  const next = !st.account && !n ? h('div', { class: 'card' }, h('h3', {}, 'Get started'),
+    h('div', { class: 'list' },
+      h('div', { class: 'li' }, h('div', { class: 'main' }, h('div', { class: 't' }, 'Reach this computer from your other devices'),
+        h('div', { class: 's' }, `Sign in with your Headroom account. Then it's in your list at ${site() || 'the Headroom website'} and in Headroom Viewer.`)),
+      h('button', { class: 'sm primary', type: 'button', onclick: () => go('account') }, 'Sign in')),
+      h('div', { class: 'li' }, h('div', { class: 'main' }, h('div', { class: 't' }, 'Let someone help you'),
+        h('div', { class: 's' }, 'Give them a code. They connect from their browser — no account, no download — after you accept.')),
+      h('button', { class: 'sm', type: 'button', onclick: () => go('connect') }, 'Get a code')))) : null;
+  return h('section', {}, h('h2', {}, 'Home'),
+    requestsCard(),
+    h('div', { class: 'card' }, hero),
+    n ? h('div', { class: 'card' }, h('h3', {}, 'Connected now'), h('div', { class: 'list' }, ...st.sessions.map(sessionRow))) : null,
+    missing ? permissionsCard() : null,
+    next);
 }
 
-// ------------------------------------------------------------------ remote support
-const prettyId = id => String(id || '').replace(/(\d{3})(?=\d)/g, '$1 ');
+// ------------------------------------------------------------------ Let someone connect
 
-/** Someone with a support code is waiting: Accept, View only or Decline (shown on Status and Remote support). */
-function supportRequestsCard() {
-  const reqs = st.support?.requests || [];
-  if (!reqs.length) return null;
-  const answer = (r, accept, viewOnly) => post(`/support/requests/${r.id}`, { accept, viewOnly }).catch(() => { }).then(refresh);
-  return h('div', { class: 'card attention' }, h('h3', {}, 'Someone wants to connect'),
-    h('div', { class: 'list' }, ...reqs.map(r => h('div', { class: 'li' },
-      h('div', { class: 'main' }, h('div', { class: 't' }, `${r.name} wants to see and control ${thisPc()}`),
-        h('div', { class: 's' }, `With your support code · from ${r.address || 'unknown address'} · asked ${ago(r.created)}`)),
-      h('div', { class: 'row' },
-        h('button', { class: 'sm danger', type: 'button', onclick: () => answer(r, false, false) }, 'Decline'),
-        h('button', { class: 'sm', type: 'button', onclick: () => answer(r, true, true) }, 'View only'),
-        h('button', { class: 'sm primary', type: 'button', onclick: () => answer(r, true, false) }, 'Accept'))))));
-}
-
-function viewSupport() {
-  const relay = st.relay || {}, sup = st.support || {};
-  const lead = h('p', { class: 'lead' }, `Let someone without an account help — or reach ${thisPc()} yourself — from any browser, anywhere: they enter its Headroom ID and a one-time code, and you accept.`);
-  if (!st.account) {
-    return h('section', {}, h('h2', {}, 'Remote support'), lead,
-      h('div', { class: 'card' }, h('h3', {}, 'Join a Headroom account first'),
-        h('p', { class: 'small muted' }, `Connections from outside your network go through your account server's relay, so ${thisPc()} needs to be in an account (Account section). Nothing else to set up: no port forwarding.`),
-        h('button', { class: 'primary', type: 'button', onclick: () => go('account') }, 'Set up an account')));
-  }
-  const stateBadge = relay.state === 'online' ? h('span', { class: 'badge ok' }, 'On the relay')
-    : relay.state === 'off' ? h('span', { class: 'badge' }, 'Relay off')
-      : h('span', { class: 'badge warn' }, relay.state === 'retrying' ? 'Reconnecting' : 'Connecting…');
-  const idCard = h('div', { class: 'card' }, h('h3', {}, 'This computer'),
-    relay.id ? h('div', {}, h('div', { class: 'muted small' }, 'Headroom ID'), h('div', { class: 'code-big' }, prettyId(relay.id))) : null,
-    h('div', { class: 'row' }, stateBadge, relay.error ? h('span', { class: 'small muted' }, relay.error) : null),
-    relay.url ? h('div', { class: 'row', style: { marginTop: '10px' } }, h('span', { class: 'small mono grow', style: { wordBreak: 'break-all' } }, relay.url), copyBtn(relay.url)) : null,
-    h('p', { class: 'small muted' }, 'Your own devices don\'t need codes: sign in to your account at that address (or in the Headroom app) and connect without anyone accepting.'));
-
-  const codeCard = h('div', { class: 'card' });
-  const drawCode = () => {
-    const c = sup.code;
+function viewConnect() {
+  const relay = st.relay || {}, code = st.support?.code;
+  const online = relay.state === 'online';
+  const card = h('div', { class: 'card' });
+  const draw = () => {
+    const c = st.support?.code;
     const left = c ? Math.max(0, Math.round((new Date(c.expiresAt) - Date.now()) / 1000)) : 0;
-    codeCard.replaceChildren(h('h3', {}, 'Support code'));
     if (!c || !left) {
-      codeCard.append(h('p', { class: 'small muted' }, 'A 6-digit code for one connection, valid for an hour. Give it, with the Headroom ID, to the person helping you.'),
-        h('button', { class: 'primary', type: 'button', disabled: relay.state !== 'online' || null, onclick: async () => { const r = await post('/support/code'); sup.code = { code: r.code, expiresAt: r.expiresAt }; refresh(); } }, 'Create a code'),
-        relay.state !== 'online' ? h('p', { class: 'small muted' }, 'Available once this computer is on the relay.') : null);
+      card.replaceChildren(
+        h('p', {}, `Give someone this code and they can connect to ${thisPc()} from their browser. No account or download for them.`),
+        h('ul', { class: 'steps small' },
+          h('li', {}, `They open ${site() || 'the Headroom website'} and enter the code (or you send them the link).`),
+          h('li', {}, `${ThisPc()} asks you to accept, and you choose what they can do. Nobody gets in without you clicking Accept.`),
+          h('li', {}, 'You can stop the session at any time.')),
+        h('div', { class: 'row' }, h('button', {
+          class: 'primary', type: 'button', disabled: !online || null, onclick: async e => {
+            e.target.disabled = true;
+            codeError = '';
+            try { await post('/support/code'); } catch (ex) { codeError = ex.message; }
+            refresh();
+          },
+        }, 'Create a code')),
+        !online ? h('p', { class: 'small muted' }, `Connecting to Headroom…${relay.error ? ` (${relay.error})` : ''}`) : null,
+        codeError ? h('div', { class: 'msg err' }, codeError) : null);
       return;
     }
-    const link = relay.url ? `${relay.url}&code=${c.code}` : null;
-    codeCard.append(h('div', { class: 'pair-grid' }, link ? qrBox(link) : h('div'),
+    card.replaceChildren(h('div', { class: 'pair-grid' }, qrBox(c.link),
       h('div', {},
-        h('div', { class: 'muted small' }, 'Read out the ID and this code, or send the link:'),
-        h('div', { class: 'code-big' }, `${c.code.slice(0, 3)} ${c.code.slice(3)}`),
-        h('div', { class: 'muted small' }, `Works once · expires in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`),
-        link ? h('p', { class: 'small mono', style: { wordBreak: 'break-all' } }, link) : null,
-        h('div', { class: 'row' }, link ? copyBtn(link) : null,
-          h('button', { class: 'sm', type: 'button', onclick: () => post('/support/code').then(refresh) }, 'New code'),
-          h('button', { class: 'sm', type: 'button', onclick: () => api('/support/code', { method: 'DELETE' }).then(refresh) }, 'Cancel')))));
+        h('div', { class: 'muted small' }, 'Your code'),
+        h('div', { class: 'code-big' }, prettyCode(c.code)),
+        h('div', { class: 'muted small' }, `For one person · expires in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`),
+        h('p', { class: 'small' }, `They enter it at ${site()}, or open the link:`),
+        h('p', { class: 'small mono', style: { wordBreak: 'break-all' } }, c.link),
+        h('div', { class: 'row' }, copyBtn(c.code, 'Copy code'), copyBtn(c.link, 'Copy link'),
+          h('button', { class: 'sm', type: 'button', onclick: () => api('/support/code', { method: 'DELETE' }).then(refresh) }, 'Stop sharing')))));
   };
-  drawCode();
-  const tick = setInterval(() => { if (!codeCard.isConnected) clearInterval(tick); else if (sup.code) drawCode(); }, 1000);
-
-  return h('section', {}, h('h2', {}, 'Remote support'), lead,
-    supportRequestsCard(), idCard, codeCard,
-    h('div', { class: 'card' },
-      switchRow('Ask before someone connects with a code', 'Show Accept / Decline here first. Turn off only for unattended use: then the code alone lets them in.', st.settings.supportAsk !== false, v => saveSettings({ supportAsk: v })),
-      switchRow('Reachable through the relay', `While ${thisPc()} is in your account, browsers anywhere can reach it at its Headroom ID (each session still needs your account or a code).`, st.settings.relayEnabled !== false, v => saveSettings({ relayEnabled: v }))));
+  draw();
+  const tick = setInterval(() => { if (!card.isConnected) clearInterval(tick); else if (st.support?.code) draw(); }, 1000);
+  return h('section', {}, h('h2', {}, 'Let someone connect'),
+    h('p', { class: 'lead' }, 'For help from someone, or to reach this computer from a browser that isn\'t signed in.'),
+    requestsCard(), card,
+    code ? h('p', { class: 'small muted' }, 'Only give the code to someone you know. Nobody from Headroom will ever ask you for it.') : null);
 }
+
+// ------------------------------------------------------------------ Account
+
+const ACCOUNT_ERRORS = {
+  'bad-credentials': 'Wrong email or password.',
+  'bad-totp': 'That code didn\'t work. Wait for the next one and try again.',
+  'rate-limited': 'Too many attempts. Try again in a minute.',
+};
+
+async function redraw() {
+  try { st = await api('/status'); } catch (e) { renderOffline(e.message); return; }
+  renderNav();
+  render();
+}
+
+function viewAccount() {
+  const a = st.account;
+  const m = h('div', { class: accountNote ? `msg ${accountNote.ok ? 'ok' : 'err'}` : 'msg' }, accountNote?.text || '');
+  if (a) {
+    const name = h('input', { type: 'text', value: st.settings.displayName || '', placeholder: st.host.machine, class: 'grow', maxlength: '64', 'aria-label': `${ThisPc()}'s name` });
+    const saved = h('div', { class: 'msg' });
+    return h('section', {}, h('h2', {}, 'Account'),
+      h('p', { class: 'lead' }, `${ThisPc()} is one of your devices. Sign in at ${site()} or in Headroom Viewer on any device to see it and connect.`),
+      h('div', { class: 'card' }, h('div', { class: 'kv' },
+        h('div', { class: 'k' }, 'Signed in as'), h('div', {}, a.email),
+        h('div', { class: 'k' }, 'Last check-in'), h('div', {}, a.error ? h('span', {}, h('span', { class: 'badge warn' }, 'Problem'), ` ${a.error}`) : ago(a.lastSync))),
+        h('div', { class: 'row', style: { marginTop: '12px' } },
+          h('button', {
+            class: 'danger', type: 'button', onclick: async () => {
+              if (!confirm(`Sign ${thisPc()} out of ${a.email}? It leaves your list of devices. Guest codes keep working.`)) return;
+              await post('/account/leave').catch(() => { });
+              accountNote = null;
+              redraw();
+            },
+          }, 'Sign out')), m),
+      h('div', { class: 'card' }, h('h3', {}, `${ThisPc()}'s name`),
+        h('p', { class: 'small muted' }, 'How it\'s listed in your account and shown to people who connect.'),
+        h('div', { class: 'row' }, name, h('button', {
+          type: 'button', onclick: async () => {
+            await saveSettings({ displayName: name.value });
+            saved.className = 'msg ok'; saved.textContent = 'Saved.';
+          },
+        }, 'Save')), saved));
+  }
+  const email = h('input', { type: 'email', class: 'grow', placeholder: 'Email', autocomplete: 'username', autocapitalize: 'off', spellcheck: 'false', 'aria-label': 'Email' });
+  const pass = h('input', { type: 'password', class: 'grow', placeholder: 'Password', autocomplete: 'current-password', 'aria-label': 'Password' });
+  const totp = h('input', { type: 'text', inputmode: 'numeric', maxlength: '6', placeholder: '123456', autocomplete: 'one-time-code', 'aria-label': 'Authenticator code' });
+  const totpRow = h('div', { class: 'row', hidden: true }, h('span', { class: 'small' }, 'Code from your authenticator app'), totp);
+  const submit = h('button', { class: 'primary', type: 'submit' }, 'Sign in');
+  const form = h('form', {}, h('div', { class: 'row' }, email, pass), totpRow, h('div', { class: 'row' }, submit), m);
+  form.onsubmit = async e => {
+    e.preventDefault();
+    m.className = 'msg'; m.textContent = 'Signing in…';
+    submit.disabled = true;
+    try {
+      const r = await post('/account/join', { email: email.value.trim(), password: pass.value, totp: totp.value.trim() || undefined });
+      accountNote = { ok: true, text: `Signed in as ${r.email}. ${ThisPc()} is now in your account.` };
+      redraw();
+    } catch (ex) {
+      m.className = 'msg err';
+      const b = ex.body || {};
+      if (b.error === 'totp-required') { totpRow.hidden = false; totp.focus(); m.textContent = 'This account uses two-factor sign-in: enter the code from your authenticator app.'; }
+      else m.textContent = ACCOUNT_ERRORS[b.error] || ex.message;
+    } finally { submit.disabled = false; }
+  };
+  const web = path => h('button', { type: 'button', class: 'link-btn', onclick: () => openExternal(`${st.relay.site}/${path}`) });
+  return h('section', {}, h('h2', {}, 'Account'),
+    h('p', { class: 'lead' }, `Sign in with your Headroom account to add ${thisPc()} to it. Then it's in your list on every device where you're signed in — click it to connect, from anywhere.`),
+    h('div', { class: 'card' }, h('h3', {}, 'Sign in'), form,
+      h('p', { class: 'small muted', style: { marginTop: '12px' } },
+        Object.assign(web('#signup'), { textContent: 'Create an account' }), ' · ', Object.assign(web('#forgot'), { textContent: 'Forgot password?' }),
+        ` (opens ${site()})`)),
+    h('p', { class: 'small muted' }, `Your password goes only to Headroom; ${thisPc()} gets its own sign-in, which you can remove from any device (Account → Your devices).`));
+}
+
+// ------------------------------------------------------------------ Settings
 
 /** Mac: the two privacy permissions, with shortcuts to grant them. */
 function permissionsCard() {
@@ -247,251 +342,17 @@ function permissionsCard() {
     h('div', { class: 'main' }, h('div', { class: 't' }, title, ' ', h('span', { class: `badge ${ok ? 'ok' : 'warn'}` }, ok ? 'Allowed' : 'Not allowed')),
       h('div', { class: 's' }, sub)),
     ok ? null : h('button', { class: 'sm', type: 'button', onclick: () => post('/permissions/request', { kind }).then(refresh) }, 'Ask macOS'),
-    ok ? null : h('button', { class: 'sm primary', type: 'button', onclick: () => openSettings(url) }, 'Open System Settings'));
-  return h('div', { class: 'card' }, h('h3', {}, 'Permissions'),
+    ok ? null : h('button', { class: 'sm primary', type: 'button', onclick: () => openExternal(url) }, 'Open System Settings'));
+  return h('div', { class: 'card' }, h('h3', {}, 'macOS permissions'),
     h('div', { class: 'list' },
-      item(p.screenRecording, 'Screen Recording', 'Lets viewers see the screen and hear its sound.', 'screen', p.screenRecordingUrl),
-      item(p.accessibility, 'Accessibility', 'Lets viewers control the mouse and keyboard.', 'accessibility', p.accessibilityUrl)),
+      item(p.screenRecording, 'Screen Recording', 'Lets people who connect see the screen and hear its sound.', 'screen', p.screenRecordingUrl),
+      item(p.accessibility, 'Accessibility', 'Lets people who connect control the mouse and keyboard.', 'accessibility', p.accessibilityUrl)),
     p.screenRecording && p.accessibility ? null : h('p', { class: 'small muted' },
       'Turn on Headroom Server in each list (System Settings → Privacy & Security). macOS applies Screen Recording after Headroom Server restarts.'));
 }
 
-function openSettings(url) {
-  if (native) postNative({ cmd: 'openUrl', url });
-  else location.href = url;
-}
-
-function viewPair() {
-  const card = h('div', { class: 'card' });
-  const draw = () => {
-    card.replaceChildren();
-    if (!pairState || pairState.expires < Date.now()) {
-      pairState = null;
-      card.append(h('h3', {}, 'One-time pairing code'),
-        h('p', { class: 'muted small' }, 'Works once, for 10 minutes. No password needed — handy for your phone.'),
-        h('button', { class: 'primary', type: 'button', onclick: async () => {
-          const r = await post('/paircode');
-          pairState = { code: r.code, expires: Date.now() + r.expiresInSeconds * 1000, urls: r.urls };
-          draw();
-        } }, 'Create pairing code'));
-      return;
-    }
-    const pretty = `${pairState.code.slice(0, 5)}-${pairState.code.slice(5)}`;
-    const link = pairState.urls.find(u => u.startsWith(preferredUrl())) || pairState.urls[0];
-    const left = Math.max(0, Math.round((pairState.expires - Date.now()) / 1000));
-    card.append(h('div', { class: 'pair-grid' }, qrBox(link),
-      h('div', {},
-        h('div', { class: 'muted small' }, 'Scan with the phone\'s camera, or enter this code in Headroom:'),
-        h('div', { class: 'code-big' }, pretty),
-        h('div', { class: 'muted small' }, `Expires in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`),
-        h('p', { class: 'small mono', style: { wordBreak: 'break-all' } }, link),
-        h('div', { class: 'row' }, copyBtn(link), h('button', { class: 'sm', type: 'button', onclick: () => { pairState = null; draw(); } }, 'Cancel')))));
-  };
-  draw();
-  const tick = setInterval(() => { if (!card.isConnected) clearInterval(tick); else if (pairState) draw(); }, 1000);
-
-  const lanIp = st.lanAddresses[0];
-  const trustUrl = lanIp ? `http://${lanIp}:${st.httpPort}/` : null;
-  const trust = h('div', { class: 'card' },
-    h('h3', {}, 'First time on a phone or tablet?'),
-    st.tailscale
-      ? h('p', { class: 'small' }, 'If the device uses Tailscale, nothing to set up — the pairing QR above opens your tailnet address with a real certificate.')
-      : null,
-    trustUrl ? h('div', { class: 'pair-grid' }, qrBox(trustUrl), h('div', {},
-      h('p', { class: 'small' }, `On your home network, the device must trust ${thisPc()}'s certificate once:`),
-      h('ol', { class: 'steps small' },
-        h('li', {}, 'Scan this code (opens ', h('span', { class: 'mono' }, trustUrl), ' in Safari).'),
-        h('li', {}, 'Download the profile, then install it in Settings → General → VPN & Device Management.'),
-        h('li', {}, 'Turn it on in Settings → General → About → Certificate Trust Settings.'),
-        h('li', {}, 'Open the Headroom address in Safari, tap Share → Add to Home Screen, then open Headroom from the Home Screen and enter the pairing code above. (The Home Screen app keeps its own pairing; scanning the QR code pairs Safari instead.)')))) : h('p', { class: 'muted small' }, 'No local network address found.'));
-
-  return h('section', {}, h('h2', {}, 'Pair a device'),
-    h('p', { class: 'lead' }, 'Each phone, tablet or computer pairs once; after that it connects with its own key, which you can revoke any time.'),
-    card, trust,
-    h('div', { class: 'card' }, h('h3', {}, 'Or use the password'),
-      h('p', { class: 'small muted' }, st.hasPassword ? 'Any device can also pair with the password (Security section).' : 'No password is set yet — set one in Security if you want to pair without a code.')));
-}
-
-/** Re-reads the status and redraws now (refresh() leaves the page alone while a field has focus). */
-async function redraw() {
-  try { st = await api('/status'); } catch (e) { renderOffline(e.message); return; }
-  renderNav();
-  render();
-}
-
-const ACCOUNT_ERRORS = {
-  'bad-credentials': 'Wrong username or password.',
-  'bad-totp': 'That code didn\'t work. Wait for the next one and try again.',
-  'rate-limited': 'Too many attempts. Try again in a minute.',
-  'bad-server': 'Enter the account server\'s address.',
-};
-
-function viewAccount() {
-  const a = st.account;
-  if (a) {
-    const m = h('div', { class: accountNote ? `msg ${accountNote.ok ? 'ok' : 'err'}` : 'msg' }, accountNote?.text || '');
-    const devs = a.devices.length ? a.devices.map(d => {
-      const online = st.sessions.some(x => x.deviceId === d.id);
-      return h('div', { class: 'li' }, h('div', { class: 'main' },
-        h('div', { class: 't' }, d.name, online ? h('span', { class: 'badge ok', style: { marginLeft: '8px' } }, 'connected') : null),
-        h('div', { class: 's' }, d.viewOnly ? 'View only' : 'Full control')));
-    }) : [h('div', { class: 'empty' }, 'No devices signed in to the account yet.')];
-    return h('section', {}, h('h2', {}, 'Account'),
-      h('p', { class: 'lead' }, `Every device signed in to this Headroom account can connect to ${thisPc()} — no pairing. Manage them from the Headroom app (tap your account name).`),
-      h('div', { class: 'card' }, h('div', { class: 'kv' },
-        h('div', { class: 'k' }, 'Account'), h('div', {}, a.username),
-        h('div', { class: 'k' }, 'Server'), h('div', { class: 'mono' }, a.server),
-        h('div', { class: 'k' }, 'Last check-in'), h('div', {}, a.error
-          ? h('span', {}, h('span', { class: 'badge warn' }, 'Problem'), ` ${a.error}`)
-          : ago(a.lastSync))),
-        h('div', { class: 'row', style: { marginTop: '12px' } },
-          h('button', { type: 'button', onclick: async () => {
-            m.className = 'msg'; m.textContent = 'Checking in…';
-            const r = await post('/account/sync').catch(() => ({}));
-            accountNote = r.ok ? { ok: true, text: 'Up to date.' } : { ok: false, text: 'Couldn\'t reach the account server.' };
-            redraw();
-          } }, 'Check in now'),
-          h('button', { class: 'danger', type: 'button', onclick: async () => {
-            if (!confirm(`Sign ${thisPc()} out of ${a.username}'s account? It leaves your list of computers (devices paired directly keep working).`)) return;
-            await post('/account/leave').catch(() => { });
-            accountNote = null;
-            redraw();
-          } }, 'Sign out')), m),
-      h('div', { class: 'card' }, h('h3', {}, 'Devices in the account'), h('div', { class: 'list' }, ...devs)));
-  }
-  const err = h('div', { class: 'msg' });
-  const server = h('input', { type: 'text', inputmode: 'url', class: 'grow', placeholder: 'accounts.example.com', autocapitalize: 'off', spellcheck: 'false', 'aria-label': 'Account server' });
-  try { server.value = localStorage.getItem('headroom.admin.accountServer') || DEFAULT_ACCOUNT_SERVER; } catch { server.value = DEFAULT_ACCOUNT_SERVER; }
-  // The usual server is built in: show it as text, with the field one click away.
-  const serverRow = h('div', { class: 'row', hidden: !!server.value }, server);
-  const serverLine = h('p', { class: 'small muted', hidden: !server.value }, 'Account server: ', h('span', { class: 'mono' }, server.value.replace(/^https?:\/\//, '')), ' · ',
-    h('button', { type: 'button', class: 'link-btn', onclick: () => { serverLine.hidden = true; serverRow.hidden = false; server.focus(); } }, 'Change'));
-  const user = h('input', { type: 'text', class: 'grow', placeholder: 'Username', autocomplete: 'username', autocapitalize: 'off', spellcheck: 'false' });
-  const pass = h('input', { type: 'password', class: 'grow', placeholder: 'Password', autocomplete: 'current-password' });
-  const totp = h('input', { type: 'text', inputmode: 'numeric', maxlength: '6', placeholder: '123456', autocomplete: 'one-time-code' });
-  const totpRow = h('div', { class: 'row', hidden: true }, h('span', { class: 'small' }, 'Authenticator code'), totp);
-  const submit = h('button', { class: 'primary', type: 'submit' }, 'Sign in');
-  const form = h('form', {},
-    serverLine, serverRow, h('div', { class: 'row' }, user, pass), totpRow,
-    h('div', { class: 'row' }, submit), err);
-  form.onsubmit = async e => {
-    e.preventDefault();
-    err.className = 'msg'; err.textContent = 'Signing in…';
-    submit.disabled = true;
-    try {
-      const r = await fetch('/api/admin/account/join', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, cache: 'no-store',
-        body: JSON.stringify({ server: server.value, username: user.value.trim(), password: pass.value, totp: totp.value.trim() || undefined }),
-      });
-      const b = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        err.className = 'msg err';
-        if (b.error === 'totp-required') { totpRow.hidden = false; totp.focus(); err.textContent = 'This account uses two-factor sign-in: enter the code from your authenticator app.'; }
-        else err.textContent = ACCOUNT_ERRORS[b.error] || b.message || b.error || `HTTP ${r.status}`;
-        return;
-      }
-      try { localStorage.setItem('headroom.admin.accountServer', server.value); } catch { }
-      accountNote = { ok: true, text: `Signed in as ${b.username}. ${thisPc()[0].toUpperCase() + thisPc().slice(1)} is now in your account.` };
-      redraw();
-    } catch (ex) { err.className = 'msg err'; err.textContent = ex.message; } finally { submit.disabled = false; }
-  };
-  return h('section', {}, h('h2', {}, 'Account'),
-    h('p', { class: 'lead' }, `Sign in with your Headroom account to add ${thisPc()} to it. Then it's in the list on every phone, tablet, browser and computer where you're signed in — click it to connect, from anywhere.`),
-    h('div', { class: 'card' }, h('h3', {}, 'Sign in to your account'),
-      h('p', { class: 'small muted' }, `Your password goes only to your account server; ${thisPc()} gets its own sign-in there, which you can remove from any device.`
-        + (DEFAULT_ACCOUNT_SERVER ? '' : ' Don\'t have an account server? Run one with account-server/ (one small Node.js process or a Docker container), or keep pairing devices directly.')),
-      form),
-    h('div', { class: 'card' }, h('h3', {}, 'How it works'),
-      h('ul', { class: 'steps small' },
-        h('li', {}, `${thisPc()[0].toUpperCase() + thisPc().slice(1)} checks in with the account server every 20 seconds with its addresses and its certificate's fingerprint.`),
-        h('li', {}, 'Signed-in devices get the list, plus a key for each computer that only that device can use.'),
-        h('li', {}, 'Video, input and files still go directly between your devices — never through the account server.'),
-        h('li', {}, 'Removing a device from the account cuts it off from every computer within seconds.'))));
-}
-
-function viewDevices() {
-  const rows = st.devices.length ? st.devices.map(d => {
-    const online = st.sessions.some(s => s.deviceId === d.id);
-    return h('div', { class: 'li' },
-      h('div', { class: 'main' }, h('div', { class: 't' }, d.name, online ? h('span', { class: 'badge ok', style: { marginLeft: '8px' } }, 'connected') : null),
-        h('div', { class: 's' }, `Last seen ${ago(d.lastSeen)}${d.lastAddress ? ' from ' + d.lastAddress : ''} · paired ${new Date(d.created).toLocaleDateString()}`)),
-      h('label', { class: 'small muted', style: { display: 'flex', alignItems: 'center', gap: '8px' } }, 'View only',
-        toggle(d.viewOnly, v => post(`/devices/${d.id}/viewonly`, { viewOnly: v }).then(refresh))),
-      h('button', { class: 'sm danger', type: 'button', onclick: async () => {
-        if (!confirm(`Revoke ${d.name}? It will be disconnected and must pair again.`)) return;
-        await api(`/devices/${d.id}`, { method: 'DELETE' });
-        refresh();
-      } }, 'Revoke'));
-  }) : [h('div', { class: 'empty' }, 'No devices yet. Pair one from “Pair a device”.')];
-  const acct = st.account;
-  return h('section', {}, h('h2', {}, 'Devices'),
-    h('p', { class: 'lead' }, `Everything that can connect to ${thisPc()}. View-only devices can watch but not control.`),
-    h('div', { class: 'card' }, acct ? h('h3', {}, 'Paired directly') : null, h('div', { class: 'list' }, ...rows)),
-    acct ? h('div', { class: 'card' }, h('h3', {}, `Through ${acct.username}'s account`),
-      h('p', { class: 'small muted' }, 'Managed from the Headroom app (tap the account name) — removing one there disconnects it here within seconds.'),
-      h('div', { class: 'list' }, ...(acct.devices.length ? acct.devices.map(d => h('div', { class: 'li' }, h('div', { class: 'main' },
-        h('div', { class: 't' }, d.name, st.sessions.some(x => x.deviceId === d.id) ? h('span', { class: 'badge ok', style: { marginLeft: '8px' } }, 'connected') : null),
-        h('div', { class: 's' }, d.viewOnly ? 'View only' : 'Full control')))) : [h('div', { class: 'empty' }, 'None yet.')]))) : null);
-}
-
-function viewSecurity() {
-  const msg = h('div', { class: 'msg' });
-  const p1 = h('input', { type: 'password', class: 'grow', placeholder: 'New password (8+ characters)', autocomplete: 'new-password' });
-  const p2 = h('input', { type: 'password', class: 'grow', placeholder: 'Repeat', autocomplete: 'new-password' });
-  const pwForm = h('form', {}, h('div', { class: 'row' }, p1, p2, h('button', { class: 'primary', type: 'submit' }, 'Save')), msg);
-  pwForm.onsubmit = async e => {
-    e.preventDefault();
-    if (p1.value !== p2.value) { msg.className = 'msg err'; msg.textContent = 'Passwords don\'t match.'; return; }
-    try { await post('/password', { password: p1.value }); msg.className = 'msg ok'; msg.textContent = 'Password saved.'; p1.value = p2.value = ''; refresh(); }
-    catch (ex) { msg.className = 'msg err'; msg.textContent = ex.message; }
-  };
-
-  const totpCard = h('div', { class: 'card' });
-  const drawTotp = () => {
-    totpCard.replaceChildren(h('h3', {}, 'Two-factor pairing'));
-    if (st.totpEnabled) {
-      totpCard.append(h('p', { class: 'small' }, h('span', { class: 'badge ok' }, 'On'), ' Pairing with the password also needs a 6-digit code from your authenticator app.'),
-        h('button', { class: 'danger', type: 'button', onclick: () => post('/totp/disable').then(refresh) }, 'Turn off'));
-      return;
-    }
-    if (!totpSetup) {
-      totpCard.append(h('p', { class: 'small muted' }, 'Require a code from an authenticator app (Google Authenticator, 1Password, Authy…) when pairing with the password. Pairing codes and already-paired devices are unaffected.'),
-        h('button', { type: 'button', onclick: async () => { totpSetup = await post('/totp/setup'); drawTotp(); } }, 'Set up'));
-      return;
-    }
-    const code = h('input', { type: 'text', inputmode: 'numeric', maxlength: '6', placeholder: '123456', style: { maxWidth: '140px' } });
-    const m = h('div', { class: 'msg' });
-    totpCard.append(h('div', { class: 'pair-grid' }, qrBox(totpSetup.uri), h('div', {},
-      h('p', { class: 'small' }, 'Scan with your authenticator app, then enter the code it shows.'),
-      h('p', { class: 'small mono' }, totpSetup.secret.replace(/(.{4})/g, '$1 ').trim()),
-      h('div', { class: 'row' }, code, h('button', { class: 'primary', type: 'button', onclick: async () => {
-        try { await post('/totp/enable', { code: code.value }); totpSetup = null; refresh(); }
-        catch (ex) { m.className = 'msg err'; m.textContent = ex.message; }
-      } }, 'Verify & turn on'), h('button', { type: 'button', onclick: () => { totpSetup = null; drawTotp(); } }, 'Cancel')), m)));
-  };
-  drawTotp();
-
-  return h('section', {}, h('h2', {}, 'Security'),
-    h('p', { class: 'lead' }, 'The password is only used to pair new devices. Changing it doesn\'t sign out paired devices.'),
-    h('div', { class: 'card' }, h('h3', {}, st.hasPassword ? 'Change password' : 'Set a password'), pwForm),
-    totpCard,
-    h('div', { class: 'card' },
-      switchRow(`Lock ${thisPc()} when the last viewer disconnects`, 'So nobody walks up to an unlocked screen after a remote session.', st.settings.lockOnDisconnect, v => saveSettings({ lockOnDisconnect: v })),
-      switchRow('Notify when someone connects', 'Shows a notification on this computer whenever a viewer connects.', st.settings.notifyOnConnect !== false, v => saveSettings({ notifyOnConnect: v }))));
-}
-
-function viewFeatures() {
-  const p = st.settings.permissions;
-  return h('section', {}, h('h2', {}, 'Features'), h('p', { class: 'lead' }, 'What connected devices are allowed to do.'),
-    h('div', { class: 'card' },
-      switchRow('Remote control', 'Off = every device is view-only (watch, no mouse or keyboard).', p.input, v => saveSettings({ input: v })),
-      switchRow('Clipboard sync', 'Copy on one side, paste on the other (text).', p.clipboard, v => saveSettings({ clipboard: v })),
-      switchRow('File transfer', `Browse, download and upload files on ${thisPc()}.`, p.fileTransfer, v => saveSettings({ fileTransfer: v })),
-      switchRow('Sound', `Stream ${thisPc()}'s audio to the viewer.`, st.settings.audio.enabled, v => saveSettings({ audio: v }))));
-}
-
-function viewQuality() {
-  const v = st.settings.video;
+function viewSettings() {
+  const v = st.settings.video, p = st.settings.permissions;
   const sel = (value, options, onChange) => {
     const s = h('select', { class: 'inline' }, ...options.map(([val, label]) => h('option', { value: String(val) }, label)));
     s.value = String(value);
@@ -499,61 +360,45 @@ function viewQuality() {
     return s;
   };
   const row = (title, sub, control) => h('div', { class: 'switch-row' }, h('div', { class: 'main' }, h('div', { class: 't' }, title), h('div', { class: 's' }, sub)), control);
-  return h('section', {}, h('h2', {}, 'Quality'), h('p', { class: 'lead' }, 'Upper limits. Each viewer adapts below these automatically based on its connection.'),
-    h('div', { class: 'card' },
+  const openBtn = (label, path) => native ? h('button', { class: 'sm', type: 'button', onclick: () => postNative({ cmd: 'openFolder', path }) }, label) : null;
+  return h('section', {}, h('h2', {}, 'Settings'),
+    h('div', { class: 'card' }, h('h3', {}, 'General'),
+      loginItem !== null ? switchRow('Start at login', `Keeps ${thisPc()} reachable after a restart.`, loginItem, x => { loginItem = x; postNative({ cmd: 'loginItem', enabled: x }); }) : null,
+      switchRow('Notify when someone connects', `A notification on ${thisPc()} each time a session starts or ends.`, st.settings.notifyOnConnect !== false, x => saveSettings({ notifyOnConnect: x })),
+      mac() ? switchRow('Lock this Mac when the last person disconnects', 'So nobody walks up to an unlocked screen afterwards.', st.settings.lockOnDisconnect, x => saveSettings({ lockOnDisconnect: x })) : null),
+    h('div', { class: 'card' }, h('h3', {}, 'Your devices may'),
+      h('p', { class: 'small muted' }, 'For devices signed in to your account. Guests get what you allow when you accept them.'),
+      switchRow('Control', 'Off = they can watch but not use the mouse or keyboard.', p.input, x => saveSettings({ input: x })),
+      switchRow('Clipboard', 'Copy on one side, paste on the other (text).', p.clipboard, x => saveSettings({ clipboard: x })),
+      switchRow('Files', `Browse, download and upload files on ${thisPc()}.`, p.fileTransfer, x => saveSettings({ fileTransfer: x })),
+      switchRow('Sound', `Hear ${thisPc()}'s audio.`, st.settings.audio.enabled, x => saveSettings({ audio: x }))),
+    h('div', { class: 'card' }, h('h3', {}, 'Quality'),
+      h('p', { class: 'small muted' }, 'Upper limits. Each session adapts below these to its connection.'),
       row('Encoder', mac() ? 'Hardware uses the Mac\'s built-in video encoder (fastest). Software works everywhere.' : 'Hardware uses your graphics card (fastest). Software works everywhere.', sel(v.encoder, [['auto', 'Automatic'], ['hardware', 'Hardware only'], ['software', 'Software']], x => saveSettings({ encoder: x }))),
       row('Maximum frame rate', 'Higher is smoother but uses more bandwidth.', sel(v.maxFps, [[30, '30 fps'], [60, '60 fps'], [120, '120 fps'], [144, '144 fps'], [240, '240 fps']], x => saveSettings({ maxFps: +x }))),
-      row('Maximum bitrate', 'Caps bandwidth per viewer.', sel(v.maxBitrateKbps, [[10000, '10 Mb/s'], [20000, '20 Mb/s'], [40000, '40 Mb/s'], [80000, '80 Mb/s'], [150000, '150 Mb/s']], x => saveSettings({ maxBitrateKbps: +x })))));
-}
-
-function viewConnection() {
-  const thumb = st.caThumbprint.replace(/(.{4})/g, '$1 ').trim();
-  return h('section', {}, h('h2', {}, 'Connection'), h('p', { class: 'lead' }, `How devices reach ${thisPc()}.`),
-    h('div', { class: 'card' }, h('h3', {}, 'Tailscale'),
-      st.tailscale
-        ? h('p', { class: 'small' }, h('span', { class: 'badge ok' }, 'Ready'), ' ', h('span', { class: 'mono' }, `https://${st.tailscale}:${st.port}/`), ' works from anywhere your devices are signed into Tailscale.')
-        : h('p', { class: 'small muted' }, `Not detected. For access away from home with no port forwarding: install Tailscale on ${thisPc()} and your devices, then enable MagicDNS and HTTPS Certificates in the Tailscale admin console. Headroom picks it up automatically within a few minutes.`)),
-    h('div', { class: 'card' }, h('h3', {}, mac() ? 'This Mac\'s certificate' : 'This PC\'s certificate'),
-      h('div', { class: 'kv' },
-        h('div', { class: 'k' }, 'HTTPS port'), h('div', { class: 'mono' }, String(st.port)),
-        h('div', { class: 'k' }, 'Setup page (HTTP)'), h('div', { class: 'mono' }, st.lanAddresses.map(a => `http://${a}:${st.httpPort}/`).join('  ') || '—'),
-        h('div', { class: 'k' }, 'Server key fingerprint'), h('div', { class: 'mono' }, st.serverKeyFingerprint || '—'),
-        h('div', { class: 'k' }, 'CA fingerprint (iPhone/Mac)'), h('div', { class: 'mono' }, thumb)),
-      h('p', { class: 'small muted', style: { marginTop: '10px' } }, `Headroom Viewer (Windows and Mac) asks you to confirm the server key fingerprint the first time it connects. Browsers on iPhones and Macs trust ${thisPc()} by installing its certificate (CA) instead.`),
-      h('div', { class: 'row', style: { marginTop: '12px' } },
-        h('a', { href: '/headroom-ca.crt', download: 'headroom-ca.crt' }, 'Download certificate'),
-        h('a', { href: '/headroom-ca.mobileconfig' }, 'iPhone/iPad profile'))),
-    h('div', { class: 'card' }, h('h3', {}, 'Firewall'),
-      h('p', { class: 'small muted' }, mac()
-        ? 'If the macOS firewall is on (System Settings → Network → Firewall), allow incoming connections for Headroom Server when macOS asks. Headroom never forwards ports on your router: from outside your network, use Tailscale.'
-        : 'Service mode adds a Windows Firewall rule for private and domain networks. On public Wi-Fi, Headroom stays unreachable unless you use Tailscale.')));
-}
-
-function viewAbout() {
-  const name = h('input', { type: 'text', value: st.settings.displayName || '', placeholder: st.host.machine, class: 'grow' });
-  const m = h('div', { class: 'msg' });
-  const openBtn = (label, path) => native ? h('button', { class: 'sm', type: 'button', onclick: () => postNative({ cmd: 'openFolder', path }) }, label) : null;
-  return h('section', {}, h('h2', {}, 'About'),
-    h('div', { class: 'card' }, h('h3', {}, 'Name shown to viewers'),
-      h('div', { class: 'row' }, name, h('button', { type: 'button', onclick: async () => { await saveSettings({ displayName: name.value }); m.className = 'msg ok'; m.textContent = 'Saved.'; } }, 'Save')), m),
-    h('div', { class: 'card' }, h('div', { class: 'kv' },
+      row('Maximum bitrate', 'Caps bandwidth per session.', sel(v.maxBitrateKbps, [[10000, '10 Mb/s'], [20000, '20 Mb/s'], [40000, '40 Mb/s'], [80000, '80 Mb/s'], [150000, '150 Mb/s']], x => saveSettings({ maxBitrateKbps: +x })))),
+    mac() ? permissionsCard() : null,
+    h('div', { class: 'card' }, h('h3', {}, 'About'), h('div', { class: 'kv' },
       h('div', { class: 'k' }, 'Version'), h('div', {}, st.host.version),
-      h('div', { class: 'k' }, 'Mode'), h('div', {}, mac() ? 'Menu bar app (runs while you\'re logged in)' : st.elevated ? 'Service (SYSTEM)' : 'User'),
-      h('div', { class: 'k' }, 'Host ID'), h('div', { class: 'mono' }, st.host.id),
       h('div', { class: 'k' }, 'Data folder'), h('div', { class: 'row' }, h('span', { class: 'mono' }, st.dataDir), openBtn('Open', st.dataDir)),
       h('div', { class: 'k' }, 'Logs'), h('div', { class: 'row' }, h('span', { class: 'mono' }, st.logDir), openBtn('Open', st.logDir)))));
 }
 
 // ------------------------------------------------------------------ boot
 function go(id) {
+  id = OLD_SECTIONS[id] || id;
   if (!SECTIONS.some(([s]) => s === id)) return;
   current = id;
   history.replaceState(null, '', `#${id}`);
   if (st) { renderNav(); render(); }
 }
-const fromHash = location.hash.slice(1);
+const fromHash = OLD_SECTIONS[location.hash.slice(1)] || location.hash.slice(1);
 if (SECTIONS.some(([id]) => id === fromHash)) current = fromHash;
 window.addEventListener('hashchange', () => go(location.hash.slice(1)));
-native?.on(m => { if (m?.cmd === 'navigate') go(m.section); });
+native?.on(m => {
+  if (m?.cmd === 'navigate') go(m.section);
+  if (m?.cmd === 'loginItem') { loginItem = !!m.enabled; if (st && current === 'settings') render(); }
+});
+postNative({ cmd: 'getLoginItem' });
 refresh();
-pollTimer = setInterval(() => { if (current === 'status' || current === 'devices' || current === 'support' || (current === 'account' && st?.account)) refresh(); else api('/status').then(s => { st = s; renderNav(); postNative({ cmd: 'status', viewers: st.sessions.length, names: st.sessions.map(x => x.device) }); }).catch(() => renderOffline('not reachable')); }, 2000);
+setInterval(refresh, 2000);

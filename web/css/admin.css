@@ -91,3 +91,11 @@ a { color: var(--accent); }
   .content { padding: 18px 16px 32px; }
   .pair-grid { grid-template-columns: 1fr; }
 }
+
+/* guest requests and sessions */
+label.check { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; cursor: pointer; }
+label.check input { width: 16px; height: 16px; margin: 0; }
+.row.checks { margin-top: 8px; gap: 14px; align-items: center; }
+.warn-line { color: var(--warn); display: flex; align-items: center; gap: 4px; margin-top: 4px; }
+.warn-line svg { width: 14px; height: 14px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; }
+.list .li.request { align-items: flex-start; }
