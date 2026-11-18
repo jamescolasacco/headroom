@@ -316,6 +316,22 @@ function humanCheck() {
 const PASSWORD_HINT = 'At least 12 characters. A few random words make a strong, easy one; spaces are fine.';
 
 /**
+ * The second box of a new password ("Confirm password"), so a typo can't lock you out. `check()` says what's
+ * wrong beside it and returns false when it doesn't match `pass` exactly.
+ */
+function confirmField(pass, label = 'Confirm password') {
+  const again = h('input', { type: 'password', name: 'confirm-password', autocomplete: 'new-password' });
+  const f = field(label, again);
+  f.check = () => {
+    if (again.value === pass.value) return true;
+    f.error(again.value ? 'The passwords don\'t match. Type the same password in both boxes.' : 'Type the password again to confirm it.');
+    again.focus();
+    return false;
+  };
+  return f;
+}
+
+/**
  * The signed-out card: sign in, create an account (email, password, then the emailed code), or reset a
  * forgotten password (emailed code). One card that changes step; focus follows the step.
  */
@@ -379,13 +395,13 @@ function signUpStep(show, { email = '' } = {}) {
   const err = formError();
   const emailIn = h('input', { type: 'email', name: 'email', autocomplete: 'email', autocapitalize: 'off', spellcheck: 'false', value: email });
   const pass = h('input', { type: 'password', name: 'new-password', autocomplete: 'new-password' });
-  const emailF = field('Email', emailIn), passF = field('Password', pass, { hint: PASSWORD_HINT });
+  const emailF = field('Email', emailIn), passF = field('Password', pass, { hint: PASSWORD_HINT }), againF = confirmField(pass);
   const check = humanCheck();
   const submit = h('button', { type: 'submit', class: 'primary wide' }, 'Create account');
   const form = h('form', { novalidate: true },
     h('h2', {}, 'Create your account'),
     h('p', { class: 'muted small' }, 'Free. Then sign in with this email in Headroom Server on each of your computers.'),
-    ...emailF.nodes, ...passF.nodes, check.el, err, submit,
+    ...emailF.nodes, ...passF.nodes, ...againF.nodes, check.el, err, submit,
     h('div', { class: 'row-center links' }, h('button', { type: 'button', class: 'link', onclick: () => show(signInStep, { email: emailIn.value.trim() }) }, 'I have an account')));
   form.addEventListener('submit', async e => {
     e.preventDefault();
@@ -393,6 +409,7 @@ function signUpStep(show, { email = '' } = {}) {
     const em = emailIn.value.trim();
     if (!em) { emailF.error('Enter your email.'); emailIn.focus(); return; }
     if (!pass.value) { passF.error('Choose a password.'); pass.focus(); return; }
+    if (!againF.check()) return;
     const restore = busy(submit, 'Sending code…');
     if (!restore) return;
     try {
@@ -433,10 +450,17 @@ function forgotStep(show, { email = '' } = {}) {
     try {
       await Account.forgotPassword(server, { email: em, turnstile: await check.token() });
       const pass = h('input', { type: 'password', name: 'new-password', autocomplete: 'new-password' });
-      const passF = field('New password', pass, { hint: PASSWORD_HINT });
+      const passF = field('New password', pass, { hint: PASSWORD_HINT }), againF = confirmField(pass, 'Confirm new password');
       show(codeStep, {
         email: em, kind: 'reset', title: 'Check your email', what: 'if this email has an account', button: 'Set new password',
-        extra: passF,
+        extra: {
+          nodes: [...passF.nodes, ...againF.nodes],
+          check: () => {
+            if (!pass.value) { passF.error('Choose a new password.'); pass.focus(); return false; }
+            return againF.check();
+          },
+          weak: ex => { passF.error(errorText(ex)); pass.focus(); },
+        },
         run: async code => {
           await Account.resetPassword(server, { email: em, code, password: pass.value });
           await Account.signIn(server, { email: em, password: pass.value, deviceName: deviceLabel(), platform: platformId() })
@@ -495,13 +519,13 @@ function codeStep(show, { email, kind, title, what, button, extra, run, back }) 
     err.textContent = '';
     const c = code.value.replace(/\D/g, '');
     if (c.length !== 6) { codeF.error('Enter the 6-digit code from the email.'); code.focus(); return; }
-    if (extra && !extra.input.value) { extra.error('Choose a new password.'); extra.input.focus(); return; }
+    if (extra && !extra.check()) return;
     const restore = busy(submit, 'Checking…');
     if (!restore) return;
     try { await run(c); clearInterval(timer); } catch (ex) {
       const b = ex.body || {};
       if (b.error === 'bad-code') { codeF.error(errorText(ex)); code.focus(); }
-      else if (b.error === 'weak-password' && extra) { extra.error(errorText(ex)); extra.input.focus(); }
+      else if (b.error === 'weak-password' && extra) extra.weak(ex);
       else err.textContent = errorText(ex);
     } finally { restore(); }
   });
@@ -596,30 +620,34 @@ function accountPage() {
         ...row('email', 'Email', a.email),
         ...row('delete', 'Delete account', '', { danger: true }));
     }
-    const taskStatus = () => h('p', { class: 'task-status', role: 'status' });
+    // A task's result stays in its panel when the panels redraw (the lists reload after a change).
+    const results = {};
+    const taskStatus = id => h('p', { class: 'task-status', role: 'status' }, results[id] || '');
 
     function panelPassword() {
       const cur = h('input', { type: 'password', name: 'current-password', autocomplete: 'current-password' });
       const nw = h('input', { type: 'password', name: 'new-password', autocomplete: 'new-password' });
       const curF = field('Current password', cur), nwF = field('New password', nw, { hint: PASSWORD_HINT });
-      const err = formError(), status = taskStatus();
+      const againF = confirmField(nw, 'Confirm new password');
+      const err = formError(), status = taskStatus('password');
       const submit = h('button', { type: 'submit', class: 'primary' }, 'Change password');
       const form = h('form', { novalidate: true },
         a.passwordWeak ? h('p', { class: 'small stop-text' }, 'Your password doesn\'t meet the current rules (not a common or breached password).') : null,
-        ...curF.nodes, ...nwF.nodes, err, h('div', { class: 'actions' }, submit), status);
+        ...curF.nodes, ...nwF.nodes, ...againF.nodes, err, h('div', { class: 'actions' }, submit), status);
       form.onsubmit = async e => {
         e.preventDefault();
-        err.textContent = ''; status.textContent = '';
+        err.textContent = ''; status.textContent = results.password = '';
         if (!cur.value) { curF.error('Enter your current password.'); cur.focus(); return; }
         if (!nw.value) { nwF.error('Choose a new password.'); nw.focus(); return; }
+        if (!againF.check()) return;
         const restore = busy(submit, 'Changing…');
         if (!restore) return;
         try {
           const r = await Account.changePassword(a, cur.value, nw.value);
-          cur.value = nw.value = '';
+          cur.value = nw.value = againF.input.value = '';
           Account.updateAccount({ passwordWeak: false });
           a.passwordWeak = false;
-          status.textContent = r.signedOut ? plural(r.signedOut, 'Password changed. Signed out 1 other browser.', `Password changed. Signed out ${r.signedOut} other browsers.`) : 'Password changed.';
+          status.textContent = results.password = r.signedOut ? plural(r.signedOut, 'Password changed. Signed out 1 other browser.', `Password changed. Signed out ${r.signedOut} other browsers.`) : 'Password changed.';
           load();
         } catch (ex) {
           const b = ex.body || {};

@@ -1220,6 +1220,13 @@ function ask(prompt, hidden) {
   return new Promise(resolve => rl.question(prompt, a => { rl.close(); if (hidden && process.stdin.isTTY) process.stdout.write('\n'); resolve(a); }));
 }
 
+/** A new password: typed twice at a terminal, so a typo can't lock anyone out (null when they differ); piped in once. */
+async function askNewPassword(prompt) {
+  const pw = await ask(prompt, true);
+  if (!process.stdin.isTTY) return pw;
+  return await ask('Type it again: ', true) === pw ? pw : null;
+}
+
 /** The pid of a server running on this data directory, if any (it keeps the database in memory). */
 function runningServer() {
   try {
@@ -1249,7 +1256,8 @@ async function cli(cmd, args) {
     case 'add-user': {
       if (!validEmail(email)) { console.log('usage: add-user <email>'); return 1; }
       if (account) { console.log('That email already has an account.'); return 1; }
-      const pw = await ask(`Password (${MIN_PASSWORD}+ characters): `, true);
+      const pw = await askNewPassword(`Password (${MIN_PASSWORD}+ characters): `);
+      if (pw === null) { console.log('The passwords don\'t match. Nothing changed.'); return 1; }
       const problem = await passwordProblem(pw, email.split('@')[0]);
       if (problem) { console.log(problem); return 1; }
       store.data.accounts.push({ id: randomId(), email, password: await hashPassword(pw), created: new Date().toISOString(), totpEnabled: false });
@@ -1266,7 +1274,8 @@ async function cli(cmd, args) {
       }
       return 0;
     case 'reset-password': {
-      const pw = await ask(`New password (${MIN_PASSWORD}+ characters): `, true);
+      const pw = await askNewPassword(`New password (${MIN_PASSWORD}+ characters): `);
+      if (pw === null) { console.log('The passwords don\'t match. Nothing changed.'); return 1; }
       const problem = await passwordProblem(pw, email.split('@')[0]);
       if (problem) { console.log(problem); return 1; }
       account.password = await hashPassword(pw);
