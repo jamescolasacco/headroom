@@ -45,7 +45,7 @@ public sealed class SupportPrompt : Form
                                  (from.Count > 0 ? $". From {string.Join(" · ", from)}." : "."), new Padding(0, 0, 0, 10)));
         layout.Controls.Add(Line("Only accept if you know this person and asked for their help. Scammers call pretending to be support and ask for codes.",
             new Padding(0, 0, 0, 10), new Font("Segoe UI Semibold", 10f), Color.FromArgb(196, 92, 0)));
-        layout.Controls.Add(Line("Accept lets them see and control your screen. Stop any time from the bar at the top of the screen.", new Padding(0, 0, 0, 10)));
+        layout.Controls.Add(Line("Accept lets them see and control your screen; View only lets them watch. Stop any time from the bar at the top of the screen. No answer in 2 minutes declines.", new Padding(0, 0, 0, 10)));
         var files = new CheckBox { Text = "Let them transfer files", AutoSize = true, Checked = false, Margin = new Padding(0, 0, 0, 4) };
         var clipboard = new CheckBox { Text = "Share clipboard", AutoSize = true, Checked = false, Margin = new Padding(0, 0, 0, 14) };
         layout.Controls.Add(files);
@@ -64,11 +64,12 @@ public sealed class SupportPrompt : Form
             };
             return b;
         }
-        // Right to left: Decline | View only | Accept on screen.
-        buttons.Controls.Add(Make("Accept", true, false));
-        buttons.Controls.Add(Make("View only", true, true));
+        // Right to left, so on screen it reads Accept | View only | Decline: the same order as the Mac prompt and
+        // the Server window, with the safe answer last.
         var decline = Make("Decline", false, false);
         buttons.Controls.Add(decline);
+        buttons.Controls.Add(Make("View only", true, true));
+        buttons.Controls.Add(Make("Accept", true, false));
         layout.Controls.Add(buttons);
         Controls.Add(layout);
         // Esc declines; Enter never accepts by accident (no default button, and the focus starts on Decline).

@@ -7,6 +7,7 @@ final class StopBar {
     private var panel: NSPanel?
     private let label = NSTextField(labelWithString: "")
     private let dot = NSView()
+    private var stopButton: NSButton?
     private var onStop: () -> Void = {}
     private var onOpen: () -> Void = {}
 
@@ -22,6 +23,7 @@ final class StopBar {
         let who = first.guest ? "“\(first.device)” (guest)" : first.device
         label.stringValue = viewers.count == 1 ? "\(who) is connected to \(host)" : "\(who) and \(viewers.count - 1) other\(viewers.count > 2 ? "s" : "") are connected"
         let p = panel ?? make()
+        stopButton?.title = viewers.count == 1 ? "Stop" : "Stop all" // says what it ends
         layout(p)
         if !p.isVisible {
             if let screen = NSScreen.main {
@@ -53,7 +55,8 @@ final class StopBar {
         p.contentView = bg
 
         dot.wantsLayer = true
-        dot.layer?.backgroundColor = NSColor.systemRed.cgColor
+        // The on-air lamp (the same amber as the Server window and the website): someone is connected.
+        dot.layer?.backgroundColor = NSColor(srgbRed: 0.949, green: 0.663, blue: 0.231, alpha: 1).cgColor
         dot.layer?.cornerRadius = 5
         label.font = .systemFont(ofSize: 13, weight: .medium)
         label.lineBreakMode = .byTruncatingTail
@@ -65,6 +68,7 @@ final class StopBar {
         stop.controlSize = .small
         stop.hasDestructiveAction = true
         stop.keyEquivalent = ""
+        stopButton = stop
         for v in [dot, label, open, stop] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             bg.addSubview(v)

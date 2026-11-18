@@ -141,7 +141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             a.informativeText = "They entered your code. The name is what they typed — it isn't verified"
                 + (from.isEmpty ? "." : ". From \(from.joined(separator: " · ")).")
                 + "\n\nOnly accept if you know this person and asked for their help. Scammers call pretending to be support and ask for codes."
-                + "\n\nAccept lets them see and control your screen. Stop any time from the bar at the top of the screen."
+                + "\n\nAccept lets them see and control your screen; View Only lets them watch. Stop any time from the bar at the top of the screen. No answer in 2 minutes declines."
             a.alertStyle = .warning
             let files = NSButton(checkboxWithTitle: "Let them transfer files", target: nil, action: nil)
             let clip = NSButton(checkboxWithTitle: "Share clipboard", target: nil, action: nil)

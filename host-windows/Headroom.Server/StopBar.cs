@@ -15,6 +15,7 @@ public sealed class StopBar : Form
     private const int WS_EX_NOACTIVATE = 0x08000000;
 
     private readonly Label _label;
+    private Button? _stop;
     private Action _onStop = () => { };
     private Action _onOpen = () => { };
     private bool _dragging;
@@ -60,6 +61,7 @@ public sealed class StopBar : Form
         };
         var details = MakeButton("Details", Color.FromArgb(60, 63, 72), () => _onOpen());
         var stop = MakeButton("Stop", Color.FromArgb(196, 43, 28), () => _onStop());
+        _stop = stop;
         details.Margin = new Padding(0, 0, 6, 0);
         row.Controls.Add(dot, 0, 0);
         row.Controls.Add(_label, 1, 0);
@@ -87,6 +89,8 @@ public sealed class StopBar : Form
             ? $"{who} is connected to {host}"
             : $"{who} and {viewers.Count - 1} other{(viewers.Count > 2 ? "s" : "")} are connected";
         if (_label.Text != text) _label.Text = text;
+        var stopText = viewers.Count == 1 ? "Stop" : "Stop all"; // says what it ends
+        if (_stop != null && _stop.Text != stopText) _stop.Text = stopText;
         PerformLayout();
         if (!Visible)
         {
@@ -167,7 +171,7 @@ public sealed class StopBar : Form
     [DllImport("dwmapi.dll")]
     private static extern int DwmSetWindowAttribute(nint hwnd, int attr, ref int value, int size);
 
-    /// <summary>The red "live" dot.</summary>
+    /// <summary>The amber on-air lamp (the same as the Server window and the website): someone is connected.</summary>
     private sealed class Dot : Control
     {
         public Dot()
@@ -180,7 +184,7 @@ public sealed class StopBar : Form
         protected override void OnPaint(PaintEventArgs e)
         {
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            using var brush = new SolidBrush(Color.FromArgb(235, 64, 52));
+            using var brush = new SolidBrush(Color.FromArgb(242, 169, 59));
             int d = Math.Min(Width, Height) - 1;
             e.Graphics.FillEllipse(brush, (Width - d) / 2f, (Height - d) / 2f, d, d);
         }
