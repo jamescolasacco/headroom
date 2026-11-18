@@ -371,7 +371,13 @@ button.host-main:not(:disabled):not([aria-disabled="true"]):active { transform: 
 
 @media (max-width: 400px) {
   input.code-input { font-size: 22px; letter-spacing: .08em; }
-  .code-row button { padding: 0 16px; }
+  .hero-line { font-size: 32px; }
+}
+/* small phones: nine digits need the whole width, so Connect goes under the code (and the name) */
+@media (max-width: 420px) {
+  .code-row { flex-wrap: wrap; }
+  .code-row > input { flex-basis: 100%; }
+  .code-row button { flex: 1 1 100%; }
 }
 @media (max-width: 860px) {
   .welcome { grid-template-columns: minmax(0, 1fr); gap: var(--s6); }
