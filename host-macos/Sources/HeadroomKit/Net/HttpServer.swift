@@ -23,6 +23,10 @@ public struct HttpRequest {
     public let isRelayed: Bool
     /// Host header without the port.
     public let hostName: String
+    /// Came with a guest code (the relay's /c/<code>/): only the host's name and the session are available.
+    public var isGuest = false
+    /// The viewer's country, as the relay saw it.
+    public var country: String? = nil
 
     public var isLoopback: Bool { !isRelayed && NetInterfaces.isLoopback(remoteIP) }
 
@@ -90,7 +94,7 @@ public protocol HttpApp: AnyObject {
     func decorate(_ req: HttpRequest, _ resp: inout HttpResponse)
     func shouldUpgradeWebSocket(path: String, remoteIP: String?, isTLS: Bool, relayed: Bool) -> Bool
     /// Builds the handler for an upgraded WebSocket channel.
-    func webSocketHandler(remoteIP: String?, isTLS: Bool, relayed: Bool) -> ChannelHandler
+    func webSocketHandler(remoteIP: String?, isTLS: Bool, relayed: Bool, guest: Bool, country: String?) -> ChannelHandler
 }
 
 public enum HttpStreamDecision {
@@ -133,11 +137,12 @@ public final class HttpServer {
 
     /// Serves HTTP on a connection this computer opened to the relay, as if the viewer had connected here.
     /// Call on the channel's event loop; the handlers go at the end of its pipeline (above any TLS client).
-    func adoptRelayed(_ channel: Channel, remoteIP: String?) throws {
-        try Self.addServerHandlers(channel, app: app, remote: remoteIP, isTLS: false, relayed: true)
+    func adoptRelayed(_ channel: Channel, remoteIP: String?, guest: Bool, country: String?) throws {
+        try Self.addServerHandlers(channel, app: app, remote: remoteIP, isTLS: false, relayed: true, guest: guest, country: country)
     }
 
-    private static func addServerHandlers(_ channel: Channel, app: HttpApp, remote: String?, isTLS: Bool, relayed: Bool) throws {
+    private static func addServerHandlers(_ channel: Channel, app: HttpApp, remote: String?, isTLS: Bool, relayed: Bool,
+                                          guest: Bool = false, country: String? = nil) throws {
         let upgrader = NIOWebSocketServerUpgrader(
             maxFrameSize: 16 * 1024 * 1024,
             automaticErrorHandling: true,
@@ -146,7 +151,7 @@ public final class HttpServer {
                 do {
                     try ch.pipeline.syncOperations.addHandler(NIOWebSocketFrameAggregator(
                         minNonFinalFragmentSize: 0, maxAccumulatedFrameCount: 4096, maxAccumulatedFrameSize: 16 * 1024 * 1024))
-                    try ch.pipeline.syncOperations.addHandler(app.webSocketHandler(remoteIP: remote, isTLS: isTLS, relayed: relayed))
+                    try ch.pipeline.syncOperations.addHandler(app.webSocketHandler(remoteIP: remote, isTLS: isTLS, relayed: relayed, guest: guest, country: country))
                     return ch.eventLoop.makeSucceededVoidFuture()
                 } catch {
                     return ch.eventLoop.makeFailedFuture(error)
@@ -158,7 +163,8 @@ public final class HttpServer {
         let decoder = ByteToMessageHandler(HTTPRequestDecoder(leftOverBytesStrategy: .forwardBytes))
         let pipelining = HTTPServerPipelineHandler()
         let errors = HTTPServerProtocolErrorHandler()
-        let http = HttpHandler(app: app, remoteIP: remote, isTLS: isTLS, relayed: relayed, upgrader: upgrader, httpHandlers: [encoder, decoder, pipelining, errors])
+        let http = HttpHandler(app: app, remoteIP: remote, isTLS: isTLS, relayed: relayed, guest: guest, country: country,
+                               upgrader: upgrader, httpHandlers: [encoder, decoder, pipelining, errors])
         try channel.pipeline.syncOperations.addHandlers([encoder, decoder, pipelining, errors, http])
     }
 
@@ -202,6 +208,8 @@ final class HttpHandler: ChannelInboundHandler, RemovableChannelHandler {
     private let remoteIP: String?
     private let isTLS: Bool
     private let relayed: Bool
+    private let guest: Bool
+    private let country: String?
     private let upgrader: NIOWebSocketServerUpgrader
     private let httpHandlers: [RemovableChannelHandler]
     /// Set while switching to WebSocket: inbound data is held and replayed to the new handlers.
@@ -220,11 +228,14 @@ final class HttpHandler: ChannelInboundHandler, RemovableChannelHandler {
     private var pendingSinkBytes = 0
     private var readPaused = false
 
-    init(app: HttpApp, remoteIP: String?, isTLS: Bool, relayed: Bool, upgrader: NIOWebSocketServerUpgrader, httpHandlers: [RemovableChannelHandler]) {
+    init(app: HttpApp, remoteIP: String?, isTLS: Bool, relayed: Bool, guest: Bool, country: String?,
+         upgrader: NIOWebSocketServerUpgrader, httpHandlers: [RemovableChannelHandler]) {
         self.app = app
         self.remoteIP = remoteIP
         self.isTLS = isTLS
         self.relayed = relayed
+        self.guest = guest
+        self.country = country
         self.upgrader = upgrader
         self.httpHandlers = httpHandlers
     }
@@ -259,8 +270,10 @@ final class HttpHandler: ChannelInboundHandler, RemovableChannelHandler {
             let query = parts.count > 1 ? Self.parseQuery(String(parts[1])) : [:]
             var host = head.headers.first(name: "host") ?? ""
             if host.hasPrefix("[") { host = String(host.dropFirst().prefix { $0 != "]" }) } else if let c = host.lastIndex(of: ":") { host = String(host[..<c]) }
-            let req = HttpRequest(method: head.method, uri: head.uri, path: path, query: query, headers: head.headers,
+            var req = HttpRequest(method: head.method, uri: head.uri, path: path, query: query, headers: head.headers,
                                   remoteIP: remoteIP, isTLS: isTLS, isRelayed: relayed, hostName: host)
+            req.isGuest = guest
+            req.country = country
             request = req
             switch app.beginStreaming(req) {
             case .stream(let s)?: sink = s

@@ -9,13 +9,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private let admin = AdminClient()
     private let engine = EngineManager()
     private var settings: SettingsWindow?
+    private let stopBar = StopBar()
     private var status: ServerStatus?
     private var knownViewers = [String: ViewerInfo]()
     private var firstPoll = true
     private var offlinePolls = 0
     private var pollTimer: Timer?
     private var launchedAtLogin = false
-    /// Support requests already put in front of the user, and the one whose alert is showing.
+    /// Guest requests already put in front of the user, and the one whose prompt is showing.
     private var askedRequests = Set<String>()
     private var alertRequest: String?
     private var pendingStart: [(Bool) -> Void] = []
@@ -44,11 +45,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         let t = Timer(timeInterval: 2, repeats: true) { [weak self] _ in self?.poll() }
         RunLoop.main.add(t, forMode: .common)
         pollTimer = t
-        if !launchedAtLogin { showWindow("status") }
+        if !launchedAtLogin { showWindow("home") }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        showWindow("status") // opened again from Finder / Launchpad / Spotlight
+        showWindow("home") // opened again from Finder / Launchpad / Spotlight
         return true
     }
 
@@ -81,6 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         guard let st else {
             status = nil
             offlinePolls += 1
+            stopBar.update([], host: "", onStop: {}, onOpen: {})
             statusItem.button?.image = StatusIcon.image(active: false, warning: offlinePolls > 2)
             statusItem.button?.toolTip = engine.userStopped ? "Headroom Server — stopped" : "Headroom Server — starting…"
             if offlinePolls == 3, let s = settings, s.window.isVisible { s.showOffline() }
@@ -92,17 +94,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         let ids = Dictionary(uniqueKeysWithValues: st.viewers.map { ($0.id, $0) })
         if !firstPoll && st.notifyOnConnect {
             for v in st.viewers where knownViewers[v.id] == nil {
-                notify("\(v.device) connected", "From \(v.address). Open Headroom Server to disconnect it.")
+                notify(v.guest ? "“\(v.device)” (guest) connected" : "\(v.device) connected", "From \(v.address). Click Stop in the bar at the top of the screen to end it.")
             }
             for (id, v) in knownViewers where ids[id] == nil {
                 notify("\(v.device) disconnected", "The remote session ended.")
             }
-        } else if firstPoll && st.deviceCount == 0 && launchedAtLogin {
-            notify("Headroom is running", "Open Headroom Server from the menu bar to pair your phone or another computer.")
+        } else if firstPoll && !st.signedIn && launchedAtLogin {
+            notify("Headroom is running", "Open Headroom Server from the menu bar to sign in, or to let someone connect with a code.")
         }
         knownViewers = ids
         firstPoll = false
         askAboutSupportRequests(st.supportRequests)
+        stopBar.update(st.viewers, host: st.hostName, onStop: { [weak self] in
+            guard let self else { return }
+            if let only = self.status?.viewers, only.count == 1 { self.admin.stop(only[0].id) { self.poll() } } else { self.admin.disconnectAll { self.poll() } }
+        }, onOpen: { [weak self] in self?.showWindow("home") })
 
         let needsPermission = !st.screenRecording || !st.accessibility
         statusItem.button?.image = StatusIcon.image(active: !st.viewers.isEmpty, warning: needsPermission && st.viewers.isEmpty)
@@ -114,8 +120,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         if wasOffline { settings?.reloadIfOffline() }
     }
 
-    /// Someone typed this Mac's Headroom ID and support code: Accept, View Only or Decline, like AnyDesk. The alert
-    /// goes away by itself if the request is answered elsewhere (the settings page) or times out.
+    /// Someone entered your guest code: Accept, View Only or Decline, and what else they may do (files and
+    /// clipboard start unticked). The prompt goes away by itself if the request is answered in the settings window
+    /// or times out.
     private func askAboutSupportRequests(_ requests: [SupportRequest]) {
         if let showing = alertRequest, !requests.contains(where: { $0.id == showing }) {
             NSApp.abortModal()
@@ -127,21 +134,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             let a = NSAlert()
-            a.messageText = "\(r.name) wants to connect to this Mac"
-            a.informativeText = "They entered this Mac's Headroom ID and your support code\(r.address.isEmpty ? "" : " (from \(r.address))"). "
-                + "Accept to let them see and control your screen. You can disconnect them any time from the menu bar."
+            a.messageText = "“\(r.name)” wants to connect to this Mac"
+            var from = [String]()
+            if let c = r.country { from.append("\(Locale.current.localizedString(forRegionCode: c) ?? c) (approximate)") }
+            if !r.address.isEmpty { from.append(r.address) }
+            a.informativeText = "They entered your code. The name is what they typed — it isn't verified"
+                + (from.isEmpty ? "." : ". From \(from.joined(separator: " · ")).")
+                + "\n\nOnly accept if you know this person and asked for their help. Scammers call pretending to be support and ask for codes."
+                + "\n\nAccept lets them see and control your screen. Stop any time from the bar at the top of the screen."
             a.alertStyle = .warning
-            a.addButton(withTitle: "Accept")
-            a.addButton(withTitle: "View Only")
+            let files = NSButton(checkboxWithTitle: "Let them transfer files", target: nil, action: nil)
+            let clip = NSButton(checkboxWithTitle: "Share clipboard", target: nil, action: nil)
+            files.state = .off
+            clip.state = .off
+            let box = NSStackView(views: [files, clip])
+            box.orientation = .vertical
+            box.alignment = .leading
+            box.spacing = 6
+            box.frame = NSRect(x: 0, y: 0, width: 260, height: 44)
+            a.accessoryView = box
             a.addButton(withTitle: "Decline")
+            a.addButton(withTitle: "View Only")
+            a.addButton(withTitle: "Accept")
+            a.buttons[0].keyEquivalent = "\u{1b}" // Esc declines; Return does nothing by accident
+            a.buttons[2].keyEquivalent = ""
             NSApp.activate(ignoringOtherApps: true)
             NSSound(named: "Glass")?.play()
             let answer = a.runModal()
             self.alertRequest = nil
+            let f = files.state == .on, c = clip.state == .on
             switch answer {
-            case .alertFirstButtonReturn: self.admin.answerSupport(r.id, accept: true, viewOnly: false)
-            case .alertSecondButtonReturn: self.admin.answerSupport(r.id, accept: true, viewOnly: true)
-            case .alertThirdButtonReturn: self.admin.answerSupport(r.id, accept: false, viewOnly: false)
+            case .alertFirstButtonReturn: self.admin.answerSupport(r.id, accept: false, viewOnly: false, files: false, clipboard: false)
+            case .alertSecondButtonReturn: self.admin.answerSupport(r.id, accept: true, viewOnly: true, files: f, clipboard: c)
+            case .alertThirdButtonReturn: self.admin.answerSupport(r.id, accept: true, viewOnly: false, files: f, clipboard: c)
             default: break // aborted: answered elsewhere or timed out
             }
             self.poll()
@@ -170,7 +195,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive r: UNNotificationResponse, withCompletionHandler done: @escaping () -> Void) {
-        showWindow("status")
+        showWindow("home")
         done()
     }
 
@@ -181,35 +206,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         let st = status
         let header: String
         if let st {
-            header = st.viewers.isEmpty ? "Ready — nobody connected" : st.viewers.map(\.device).joined(separator: ", ") + " connected"
+            header = st.viewers.isEmpty ? (st.online ? "Ready — nobody connected" : "Connecting to Headroom…") : st.viewers.map(\.device).joined(separator: ", ") + " connected"
         } else {
             header = engine.userStopped ? "Server stopped" : "Server not running"
         }
         let h = NSMenuItem(title: header, action: nil, keyEquivalent: "")
         h.isEnabled = false
         menu.addItem(h)
-        if let id = st?.relayId, id.count == 9 {
-            let a = Array(id)
-            let idItem = NSMenuItem(title: "Headroom ID \(String(a[0..<3])) \(String(a[3..<6])) \(String(a[6..<9]))", action: nil, keyEquivalent: "")
-            idItem.isEnabled = false
-            menu.addItem(idItem)
-        }
         menu.addItem(.separator())
         menu.addItem(item("Open Headroom Server…", #selector(openWindow)))
-        menu.addItem(item("Remote Support…", #selector(openSupport), enabled: st != nil))
-        menu.addItem(item("Pair a Device…", #selector(openPair), enabled: st != nil))
-
-        let copy = NSMenuItem(title: "Copy Address", action: nil, keyEquivalent: "")
-        let sub = NSMenu()
-        for u in st?.urls ?? [] {
-            let i = item(u, #selector(copyAddress(_:)))
-            i.representedObject = u
-            sub.addItem(i)
-        }
-        copy.submenu = sub
-        copy.isEnabled = !(st?.urls.isEmpty ?? true)
-        menu.addItem(copy)
-        if let st, !st.viewers.isEmpty { menu.addItem(item("Disconnect Everyone", #selector(disconnectAll))) }
+        menu.addItem(item("Let Someone Connect…", #selector(openConnect), enabled: st != nil))
+        if let st, !st.viewers.isEmpty { menu.addItem(item("Stop Everyone's Session", #selector(disconnectAll))) }
 
         if let st, !st.screenRecording || !st.accessibility {
             menu.addItem(.separator())
@@ -237,16 +244,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         return i
     }
 
-    @objc private func openWindow() { showWindow("status") }
-    @objc private func openPair() { showWindow("pair") }
-    @objc private func openSupport() { showWindow("support") }
+    @objc private func openWindow() { showWindow("home") }
+    @objc private func openConnect() { showWindow("connect") }
     @objc private func quit() { NSApp.terminate(nil) }
-
-    @objc private func copyAddress(_ sender: NSMenuItem) {
-        guard let u = sender.representedObject as? String else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(u, forType: .string)
-    }
 
     @objc private func disconnectAll() { admin.disconnectAll { [weak self] in self?.poll() } }
 
@@ -285,11 +285,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     // ------------------------------------------------------------------ login item
 
-    private var loginEnabled: Bool { SMAppService.mainApp.status == .enabled }
+    static var loginEnabled: Bool { SMAppService.mainApp.status == .enabled }
+    private var loginEnabled: Bool { Self.loginEnabled }
 
-    @objc private func toggleLogin() {
+    @objc private func toggleLogin() { Self.setLogin(!loginEnabled) }
+
+    static func setLogin(_ on: Bool) {
         do {
-            if loginEnabled { try SMAppService.mainApp.unregister() } else { try SMAppService.mainApp.register() }
+            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
         } catch {
             let a = NSAlert()
             a.messageText = "Couldn't change Start at Login"

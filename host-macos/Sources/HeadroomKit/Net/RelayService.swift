@@ -5,20 +5,22 @@ import NIOPosix
 import NIOSSL
 import NIOWebSocket
 
-/// Keeps this computer reachable through its account server's relay (docs/RELAY.md): browsers anywhere open
-/// https://<account server>/r/<Headroom ID>/… without port forwarding, Tailscale or a certificate install.
+/// Keeps this computer reachable through the Headroom relay (docs/RELAY.md), always: signed in to an account,
+/// your devices reach it from anywhere; signed in or not, a guest code finds it. No port forwarding, no setup.
 ///
-/// A control WebSocket stays open to the relay. When a viewer arrives, the relay sends {"t":"open","id":…}; this
-/// computer then opens a tunnel WebSocket whose binary messages carry the viewer's raw HTTP bytes, and serves
-/// it with the same HTTP stack as direct connections, marked as relayed (never local, only session paths).
+/// A control WebSocket stays open to the relay. When a viewer arrives, the relay sends {"t":"open","id":…} (with
+/// the viewer's address, country, and whether they came with a guest code); this computer then opens a tunnel
+/// WebSocket whose binary messages carry the viewer's raw HTTP bytes, and serves it with the same HTTP stack as
+/// direct connections, marked as relayed (never local, only session paths).
 public final class RelayService {
     public static let shared = RelayService()
 
     private weak var server: HttpServer?
     private let lock = NSLock()
     private var generation = 0
-    /// The account server (and credential) the control connection is for; nil when not connected or connecting.
+    /// The relay (and credential) the control connection is for; nil when not connected or connecting.
     private var target: String?
+    private var slotWaiters: [String: (Result<(slot: String, expires: Date), SupportService.CodeError>) -> Void] = [:]
     private var control: Channel?
     private var state = "off"           // off | connecting | online | retrying
     private var relayId: String?
@@ -43,15 +45,16 @@ public final class RelayService {
 
     private struct Target {
         let base: URL
-        let token: String
-        var key: String { base.absoluteString + "|" + token }
+        /// This computer's sign-in to its account; nil when it isn't signed in (then only guest codes reach it).
+        let token: String?
+        var key: String { base.absoluteString + "|" + (token ?? "-") }
     }
 
     private var wanted: Target? {
         let c = ConfigStore.current
-        guard c.relayEnabled, let link = c.account, let url = URL(string: link.server), url.host != nil,
-              url.scheme == "https" || url.scheme == "http" else { return nil }
-        return Target(base: url, token: link.token)
+        let server = c.account?.server ?? c.server
+        guard let url = URL(string: server), url.host != nil, url.scheme == "https" || url.scheme == "http" else { return nil }
+        return Target(base: url, token: c.account?.token)
     }
 
     private func tick() {
@@ -64,8 +67,11 @@ public final class RelayService {
             target = nil; control = nil; relayId = nil; lastError = nil
             backoff = 1; nextAttempt = .distantPast
             state = want == nil ? "off" : "connecting"
+            let waiters = takeWaiters()
             lock.unlock()
             ch?.close(promise: nil)
+            SupportService.shared.relayDropped()
+            for w in waiters { w(.failure(.offline(nil))) }
             return
         }
         if want == nil { state = "off" }
@@ -83,7 +89,9 @@ public final class RelayService {
         if state != "retrying" { state = "connecting" }
         lock.unlock()
         let handler = RelayControlHandler { [weak self] msg in self?.onControl(msg, gen: gen, base: t.base) }
-        openWebSocket(t.base, path: "/api/relay/control", headers: [("Authorization", "Bearer \(t.token)"), ("X-Headroom-Host-Id", HostInfo.hostId)], maxFrame: 1 << 16,
+        var headers = [("X-Headroom-Host-Id", HostInfo.hostId), ("X-Headroom-Name", HostInfo.name)]
+        if let token = t.token { headers.append(("Authorization", "Bearer \(token)")) }
+        openWebSocket(t.base, path: "/api/relay/control", headers: headers, maxFrame: 1 << 16,
                       install: { try $0.pipeline.syncOperations.addHandler(handler) }) { [weak self] result in
             guard let self else { return }
             switch result {
@@ -111,10 +119,20 @@ public final class RelayService {
             lastError = nil
             backoff = 1
             lock.unlock()
-            if first { Log.info("relay", "reachable through the relay at \(base.absoluteString) as Headroom ID \(Self.pretty(relayId))") }
+            if first { Log.info("relay", "connected to \(base.host ?? "the relay")\(ConfigStore.current.account == nil ? " (not signed in: reachable with guest codes)" : "")") }
         case "open":
             guard let nonce = msg.str("id"), nonce.count <= 64, nonce.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }) else { return }
-            openTunnel(base, nonce: nonce, clientIp: msg.str("client"))
+            let country = msg.str("country").flatMap { $0.count <= 8 && $0.allSatisfy(\.isLetter) ? $0.uppercased() : nil }
+            openTunnel(base, nonce: nonce, clientIp: msg.str("client"), guest: msg.bool("guest"), country: country)
+        case "slot":
+            guard let id = msg.str("id") else { return }
+            lock.lock(); let waiter = slotWaiters.removeValue(forKey: id); lock.unlock()
+            if let slot = msg.str("slot"), slot.count == 4, slot.allSatisfy(\.isNumber) {
+                let expires = msg.str("expires").flatMap(ISO8601.parse) ?? Date().addingTimeInterval(600)
+                waiter?(.success((slot, expires)))
+            } else {
+                waiter?(.failure(.failed("Headroom is busy right now. Try again in a minute.")))
+            }
         default:
             break
         }
@@ -126,11 +144,14 @@ public final class RelayService {
         let wasOnline = state == "online"
         target = nil
         control = nil
+        relayId = nil
+        let waiters = takeWaiters()
         var wait = backoff
         if let e = error as? RelayError, case .status(let code) = e {
-            // Rejected: removed from the account (it notices at its next check-in) or no relay on that server.
+            // Rejected: removed from the account (it notices at its next check-in), too many computers from this
+            // network without an account, or no relay on that server.
             wait = code == 404 ? 300 : 60
-            lastError = code == 404 ? "This account server doesn't run a relay." : "The relay refused this computer (HTTP \(code))."
+            lastError = code == 404 ? "This server doesn't run a relay." : code == 429 ? "Too many computers from this network are connected without an account." : "The relay refused this computer (HTTP \(code))."
         } else if let error {
             lastError = Self.describe(error)
         } else {
@@ -141,17 +162,74 @@ public final class RelayService {
         backoff = min(backoff * 2, 30)
         let message = lastError ?? ""
         lock.unlock()
+        SupportService.shared.relayDropped()
+        for w in waiters { w(.failure(.offline(message))) }
         if wasOnline || backoff <= 2 { Log.warn("relay", "\(message) Retrying in \(Int(wait)) s.") }
+    }
+
+    private func takeWaiters() -> [(Result<(slot: String, expires: Date), SupportService.CodeError>) -> Void] { // under lock
+        let w = Array(slotWaiters.values)
+        slotWaiters.removeAll()
+        return w
+    }
+
+    // ------------------------------------------------------------------ guest codes
+
+    /// Asks the relay for the first 4 digits of a guest code (a "slot" that routes /c/<slot>/ here).
+    func requestSlot(_ done: @escaping (Result<(slot: String, expires: Date), SupportService.CodeError>) -> Void) {
+        let id = Bytes.base64Url(Bytes.random(6))
+        lock.lock()
+        guard let ch = control, state == "online" else {
+            let why = lastError
+            lock.unlock()
+            done(.failure(.offline(why)))
+            return
+        }
+        slotWaiters[id] = done
+        lock.unlock()
+        send(ch, ["t": "slot", "id": id])
+        DispatchQueue.global().asyncAfter(deadline: .now() + 10) { [weak self] in
+            guard let self else { return }
+            self.lock.lock(); let w = self.slotWaiters.removeValue(forKey: id); self.lock.unlock()
+            w?(.failure(.failed("Headroom didn't answer. Try again.")))
+        }
+    }
+
+    /// The code was used, cancelled or withdrawn: the relay stops routing it here.
+    func releaseSlot() {
+        lock.lock(); let ch = control; lock.unlock()
+        if let ch { send(ch, ["t": "slot-release"]) }
+    }
+
+    private func send(_ ch: Channel, _ msg: JSONObject) {
+        let text = String(decoding: JSON.data(msg), as: UTF8.self)
+        ch.eventLoop.execute {
+            let frame = WebSocketFrame(fin: true, opcode: .text, maskKey: .random(), data: ch.allocator.buffer(string: text))
+            ch.writeAndFlush(frame, promise: nil)
+        }
+    }
+
+    /// Where an accepted guest's session continues (its code is used up): this computer's own path on the relay.
+    var relayPath: String? {
+        lock.lock(); defer { lock.unlock() }
+        return state == "online" ? relayId.map { "/r/\($0)" } : nil
+    }
+
+    /// The Headroom website people open (for guest links).
+    public var publicBase: String {
+        let c = ConfigStore.current
+        let s = c.account?.server ?? c.server
+        return s.hasSuffix("/") ? String(s.dropLast()) : s
     }
 
     // ------------------------------------------------------------------ tunnels
 
-    private func openTunnel(_ base: URL, nonce: String, clientIp: String?) {
+    private func openTunnel(_ base: URL, nonce: String, clientIp: String?, guest: Bool, country: String?) {
         guard let server else { return }
         let ip = clientIp.flatMap { $0.count <= 64 ? NetInterfaces.normalize($0) : nil }
         openWebSocket(base, path: "/api/relay/tunnel/\(nonce)", headers: [], maxFrame: 1 << 24, install: { ch in
             try ch.pipeline.syncOperations.addHandler(WebSocketByteBridge())
-            try server.adoptRelayed(ch, remoteIP: ip)
+            try server.adoptRelayed(ch, remoteIP: ip, guest: guest, country: country)
         }) { result in
             if case .failure(let e) = result { Log.warn("relay", "couldn't open a tunnel for \(ip ?? "?"): \(Self.describe(e))") }
         }
@@ -213,26 +291,11 @@ public final class RelayService {
     // ------------------------------------------------------------------ status
 
     public var statusJson: JSONObject {
-        let c = ConfigStore.current
+        let site = publicBase
         lock.lock(); defer { lock.unlock() }
-        var o: JSONObject = ["enabled": c.relayEnabled, "state": state]
-        if let link = c.account {
-            o["server"] = link.server
-            if let relayId {
-                o["id"] = relayId
-                o["url"] = link.server.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/#id=" + relayId
-            }
-        }
+        var o: JSONObject = ["state": state, "site": site]
         if let lastError, state != "online" { o["error"] = lastError }
         return o
-    }
-
-    public var currentId: String? { lock.lock(); defer { lock.unlock() }; return state == "online" ? relayId : nil }
-
-    static func pretty(_ id: String?) -> String {
-        guard let id, id.count == 9 else { return id ?? "?" }
-        let a = Array(id)
-        return "\(String(a[0..<3])) \(String(a[3..<6])) \(String(a[6..<9]))"
     }
 
     private static func isIPAddress(_ s: String) -> Bool {

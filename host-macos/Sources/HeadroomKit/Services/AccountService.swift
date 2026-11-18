@@ -1,12 +1,12 @@
 import Foundation
 
-/// Membership in a Headroom account (account-server/, docs/ACCOUNTS.md). When joined, this computer checks in
-/// every ~20 s with how to reach it (addresses, certificate pin, CA) and receives the account's devices as
-/// (id, name, token hash, view-only). Those devices then connect exactly like paired ones — the token each
-/// presents was derived for this computer alone — without any pairing here.
+/// Signed in to a Headroom account (account-server/, docs/ACCOUNTS.md): this computer is one of the account's
+/// devices. It checks in every ~20 s with its name and how Headroom Viewer can reach it directly (addresses,
+/// certificate pin), and receives the account's sign-ins as (id, name, token hash). Each of those can then connect
+/// with a token the account server derived for this computer alone.
 ///
-/// The device list is cached in the config, so a short account-server outage doesn't lock anyone out; a device
-/// removed from the account disappears at the next successful check-in and its sessions are closed.
+/// The list is cached in the config, so a short outage doesn't lock anyone out; a sign-in that ends (signed out,
+/// password changed) disappears at the next check-in and its sessions are closed.
 public final class AccountService {
     public static let shared = AccountService()
 
@@ -109,8 +109,12 @@ public final class AccountService {
         let (status, body, err) = send(req)
         if status == 401 {
             // This computer was removed from the account (or the account deleted).
-            Log.warn("account", "this computer was removed from the account '\(link.username)'; leaving it")
+            Log.warn("account", "this computer was removed from the account \(link.email) (or the account was deleted); signed out")
             unlink(reason: "removed from the account")
+            return false
+        }
+        if status == 403, body?.str("error") == "disabled" {
+            lock.lock(); lastError = "This account is disabled."; lock.unlock()
             return false
         }
         guard status == 200, let body, let list = body["devices"] as? [JSONObject] else {
@@ -127,6 +131,9 @@ public final class AccountService {
             return Device(id: id, name: d.str("name") ?? "Device", tokenHash: hash, viewOnly: d.bool("viewOnly"))
         }
         if let i = body.int("interval"), i >= 5 { interval = TimeInterval(min(i, 300)) }
+        if let email = (body["account"] as? JSONObject)?.str("email"), email != link.email {
+            ConfigStore.update { $0.account?.email = email } // changed on the website
+        }
         lock.lock()
         let old = devices
         devices = fresh
@@ -169,8 +176,8 @@ public final class AccountService {
         case badServer, unreachable(String), rejected(String, String?)
         public var description: String {
             switch self {
-            case .badServer: return "Enter the account server's address."
-            case .unreachable(let m): return "Can't reach the account server (\(m))."
+            case .badServer: return "The Headroom server in the settings isn't a valid address."
+            case .unreachable(let m): return "Can't reach Headroom (\(m)). Check the internet connection."
             case .rejected(let code, let msg): return msg ?? code
             }
         }
@@ -195,12 +202,12 @@ public final class AccountService {
     }
 
     /// Signs this computer in to an account (the computer gets its own credential; the password isn't stored).
-    public func join(server: String, username: String, password: String, totp: String?) -> Result<String, JoinError> {
-        guard let base = Self.normalizeServer(server), let url = URL(string: base + "/api/account/login") else { return .failure(.badServer) }
+    public func join(email: String, password: String, totp: String?) -> Result<String, JoinError> {
+        guard let base = Self.normalizeServer(ConfigStore.current.server), let url = URL(string: base + "/api/account/login") else { return .failure(.badServer) }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = JSON.data(["username": username, "password": password, "totp": totp as Any?, "deviceName": HostInfo.name, "platform": "macos", "kind": "computer"])
+        req.httpBody = JSON.data(["email": email, "password": password, "totp": totp as Any?, "deviceName": HostInfo.name, "platform": "macos", "kind": "computer"])
         let (status, body, err) = send(req)
         if let err { return .failure(.unreachable(err)) }
         guard status == 200, let body, let token = body.str("token"), let account = body["account"] as? JSONObject, let device = body["device"] as? JSONObject else {
@@ -208,12 +215,12 @@ public final class AccountService {
         }
         // Leaving a previous account first keeps it tidy (best effort).
         if ConfigStore.current.account != nil { leave() }
-        let name = account.str("username") ?? username
+        let name = account.str("email") ?? email
         ConfigStore.update {
-            $0.account = AccountLink(server: base, username: name, accountId: account.str("id") ?? "", deviceId: device.str("id") ?? "", token: token, devices: [])
+            $0.account = AccountLink(server: base, email: name, accountId: account.str("id") ?? "", deviceId: device.str("id") ?? "", token: token, devices: [])
         }
         lock.lock(); devices = []; lastError = nil; lastAttempt = .distantPast; lock.unlock()
-        Log.info("account", "joined account '\(name)' at \(base)")
+        Log.info("account", "signed in to \(name) at \(base)")
         sync()
         return .success(name)
     }
@@ -250,8 +257,8 @@ public final class AccountService {
         guard let link = ConfigStore.current.account else { return nil }
         lock.lock(); defer { lock.unlock() }
         return [
-            "server": link.server, "username": link.username, "lastSync": lastSync as Any?, "error": lastError as Any?,
-            "devices": devices.map { ["id": Self.localId($0.id), "name": $0.name, "viewOnly": $0.viewOnly] as JSONObject },
+            "email": link.email, "lastSync": lastSync as Any?, "error": lastError as Any?,
+            "signIns": devices.map { ["id": Self.localId($0.id), "name": $0.name] as JSONObject },
         ]
     }
 

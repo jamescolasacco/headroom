@@ -17,7 +17,7 @@ public enum SessionManager {
     }
 
     static func register(_ s: ClientSession) {
-        if let id = s.device?.id, id.hasPrefix("support:") { SupportService.shared.sessionStarted(id) }
+        if let id = s.device?.id, id.hasPrefix("guest:") { SupportService.shared.sessionStarted(id) }
         lock.lock()
         sessions.append(s)
         if assertion == 0 {
@@ -33,7 +33,7 @@ public enum SessionManager {
     }
 
     static func unregister(_ s: ClientSession) {
-        if let id = s.device?.id, id.hasPrefix("support:") { SupportService.shared.sessionEnded(id) }
+        if let id = s.device?.id, id.hasPrefix("guest:") { SupportService.shared.sessionEnded(id) }
         lock.lock()
         sessions.removeAll { $0 === s }
         let last = sessions.isEmpty
@@ -52,5 +52,12 @@ public enum SessionManager {
 
     public static func disconnectDevice(_ deviceId: String) {
         for s in active where s.device?.id == deviceId { s.disconnect("device revoked") }
+    }
+
+    /// What a session may do changed (a guest's rights, or this computer's settings): tell the running sessions.
+    public static func rightsChanged(_ deviceId: String? = nil) {
+        for s in active where deviceId == nil || s.device?.id == deviceId { s.applyRights() }
+        let handlers = { lock.lock(); defer { lock.unlock() }; return changedHandlers }()
+        handlers.forEach { $0() }
     }
 }

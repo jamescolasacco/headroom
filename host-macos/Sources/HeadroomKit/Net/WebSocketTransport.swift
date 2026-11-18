@@ -41,8 +41,12 @@ public final class WebSocketTransport: ChannelInboundHandler {
 
     public let remoteIP: String?
     public let isTLS: Bool
-    /// Came through the account server's relay.
+    /// Came through the relay.
     public let relayed: Bool
+    /// Came with a guest code (through the relay's /c/<code>/): may only start a guest session.
+    public let guest: Bool
+    /// The viewer's country, as the relay saw it (approximate location for the Accept prompt).
+    public let country: String?
     /// Serial queue the peer's callbacks run on (keeps the event loop free; preserves message order).
     public let queue: DispatchQueue
     public weak var peer: WebSocketPeer?
@@ -60,10 +64,13 @@ public final class WebSocketTransport: ChannelInboundHandler {
     private var context: ChannelHandlerContext?
     private var loop: EventLoop?
 
-    public init(remoteIP: String?, isTLS: Bool, relayed: Bool = false, makePeer: (WebSocketTransport) -> WebSocketPeer) {
+    public init(remoteIP: String?, isTLS: Bool, relayed: Bool = false, guest: Bool = false, country: String? = nil,
+                makePeer: (WebSocketTransport) -> WebSocketPeer) {
         self.remoteIP = remoteIP
         self.isTLS = isTLS
         self.relayed = relayed
+        self.guest = guest
+        self.country = country
         queue = DispatchQueue(label: "headroom.session", qos: .userInteractive)
         let p = makePeer(self)
         peer = p

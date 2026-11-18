@@ -4,33 +4,31 @@ struct ViewerInfo: Equatable {
     let id: String
     let device: String
     let address: String
+    let guest: Bool
 }
 
-/// Someone with a support code, waiting for Accept / Decline.
+/// Someone with a guest code, waiting for Accept / Decline.
 struct SupportRequest: Equatable {
     let id: String
     let name: String
     let address: String
+    let country: String?
 }
 
 struct ServerStatus {
     let hostName: String
     let version: String
-    let hasPassword: Bool
-    let deviceCount: Int
     let viewers: [ViewerInfo]
-    let urls: [String]
-    let tailscale: String?
     let screenRecording: Bool
     let accessibility: Bool
     let notifyOnConnect: Bool
     let pid: Int32
     let supportRequests: [SupportRequest]
-    /// Headroom ID while on the account server's relay.
-    let relayId: String?
+    let signedIn: Bool
+    let online: Bool
 }
 
-/// Talks to the running engine's loopback-only admin API (the same one the settings page uses).
+/// Talks to the running engine's loopback-only admin API (the same one the settings window uses).
 final class AdminClient {
     private let session: URLSession = {
         let c = URLSessionConfiguration.ephemeral
@@ -39,7 +37,7 @@ final class AdminClient {
         return URLSession(configuration: c)
     }()
 
-    /// The engine's plain-HTTP port (config.json httpHelperPort; HEADROOM_ADMIN_PORT overrides).
+    /// The engine's settings port (config.json httpHelperPort; HEADROOM_ADMIN_PORT overrides).
     static var port: Int {
         if let p = ProcessInfo.processInfo.environment["HEADROOM_ADMIN_PORT"].flatMap(Int.init) { return p }
         if let data = try? Data(contentsOf: URL(fileURLWithPath: dataDir).appendingPathComponent("config.json")),
@@ -62,24 +60,24 @@ final class AdminClient {
             let perms = j["permissions"] as? [String: Any] ?? [:]
             let settings = j["settings"] as? [String: Any] ?? [:]
             let viewers = (j["sessions"] as? [[String: Any]] ?? []).map {
-                ViewerInfo(id: $0["id"] as? String ?? "", device: $0["device"] as? String ?? "Viewer", address: $0["remoteAddress"] as? String ?? "")
+                ViewerInfo(id: $0["id"] as? String ?? "", device: $0["device"] as? String ?? "Someone",
+                           address: ($0["remoteAddress"] as? String ?? "").replacingOccurrences(of: " (via relay)", with: ""),
+                           guest: $0["guest"] as? Bool ?? false)
             }
             done(ServerStatus(
                 hostName: host["name"] as? String ?? Host.current().localizedName ?? "Mac",
                 version: host["version"] as? String ?? "",
-                hasPassword: j["hasPassword"] as? Bool ?? false,
-                deviceCount: (j["devices"] as? [Any])?.count ?? 0,
                 viewers: viewers,
-                urls: j["urls"] as? [String] ?? [],
-                tailscale: j["tailscale"] as? String,
                 screenRecording: perms["screenRecording"] as? Bool ?? false,
                 accessibility: perms["accessibility"] as? Bool ?? false,
                 notifyOnConnect: settings["notifyOnConnect"] as? Bool ?? true,
                 pid: Int32(j["pid"] as? Int ?? 0),
                 supportRequests: ((j["support"] as? [String: Any])?["requests"] as? [[String: Any]] ?? []).map {
-                    SupportRequest(id: $0["id"] as? String ?? "", name: $0["name"] as? String ?? "Someone", address: $0["address"] as? String ?? "")
+                    SupportRequest(id: $0["id"] as? String ?? "", name: $0["name"] as? String ?? "Someone",
+                                   address: $0["address"] as? String ?? "", country: $0["country"] as? String)
                 },
-                relayId: (j["relay"] as? [String: Any]).flatMap { $0["state"] as? String == "online" ? $0["id"] as? String : nil }))
+                signedIn: j["account"] is [String: Any],
+                online: (j["relay"] as? [String: Any])?["state"] as? String == "online"))
         }
     }
 
@@ -87,8 +85,12 @@ final class AdminClient {
         request("POST", "/api/admin/sessions/disconnect-all") { _ in done() }
     }
 
-    func answerSupport(_ id: String, accept: Bool, viewOnly: Bool) {
-        request("POST", "/api/admin/support/requests/\(id)", body: ["accept": accept, "viewOnly": viewOnly]) { _ in }
+    func stop(_ sessionId: String, _ done: @escaping () -> Void = {}) {
+        request("POST", "/api/admin/sessions/\(sessionId)/disconnect") { _ in done() }
+    }
+
+    func answerSupport(_ id: String, accept: Bool, viewOnly: Bool, files: Bool, clipboard: Bool) {
+        request("POST", "/api/admin/support/requests/\(id)", body: ["accept": accept, "viewOnly": viewOnly, "files": files, "clipboard": clipboard]) { _ in }
     }
 
     func requestPermission(_ kind: String) {

@@ -2,11 +2,11 @@ import Foundation
 import NIOCore
 import NIOHTTP1
 
-/// All HTTP endpoints — the same API as the Windows host (docs/PROTOCOL.md §6), so the web client and the
-/// settings page work unchanged against either.
+/// All HTTP endpoints — the same API as the Windows host (docs/PROTOCOL.md §6). To the network (Headroom Viewer on
+/// the same network, and the relay) only sessions and file transfer; the settings window and its API only on this
+/// Mac's loopback.
 public final class WebHost: HttpApp {
     let certs: CertificateManager
-    private let pendingTotp = Locked<String?>(nil)
 
     public init(certs: CertificateManager) {
         self.certs = certs
@@ -16,7 +16,7 @@ public final class WebHost: HttpApp {
 
     public func beginStreaming(_ req: HttpRequest) -> HttpStreamDecision? {
         guard req.method == .POST, req.path == "/api/files/upload" else { return nil }
-        if !req.isTLS && !req.isLoopback && !req.isRelayed { return .respond(redirectToHttps(req)) }
+        guard req.isTLS || req.isLoopback || (req.isRelayed && !req.isGuest) else { return .respond(.status(.forbidden)) }
         return FileApi.beginUpload(req)
     }
 
@@ -24,14 +24,15 @@ public final class WebHost: HttpApp {
         path == "/ws" && (isTLS || relayed || NetInterfaces.isLoopback(remoteIP))
     }
 
-    public func webSocketHandler(remoteIP: String?, isTLS: Bool, relayed: Bool) -> ChannelHandler {
-        WebSocketTransport(remoteIP: remoteIP, isTLS: isTLS, relayed: relayed) { ClientSession(transport: $0) }
+    public func webSocketHandler(remoteIP: String?, isTLS: Bool, relayed: Bool, guest: Bool, country: String?) -> ChannelHandler {
+        WebSocketTransport(remoteIP: remoteIP, isTLS: isTLS, relayed: relayed, guest: guest, country: country) { ClientSession(transport: $0) }
     }
 
-    /// Through the relay only sessions and their file transfers: never pairing, settings or the certificate pages
-    /// (the relay forwards nothing else either; this is the second lock).
-    static func relayAllows(_ path: String) -> Bool {
-        path == "/api/info" || path == "/api/me" || ["/api/files/list", "/api/files/download", "/api/files/upload", "/api/files/mkdir"].contains(path)
+    /// What the network may reach: sessions and their file transfers (the relay forwards nothing else either;
+    /// this is the second lock). With a guest code, before being accepted: only this computer's name and the session.
+    static func networkAllows(_ path: String, guest: Bool) -> Bool {
+        if guest { return path == "/api/info" }
+        return path == "/api/info" || path == "/api/me" || ["/api/files/list", "/api/files/download", "/api/files/upload", "/api/files/mkdir"].contains(path)
     }
 
     public func decorate(_ req: HttpRequest, _ resp: inout HttpResponse) {
@@ -55,20 +56,11 @@ public final class WebHost: HttpApp {
         resp.headers = out
     }
 
-    private func redirectToHttps(_ req: HttpRequest) -> HttpResponse {
-        let host = req.hostName.contains(":") ? "[\(req.hostName)]" : req.hostName
-        return .redirect("https://\(host):\(ConfigStore.current.port)\(req.uri)")
-    }
-
     public func handle(_ req: HttpRequest) -> HttpResponse {
-        var path = req.path
-        if req.isRelayed {
+        let path = req.path
+        if !req.isLoopback {
             if req.method == .OPTIONS, path.hasPrefix("/api") { return .status(.noContent) }
-            guard Self.relayAllows(path) else { return .json(["error": "not-relayed"], status: .forbidden) }
-        } else if !req.isTLS && !req.isLoopback {
-            // Plain-HTTP helper port, remote caller: only the CA bootstrap is available.
-            guard ["/", "/trust", "/headroom-ca.crt", "/headroom-ca.mobileconfig", "/trust.css"].contains(path) else { return redirectToHttps(req) }
-            if path == "/" { path = "/trust" }
+            guard Self.networkAllows(path, guest: req.isGuest), req.isTLS || req.isRelayed else { return .json(["error": "not-available"], status: .forbidden) }
         }
         if path.hasPrefix("/api/admin") {
             guard adminAllowed(req) else { return .json(["error": "admin API is only available on the host itself"], status: .forbidden) }
@@ -77,44 +69,24 @@ public final class WebHost: HttpApp {
         if path.hasPrefix("/api"), req.method == .OPTIONS { return .status(.noContent) }
 
         switch (req.method, path) {
-        // -------------------------------------------------------------- public
         case (.GET, "/api/info"):
-            let c = ConfigStore.current
-            return .json(["host": HostInfo.describe(), "paired": AuthService.hasPassword, "totp": c.totpEnabled, "port": c.port,
-                          "tailscale": certs.tailscaleName as Any?, "loopback": req.isLoopback])
-        case (.POST, "/api/pair"):
-            return pair(req)
+            return .json(["host": HostInfo.describe()])
         case (.GET, "/api/me"):
             guard let dev = AuthService.validateToken(req.bearerToken, ip: req.remoteIP, touch: false) else {
                 return .json(["error": "unauthorized"], status: .unauthorized)
             }
             return .json(["device": ["id": dev.id, "name": dev.name], "host": HostInfo.describe()])
-        case (.GET, "/headroom-ca.crt"):
-            var h = HTTPHeaders()
-            h.add(name: "Content-Type", value: "application/x-x509-ca-cert")
-            h.add(name: "Content-Disposition", value: "attachment; filename=\"headroom-ca.crt\"")
-            return HttpResponse(headers: h, body: .bytes(certs.caCertificateDer))
-        case (.GET, "/headroom-ca.mobileconfig"):
-            var h = HTTPHeaders()
-            h.add(name: "Content-Type", value: "application/x-apple-aspen-config")
-            let fname = "Headroom-\(HostInfo.localHostName).mobileconfig"
-            h.add(name: "Content-Disposition", value: "attachment; filename=\"\(fname)\"")
-            return HttpResponse(headers: h, body: .bytes([UInt8](certs.buildMobileConfig())))
-        case (.GET, "/trust"):
-            return .text(TrustPage.render(req, certs: certs), contentType: "text/html; charset=utf-8")
-
-        // -------------------------------------------------------------- files
         case (.GET, "/api/files/list"): return FileApi.list(req)
         case (.GET, "/api/files/download"): return FileApi.download(req) // GET only: redeeming spends the single-use token
         case (.POST, "/api/files/mkdir"): return FileApi.mkdir(req)
-
         default:
             break
         }
 
         if path == "/ws" { return .status(.badRequest) }
         if path.hasPrefix("/api") { return .status(.notFound) }
-        if req.method == .GET || req.method == .HEAD { return StaticFiles.serve(path, req) }
+        // The settings window (this Mac only).
+        if req.method == .GET || req.method == .HEAD { return StaticFiles.serve(path == "/" ? "/admin.html" : path, req) }
         return .status(.methodNotAllowed)
     }
 
@@ -138,24 +110,6 @@ public final class WebHost: HttpApp {
         return true
     }
 
-    private func pair(_ req: HttpRequest) -> HttpResponse {
-        let body = req.json
-        let (result, token, device) = AuthService.pair(ip: req.remoteIP, password: body.str("password"), totp: body.str("totp"),
-                                                       pairCode: body.str("code"), deviceName: body.str("deviceName") ?? "Device")
-        switch result {
-        case .ok:
-            return .json(["token": token ?? "", "device": ["id": device?.id ?? "", "name": device?.name ?? ""], "host": HostInfo.describe()])
-        case .totpRequired:
-            return .json(["error": "totp-required"], status: .unauthorized)
-        case .rateLimited:
-            return .json(["error": "rate-limited", "retryAfter": Int(AuthService.retryAfter(req.remoteIP) ?? 60)], status: .tooManyRequests)
-        case .notConfigured:
-            return .json(["error": "not-configured", "message": "No password is set on this host yet. Use a pairing code, or set a password on the host."], status: .conflict)
-        case .badCredentials:
-            return .json(["error": "bad-credentials"], status: .unauthorized)
-        }
-    }
-
     // ------------------------------------------------------------------ admin (loopback only)
 
     private func admin(_ req: HttpRequest, _ sub: String) -> HttpResponse {
@@ -163,72 +117,52 @@ public final class WebHost: HttpApp {
         switch (req.method, sub) {
         case (.GET, "/status"):
             return .json(status())
-        case (.POST, "/password"):
-            let pw = body.str("password") ?? ""
-            guard pw.count >= 8 else { return .json(["error": "Password must be at least 8 characters."], status: .badRequest) }
-            try? AuthService.setPassword(pw)
-            Log.info("admin", "password changed")
-            return .json(["ok": true])
-        case (.POST, "/totp/setup"):
-            // Two-factor (TOTP) for pairing: setup returns a secret + otpauth URI; it only takes effect once a
-            // code from the authenticator app verifies.
-            let secret = Totp.newSecret()
-            pendingTotp.with { $0 = secret }
-            return .json(["secret": secret, "uri": Totp.provisioningUri(secret: secret, account: HostInfo.name)])
-        case (.POST, "/totp/enable"):
-            guard let secret = pendingTotp.get else { return .json(["error": "Start setup first."], status: .badRequest) }
-            guard Totp.verify(secret: secret, code: body.str("code") ?? "") else {
-                return .json(["error": "That code didn't match. Check the time on your phone and try the next code."], status: .badRequest)
-            }
-            pendingTotp.with { $0 = nil }
-            ConfigStore.update { $0.totpSecret = secret; $0.totpEnabled = true }
-            Log.info("admin", "two-factor pairing enabled")
-            return .json(["ok": true])
-        case (.POST, "/totp/disable"):
-            ConfigStore.update { $0.totpEnabled = false; $0.totpSecret = nil }
-            Log.info("admin", "two-factor pairing disabled")
-            return .json(["ok": true])
-        case (.POST, "/paircode"):
-            let code = AuthService.createPairCode(lifetime: 600)
-            return .json(["code": code, "expiresInSeconds": 600, "urls": serverUrls().map { "\($0)#pair=\(code)" }])
         case (.POST, "/sessions/disconnect-all"):
             SupportService.shared.revokeAll()
-            for s in SessionManager.active { s.disconnect("disconnected from the host") }
+            for s in SessionManager.active { s.disconnect("stopped by the person at the computer") }
             return .json(["ok": true])
         case (.POST, "/support/code"):
-            // Remote support: a one-time code to give, with this computer's Headroom ID, to the person helping.
-            let (code, expires) = SupportService.shared.createCode()
-            var out: JSONObject = ["code": code, "expiresAt": expires]
-            if let relay = RelayService.shared.statusJson["url"] as? String { out["url"] = relay; out["link"] = relay + "&code=" + code }
-            if let id = RelayService.shared.currentId { out["id"] = id }
-            return .json(out)
+            // "Let someone connect": a 9-digit code, and a link with it.
+            let done = DispatchSemaphore(value: 0)
+            var out: HttpResponse = .status(.internalServerError)
+            SupportService.shared.createCode { result in
+                switch result {
+                case .success(let c): out = .json(["code": c.code, "expiresAt": c.expires, "link": c.link])
+                case .failure(let e): out = .json(["error": "unavailable", "message": e.description], status: .serviceUnavailable)
+                }
+                done.signal()
+            }
+            _ = done.wait(timeout: .now() + 12)
+            return out
         case (.DELETE, "/support/code"):
             SupportService.shared.cancelCode()
             return .json(["ok": true])
         case (.POST, "/settings"):
+            var rightsChanged = false
             ConfigStore.update { c in
                 if let v = body.boolIfPresent("lockOnDisconnect") { c.lockOnDisconnect = v }
                 if let v = body.int("maxFps") { c.video.maxFps = min(max(v, 10), 240) }
                 if let v = body.int("maxBitrateKbps") { c.video.maxBitrateKbps = min(max(v, 1000), 200_000) }
                 if let v = body.str("encoder"), ["auto", "hardware", "software"].contains(v) { c.video.encoder = v }
                 if let v = body.boolIfPresent("audio") { c.audio.enabled = v }
-                if let v = body.boolIfPresent("clipboard") { c.permissions.clipboard = v }
-                if let v = body.boolIfPresent("fileTransfer") { c.permissions.fileTransfer = v }
-                if let v = body.boolIfPresent("input") { c.permissions.input = v }
+                if let v = body.boolIfPresent("clipboard") { c.permissions.clipboard = v; rightsChanged = true }
+                if let v = body.boolIfPresent("fileTransfer") { c.permissions.fileTransfer = v; rightsChanged = true }
+                if let v = body.boolIfPresent("input") { c.permissions.input = v; rightsChanged = true }
                 if let v = body.boolIfPresent("notifyOnConnect") { c.notifyOnConnect = v }
-                if let v = body.boolIfPresent("relayEnabled") { c.relayEnabled = v }
-                if let v = body.boolIfPresent("supportAsk") { c.support.askBeforeAccepting = v }
                 if body["displayName"] != nil {
-                    let n = body.str("displayName")?.trimmingCharacters(in: .whitespaces) ?? ""
+                    let n = String((body.str("displayName") ?? "").trimmingCharacters(in: .whitespacesAndNewlines).prefix(64))
                     c.displayName = n.isEmpty ? nil : n
                 }
+                // Another Headroom server (self-hosting, testing); takes effect for the next sign-in and the relay.
+                if let v = body.str("server") { c.server = AccountService.normalizeServer(v) ?? HostConfig.defaultServer }
             }
+            if rightsChanged { SessionManager.rightsChanged() }
+            if body["displayName"] != nil { DispatchQueue.global().async { AccountService.shared.sync() } } // the new name, in the account now
             return .json(["ok": true])
         case (.POST, "/account/join"):
-            // The password goes to the account server only; this computer keeps its own credential there.
-            switch AccountService.shared.join(server: body.str("server") ?? "", username: body.str("username") ?? "",
-                                              password: body.str("password") ?? "", totp: body.str("totp")) {
-            case .success(let name): return .json(["ok": true, "username": name])
+            // The password goes to Headroom only; this computer keeps its own sign-in there.
+            switch AccountService.shared.join(email: body.str("email") ?? "", password: body.str("password") ?? "", totp: body.str("totp")) {
+            case .success(let email): return .json(["ok": true, "email": email])
             case .failure(let e):
                 let status: HTTPResponseStatus = e.code == "bad-credentials" || e.code == "totp-required" || e.code == "bad-totp" ? .unauthorized : .badRequest
                 return .json(["error": e.code, "message": e.description], status: status)
@@ -252,24 +186,21 @@ public final class WebHost: HttpApp {
         let parts = sub.split(separator: "/").map(String.init)
         if req.method == .POST, parts.count == 3, parts[0] == "sessions", parts[2] == "disconnect" {
             guard let s = SessionManager.active.first(where: { $0.id == parts[1] }) else { return .status(.notFound) }
-            // A support session ends for good: it may not resume with its key.
-            if let id = s.device?.id, id.hasPrefix("support:") { SupportService.shared.revoke(id) }
-            s.disconnect("disconnected from the host")
+            // A guest's access ends for good: it may not come back with its resume key.
+            if let id = s.device?.id, id.hasPrefix("guest:") { SupportService.shared.revoke(id) }
+            s.disconnect("stopped by the person at the computer")
+            return .json(["ok": true])
+        }
+        if req.method == .POST, parts.count == 3, parts[0] == "sessions", parts[2] == "rights" {
+            // A guest's control, files and clipboard, changed while connected.
+            guard let s = SessionManager.active.first(where: { $0.id == parts[1] }), let id = s.device?.id, id.hasPrefix("guest:") else { return .status(.notFound) }
+            SupportService.shared.setRights(id, input: body.boolIfPresent("input"), files: body.boolIfPresent("files"), clipboard: body.boolIfPresent("clipboard"))
             return .json(["ok": true])
         }
         if req.method == .POST, parts.count == 3, parts[0] == "support", parts[1] == "requests" {
-            let ok = SupportService.shared.decide(id: parts[2], accept: body.bool("accept"), viewOnly: body.bool("viewOnly"))
+            let ok = SupportService.shared.decide(id: parts[2], accept: body.bool("accept"), viewOnly: body.bool("viewOnly"),
+                                                  files: body.bool("files"), clipboard: body.bool("clipboard"))
             return ok ? .json(["ok": true]) : .json(["error": "That request is no longer waiting."], status: .notFound)
-        }
-        if parts.count == 2, parts[0] == "devices", req.method == .DELETE {
-            let ok = AuthService.revokeDevice(parts[1])
-            SessionManager.disconnectDevice(parts[1])
-            return ok ? .json(["ok": true]) : .status(.notFound)
-        }
-        if parts.count == 3, parts[0] == "devices", parts[2] == "viewonly", req.method == .POST {
-            let viewOnly = body.bool("viewOnly")
-            ConfigStore.update { c in if let i = c.devices.firstIndex(where: { $0.id == parts[1] }) { c.devices[i].viewOnly = viewOnly } }
-            return .json(["ok": true])
         }
         return .status(.notFound)
     }
@@ -278,24 +209,18 @@ public final class WebHost: HttpApp {
         let c = ConfigStore.current
         return [
             "host": HostInfo.describe(),
-            "hasPassword": c.password != nil,
-            "totpEnabled": c.totpEnabled,
             "port": c.port,
-            "urls": serverUrls(),
-            "tailscale": certs.tailscaleName as Any?,
-            "devices": c.devices.map(\.adminJson),
-            "sessions": SessionManager.active.map { s -> JSONObject in
-                ["id": s.id, "device": s.device?.name as Any?, "deviceId": s.device?.id as Any?, "remoteAddress": s.remoteAddress, "connectedAt": s.connectedAt]
+            "sessions": SessionManager.active.filter { $0.device != nil }.map { s -> JSONObject in
+                [
+                    "id": s.id, "device": s.device?.name as Any?, "deviceId": s.device?.id as Any?,
+                    "guest": s.rights.guest, "remoteAddress": s.remoteAddress, "country": s.country as Any?,
+                    "connectedAt": s.connectedAt, "rights": s.rights.json,
+                ]
             },
-            "elevated": false,
-            "serviceInstalled": false,
             "pid": Int(ProcessInfo.processInfo.processIdentifier),
-            "httpPort": c.httpHelperPort,
             "lanAddresses": NetInterfaces.ipv4Addresses(),
             "dataDir": Paths.dataDir,
             "logDir": Paths.logDir,
-            "caThumbprint": certs.caThumbprint,
-            "serverKeyFingerprint": certs.serverKeyFingerprint,
             "permissions": Permissions.json,
             "testPattern": Displays.testPatternSize != nil,
             "account": AccountService.shared.statusJson as Any?,
@@ -304,11 +229,12 @@ public final class WebHost: HttpApp {
             "settings": [
                 "video": c.video.json, "audio": c.audio.json, "permissions": c.permissions.json,
                 "lockOnDisconnect": c.lockOnDisconnect, "displayName": c.displayName as Any?, "notifyOnConnect": c.notifyOnConnect,
-                "relayEnabled": c.relayEnabled, "supportAsk": c.support.askBeforeAccepting,
+                "server": c.server,
             ] as JSONObject,
         ]
     }
 
+    /// How Headroom Viewer on the same network reaches this Mac directly (reported to the account).
     public func serverUrls() -> [String] {
         let port = ConfigStore.current.port
         var urls = [String]()
@@ -319,8 +245,7 @@ public final class WebHost: HttpApp {
     }
 }
 
-/// The static client (no-cache = always revalidate, so updates land immediately; the service worker
-/// provides offline start). Unknown non-API paths fall back to index.html (SPA).
+/// The settings window's files (no-cache = always revalidate, so updates land immediately).
 enum StaticFiles {
     static let types: [String: String] = [
         "html": "text/html; charset=utf-8", "js": "text/javascript; charset=utf-8", "mjs": "text/javascript; charset=utf-8",
@@ -341,8 +266,6 @@ enum StaticFiles {
         if !inside || !fm.fileExists(atPath: file.path, isDirectory: &isDir) || isDir.boolValue {
             if inside, isDir.boolValue, fm.fileExists(atPath: file.appendingPathComponent("index.html").path) {
                 file = file.appendingPathComponent("index.html")
-            } else if (path as NSString).pathExtension.isEmpty {
-                file = root.appendingPathComponent("index.html") // SPA fallback
             } else {
                 return .status(.notFound)
             }

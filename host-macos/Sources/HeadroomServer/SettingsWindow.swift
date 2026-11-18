@@ -8,7 +8,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate, WKNavigationDelegate, WK
     private let web: WKWebView
     private let startServer: (@escaping (Bool) -> Void) -> Void
     private var onAdminPage = false
-    private var pendingSection = "status"
+    private var pendingSection = "home"
     var onClose: (() -> Void)?
 
     init(startServer: @escaping (@escaping (Bool) -> Void) -> Void) {
@@ -44,7 +44,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate, WKNavigationDelegate, WK
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    /// Show a settings section ("status", "pair", "devices", ...).
+    /// Show a section ("home", "connect", "account", "settings").
     func navigate(_ section: String, reload: Bool = false) {
         pendingSection = section
         if onAdminPage && !reload {
@@ -53,6 +53,11 @@ final class SettingsWindow: NSObject, NSWindowDelegate, WKNavigationDelegate, WK
             return
         }
         if let url = URL(string: "\(AdminClient.baseUrl)/admin.html#\(section)") { web.load(URLRequest(url: url)) }
+    }
+
+    private func sendToPage(_ msg: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: msg), let json = String(data: data, encoding: .utf8) else { return }
+        web.evaluateJavaScript("window.dispatchEvent(new CustomEvent('headroom-native', { detail: \(json) }))")
     }
 
     func reloadIfOffline() {
@@ -83,7 +88,12 @@ final class SettingsWindow: NSObject, NSWindowDelegate, WKNavigationDelegate, WK
                 NSWorkspace.shared.open(u)
             }
         case "startServer":
-            startServer { [weak self] ok in if ok { self?.navigate(self?.pendingSection ?? "status", reload: true) } }
+            startServer { [weak self] ok in if ok { self?.navigate(self?.pendingSection ?? "home", reload: true) } }
+        case "getLoginItem":
+            sendToPage(["cmd": "loginItem", "enabled": AppDelegate.loginEnabled])
+        case "loginItem":
+            AppDelegate.setLogin(body["enabled"] as? Bool ?? false)
+            sendToPage(["cmd": "loginItem", "enabled": AppDelegate.loginEnabled])
         default:
             break
         }
@@ -102,8 +112,8 @@ final class SettingsWindow: NSObject, NSWindowDelegate, WKNavigationDelegate, WK
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = action.request.url else { return decisionHandler(.cancel) }
         let local = url.host == "127.0.0.1" || url.host == "localhost"
-        // Certificate downloads and anything off-host open in the default browser.
-        if action.navigationType == .linkActivated && (!local || url.path.hasPrefix("/headroom-ca")) || url.scheme == "x-apple.systempreferences" {
+        // Anything off this Mac (the Headroom website: create an account, forgot password) opens in the browser.
+        if action.navigationType == .linkActivated && !local || url.scheme == "x-apple.systempreferences" {
             NSWorkspace.shared.open(url)
             return decisionHandler(.cancel)
         }

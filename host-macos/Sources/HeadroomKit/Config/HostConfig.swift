@@ -7,20 +7,16 @@ import Foundation
 public struct HostConfig: Codable {
     /// Stable random id so viewers can recognise this host across address changes.
     public var hostId: String?
+    /// HTTPS port for Headroom Viewer on the same network (sessions and file transfer only).
     public var port = 7443
-    /// Plain-HTTP helper port that only serves the CA certificate/profile and redirects to HTTPS. 0 disables it.
+    /// Loopback-only port for this Mac's settings window. 0 disables it.
     public var httpHelperPort = 7080
+    /// The name shown in your account and to people who connect (default: the computer's name).
     public var displayName: String?
-
-    public var password: PasswordRecord?
-    /// Base32 TOTP secret. When set (and totpEnabled), pairing a new device needs a 6-digit code.
-    public var totpSecret: String?
-    public var totpEnabled = false
-
-    public var devices: [PairedDevice] = []
 
     public var video = VideoSettings()
     public var audio = AudioSettings()
+    /// What your own devices (signed in to your account) may do. Guests get what you allow when you accept them.
     public var permissions = PermissionSettings()
     public var tls = TlsSettings()
 
@@ -28,11 +24,12 @@ public struct HostConfig: Codable {
     public var lockOnDisconnect = false
     /// Show a notification when someone connects (menu-bar app).
     public var notifyOnConnect = true
-    /// Membership in a Headroom account (account-server/), if joined.
+    /// The Headroom service: accounts, and the relay that makes this computer reachable from anywhere.
+    public var server = HostConfig.defaultServer
+    /// Signed in to a Headroom account (with this computer's own sign-in there), if it is.
     public var account: AccountLink?
-    /// While joined, stay reachable through the account server's relay (browsers anywhere, no port forwarding).
-    public var relayEnabled = true
-    public var support = SupportSettings()
+
+    public static let defaultServer = "https://relay.colasac.co"
 
     public init() {}
 
@@ -42,66 +39,30 @@ public struct HostConfig: Codable {
         port = try c.decodeIfPresent(Int.self, forKey: .port) ?? 7443
         httpHelperPort = try c.decodeIfPresent(Int.self, forKey: .httpHelperPort) ?? 7080
         displayName = try c.decodeIfPresent(String.self, forKey: .displayName)
-        password = try c.decodeIfPresent(PasswordRecord.self, forKey: .password)
-        totpSecret = try c.decodeIfPresent(String.self, forKey: .totpSecret)
-        totpEnabled = try c.decodeIfPresent(Bool.self, forKey: .totpEnabled) ?? false
-        devices = try c.decodeIfPresent([PairedDevice].self, forKey: .devices) ?? []
         video = try c.decodeIfPresent(VideoSettings.self, forKey: .video) ?? VideoSettings()
         audio = try c.decodeIfPresent(AudioSettings.self, forKey: .audio) ?? AudioSettings()
         permissions = try c.decodeIfPresent(PermissionSettings.self, forKey: .permissions) ?? PermissionSettings()
         tls = try c.decodeIfPresent(TlsSettings.self, forKey: .tls) ?? TlsSettings()
         lockOnDisconnect = try c.decodeIfPresent(Bool.self, forKey: .lockOnDisconnect) ?? false
         notifyOnConnect = try c.decodeIfPresent(Bool.self, forKey: .notifyOnConnect) ?? true
-        account = try c.decodeIfPresent(AccountLink.self, forKey: .account)
-        relayEnabled = try c.decodeIfPresent(Bool.self, forKey: .relayEnabled) ?? true
-        support = try c.decodeIfPresent(SupportSettings.self, forKey: .support) ?? SupportSettings()
+        server = (try? c.decodeIfPresent(String.self, forKey: .server)) ?? HostConfig.defaultServer
+        // Sign-ins from before email accounts (usernames) don't work any more: start signed out.
+        account = try? c.decodeIfPresent(AccountLink.self, forKey: .account)
     }
 }
 
-/// Remote support: someone without an account connects with this computer's Headroom ID and a one-time code.
-public struct SupportSettings: Codable {
-    /// Show Accept / Decline on this computer before a support session starts. Off = the code alone lets them in.
-    public var askBeforeAccepting = true
-
-    public init() {}
-    public init(from d: Decoder) throws {
-        let c = try d.container(keyedBy: CodingKeys.self)
-        askBeforeAccepting = try c.decodeIfPresent(Bool.self, forKey: .askBeforeAccepting) ?? true
-    }
-}
-
-/// This computer's link to an account: its own credential there (not the account password) and the last device
-/// list it received, so it keeps working through a short account-server outage.
+/// This computer's sign-in to an account: its own credential there (not the account password) and the last list
+/// of sign-ins it received, so it keeps working through a short outage.
 public struct AccountLink: Codable {
     public var server: String
-    public var username: String
+    public var email: String
     public var accountId: String
     public var deviceId: String
     public var token: String
     public var devices: [AccountService.Device]
 }
 
-public struct PasswordRecord: Codable {
-    public var algorithm = "pbkdf2-sha256"
-    public var iterations = 0
-    public var salt = ""
-    public var hash = ""
-
-    public init(iterations: Int, salt: String, hash: String) {
-        self.iterations = iterations
-        self.salt = salt
-        self.hash = hash
-    }
-
-    public init(from d: Decoder) throws {
-        let c = try d.container(keyedBy: CodingKeys.self)
-        algorithm = try c.decodeIfPresent(String.self, forKey: .algorithm) ?? "pbkdf2-sha256"
-        iterations = try c.decodeIfPresent(Int.self, forKey: .iterations) ?? 0
-        salt = try c.decodeIfPresent(String.self, forKey: .salt) ?? ""
-        hash = try c.decodeIfPresent(String.self, forKey: .hash) ?? ""
-    }
-}
-
+/// Who a session belongs to: one of your account's sign-ins ("account:<id>") or a guest ("guest:<id>").
 public struct PairedDevice: Codable {
     public var id = ""
     public var name = ""

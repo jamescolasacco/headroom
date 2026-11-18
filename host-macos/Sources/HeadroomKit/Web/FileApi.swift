@@ -46,13 +46,12 @@ enum FileApi {
     }
 
     static func download(_ req: HttpRequest) -> HttpResponse {
-        guard ConfigStore.current.permissions.fileTransfer else { return .status(.forbidden) }
         guard let (path, deviceId) = AuthService.redeemEphemeral(req.query["t"], purpose: "download") else {
             return .json(["error": "link expired"], status: .unauthorized)
         }
-        // The device may have been made view-only (or input turned off) since the link was minted.
-        guard let status = AuthService.deviceStatus(deviceId), !status.viewOnly else {
-            return .json(["error": "view-only device"], status: .forbidden)
+        // File transfer may have been turned off for this session since the link was made.
+        guard AuthService.allowed(deviceId)?.files == true else {
+            return .json(["error": "file transfer isn't allowed"], status: .forbidden)
         }
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue,
@@ -154,9 +153,8 @@ enum FileApi {
     }
 
     private static func denied(_ req: HttpRequest) -> HttpResponse? {
-        guard ConfigStore.current.permissions.fileTransfer else { return .json(["error": "file transfer disabled on host"], status: .forbidden) }
         guard let dev = AuthService.validateToken(req.bearerToken, ip: req.remoteIP, touch: false) else { return .json(["error": "unauthorized"], status: .unauthorized) }
-        if dev.viewOnly { return .json(["error": "view-only device"], status: .forbidden) }
+        guard AuthService.allowed(dev.id)?.files == true else { return .json(["error": "file transfer isn't allowed"], status: .forbidden) }
         return nil
     }
 

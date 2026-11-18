@@ -4,8 +4,9 @@ import NIOCore
 import NIOSSL
 import NIOPosix
 
-/// Starts the host: certificates, HTTPS/WSS on 7443, the plain-HTTP helper on 7080, then runs the main
-/// run loop (AppKit pieces — cursor shape, pasteboard, display names — live on the main thread).
+/// Starts the host: certificates, HTTPS/WSS on 7443 (Headroom Viewer on the same network), the settings window on
+/// 127.0.0.1:7080, the relay connection and the account check-in; then runs the main run loop (AppKit pieces —
+/// cursor shape, pasteboard, display names — live on the main thread).
 public enum Engine {
     private static var server: HttpServer?
     private static var webHost: WebHost?
@@ -36,7 +37,7 @@ public enum Engine {
         do {
             let tls = try NIOSSLContext(configuration: certs.makeTlsConfiguration())
             try srv.listen(port: cfg.port, tls: tls, loopbackOnly: loopbackOnly)
-            if cfg.httpHelperPort > 0 { try srv.listen(port: cfg.httpHelperPort, tls: nil, loopbackOnly: loopbackOnly) }
+            if cfg.httpHelperPort > 0 { try srv.listen(port: cfg.httpHelperPort, tls: nil, loopbackOnly: true) } // settings: this Mac only
         } catch let e as IOError where e.errnoCode == EADDRINUSE {
             Log.error("main", "Port \(cfg.port) or \(cfg.httpHelperPort) is already in use. Is Headroom already running?")
             srv.shutdown()
@@ -90,21 +91,13 @@ public enum Engine {
 
     private static func printBanner(_ host: WebHost) {
         let cfg = ConfigStore.current
-        var s = "\n  Headroom \(HostInfo.version) — \(HostInfo.name)\n\n  Open from another device:\n"
-        for u in host.serverUrls() { s += "    \(u)\n" }
-        if cfg.httpHelperPort > 0 {
-            let ip = NetInterfaces.ipv4Addresses().first ?? "localhost"
-            s += "\n  First time on a device? Trust this Mac's certificate: http://\(ip):\(cfg.httpHelperPort)/\n"
-            s += "  On this Mac: http://localhost:\(cfg.httpHelperPort)/  (settings: http://localhost:\(cfg.httpHelperPort)/admin.html)\n"
-        }
-        s += "\n"
-        if !AuthService.hasPassword {
-            let code = AuthService.createPairCode(lifetime: 15 * 60)
-            s += "  No password set yet. One-time pairing code (15 min): \(code.prefix(5))-\(code.dropFirst(5))\n"
-            s += "  Set a permanent one with:  headroom set-password\n"
+        var s = "\n  Headroom \(HostInfo.version) — \(HostInfo.name)\n\n"
+        if let a = cfg.account {
+            s += "  Signed in as \(a.email): open \(a.server) on any device and sign in to connect.\n"
         } else {
-            s += "  \(cfg.devices.count) paired device(s). New devices pair with the password, or run:  headroom pair\n"
+            s += "  Not signed in to a Headroom account. Sign in from the settings: http://localhost:\(cfg.httpHelperPort)/\n"
         }
+        s += "  To let someone connect with a code, use the settings (Let someone connect).\n"
         if !Permissions.screenRecording { s += "\n  ! \(Permissions.screenRecordingHint)\n" }
         if !Permissions.accessibility { s += "  ! \(Permissions.accessibilityHint)\n" }
         print(s)

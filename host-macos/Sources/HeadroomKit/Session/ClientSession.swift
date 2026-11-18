@@ -14,6 +14,10 @@ public final class ClientSession: WebSocketPeer, VideoSink {
     public let connectedAt = Date()
     public private(set) var device: PairedDevice?
     public var remoteAddress: String { (transport?.remoteIP ?? "?") + (transport?.relayed == true ? " (via relay)" : "") }
+    /// The viewer's country, as the relay saw it.
+    public var country: String? { transport?.country }
+    /// What this session may do (shown, and changeable for guests, in the settings window).
+    public private(set) var rights = SessionRights(input: false, files: false, clipboard: false, guest: false)
 
     private weak var transport: WebSocketTransport?
     private let input = InputContext()
@@ -28,8 +32,10 @@ public final class ClientSession: WebSocketPeer, VideoSink {
     private let clipLock = NSLock()
     private var clipboardSubscribed = false
     private var handshakeDone = false
-    /// A support code was accepted and the person at this computer is being asked: ignore further hellos.
+    /// A guest code was right and the person at this computer is being asked: ignore further hellos.
     private var awaitingApproval = false
+    private var pendingWho: (name: String, ip: String?)?
+    private var pendingTimer: DispatchSourceTimer?
     private var closed = false
     private var handshakeTimer: DispatchWorkItem?
     private var tickTimer: DispatchSourceTimer?
@@ -95,46 +101,66 @@ public final class ClientSession: WebSocketPeer, VideoSink {
             transport?.close(code: .policyViolation, reason: "rate limited")
             return
         }
+        let guestPath = transport?.guest == true
         if let support = root["support"] as? JSONObject {
+            // Guest codes only arrive through the relay's code path (which throttles guessing too).
+            guard guestPath else {
+                sendJson(["t": "error", "code": "bad-code", "message": "Enter the code at the Headroom website."])
+                transport?.close(code: .policyViolation, reason: "code outside the relay")
+                return
+            }
             supportHandshake(support, root: root, ip: ip)
             return
         }
-        guard let dev = AuthService.validateToken(root.str("token"), ip: ip) else {
-            sendJson(["t": "error", "code": "unauthorized", "message": "This device is not paired (or was revoked). Pair again."])
+        guard !guestPath, let dev = AuthService.validateToken(root.str("token"), ip: ip) else {
+            sendJson(["t": "error", "code": "unauthorized", "message": "This computer doesn't accept this sign-in right now."])
             transport?.close(code: .policyViolation, reason: "unauthorized")
             return
         }
         completeHandshake(dev, ip: ip)
     }
 
-    /// Someone with this computer's ID and a one-time support code: check the code, ask the person here, then
-    /// start a session that can resume with the key sent in `welcome`.
+    /// Someone with a guest code: check it, ask the person here (always), then start a session that can resume
+    /// with the key sent in `welcome`, on this computer's own relay path (the code is used up).
     private func supportHandshake(_ support: JSONObject, root: JSONObject, ip: String?) {
         guard SupportService.shared.verify(support.str("code") ?? "") else {
             AuthService.recordFailure(ip)
-            sendJson(["t": "error", "code": "bad-code", "message": "That code is wrong or has expired. Ask for a new one."])
+            sendJson(["t": "error", "code": "bad-code", "message": "That code is wrong, expired or already used. Ask for a new one."])
             transport?.close(code: .policyViolation, reason: "bad code")
             return
         }
-        let given = (support.str("name") ?? (root["client"] as? JSONObject)?.str("name") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let name = given.isEmpty ? "Guest" : String(given.prefix(48))
+        // The name is whatever they typed: shown as unverified. Only printable characters, kept short.
+        let given = (support.str("name") ?? "").unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) && !CharacterSet.illegalCharacters.contains($0) }
+        let trimmed = String(String.UnicodeScalarView(given)).trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = trimmed.isEmpty ? "Someone" : String(trimmed.prefix(40))
         awaitingApproval = true
-        if ConfigStore.current.support.askBeforeAccepting {
-            sendJson(["t": "pending", "message": "Waiting for someone at \(HostInfo.name) to accept…"])
-        }
-        SupportService.shared.requestApproval(name: name, ip: ip) { [weak self] decision in
+        pendingWho = (name, ip)
+        let waiting: JSONObject = ["t": "pending", "message": "Waiting for the person at \(HostInfo.name) to accept…"]
+        sendJson(waiting)
+        // Keeps the connection alive through proxies while they decide.
+        let keepAlive = DispatchSource.makeTimerSource(queue: queue)
+        keepAlive.schedule(deadline: .now() + 20, repeating: 20)
+        keepAlive.setEventHandler { [weak self] in self?.sendJson(waiting) }
+        keepAlive.resume()
+        pendingTimer = keepAlive
+        SupportService.shared.requestApproval(name: name, ip: ip, country: transport?.country) { [weak self] decision in
             guard let self else { return }
             self.queue.async {
+                self.pendingTimer?.cancel()
+                self.pendingTimer = nil
+                self.pendingWho = nil
                 guard !self.closed else { return }
                 guard let decision else {
-                    self.sendJson(["t": "error", "code": "declined", "message": "The person at \(HostInfo.name) didn't accept the connection."])
+                    self.sendJson(["t": "error", "code": "declined", "message": "The person at \(HostInfo.name) didn't accept."])
                     self.transport?.close(code: .policyViolation, reason: "declined")
                     return
                 }
                 AuthService.recordSuccess(ip)
-                let (dev, token) = SupportService.shared.startSession(name: name, viewOnly: decision.viewOnly, ip: ip)
-                Log.info("support", "\(self.id): support session for '\(name)' from \(ip ?? "?")")
-                self.completeHandshake(dev, ip: ip, extra: ["resumeToken": token, "support": true])
+                let (dev, token) = SupportService.shared.startSession(name: name, decision: decision, ip: ip)
+                Log.info("guest", "\(self.id): guest session for '\(name)' from \(ip ?? "?")")
+                var extra: JSONObject = ["resumeToken": token, "support": true]
+                if let path = RelayService.shared.relayPath { extra["relayPath"] = path }
+                self.completeHandshake(dev, ip: ip, extra: extra)
             }
         }
     }
@@ -144,7 +170,8 @@ public final class ClientSession: WebSocketPeer, VideoSink {
         device = dev
         handshakeDone = true
         let cfg = ConfigStore.current
-        viewOnly = dev.viewOnly || !cfg.permissions.input
+        rights = AuthService.allowed(dev.id) ?? SessionRights(input: false, files: false, clipboard: false, guest: dev.id.hasPrefix("guest:"))
+        viewOnly = !rights.input
         Log.info("session", "\(id): '\(dev.name)' connected from \(ip ?? "?")")
 
         sendJson(extra.merging([
@@ -155,8 +182,8 @@ public final class ClientSession: WebSocketPeer, VideoSink {
             "device": ["id": dev.id, "name": dev.name],
             "permissions": [
                 "input": !viewOnly,
-                "clipboard": cfg.permissions.clipboard,
-                "files": cfg.permissions.fileTransfer,
+                "clipboard": rights.clipboard,
+                "files": rights.files,
                 "audio": cfg.permissions.audio && cfg.audio.enabled && !sameMachine,
             ],
             "limits": ["maxFps": cfg.video.maxFps, "maxBitrateKbps": cfg.video.maxBitrateKbps],
@@ -168,6 +195,30 @@ public final class ClientSession: WebSocketPeer, VideoSink {
         }
         SessionManager.register(self)
         startTicking()
+    }
+
+    /// What this session may do changed (from the settings window, or this computer's settings): apply it now.
+    public func applyRights() {
+        queue.async { [weak self] in
+            guard let self, self.handshakeDone, !self.closed, let dev = self.device else { return }
+            guard let r = AuthService.allowed(dev.id) else { self.disconnect("access ended"); return }
+            guard r != self.rights else { return }
+            self.rights = r
+            self.viewOnly = !r.input
+            if self.viewOnly { InputInjector.shared.releaseAll(self.input) }
+            if r.clipboard && self.pipeline != nil && !self.clipboardSubscribed {
+                self.clipboardSubscribed = true
+                ClipboardService.shared.subscribe(self) { [weak self] text in self?.onClipboardChanged(text) }
+            } else if !r.clipboard && self.clipboardSubscribed {
+                self.clipboardSubscribed = false
+                ClipboardService.shared.unsubscribe(self)
+            }
+            let cfg = ConfigStore.current
+            var p = r.json
+            p["audio"] = cfg.permissions.audio && cfg.audio.enabled && !self.sameMachine
+            self.sendJson(["t": "permissions", "permissions": p])
+            Log.info("session", "\(self.id): now control=\(r.input) files=\(r.files) clipboard=\(r.clipboard)")
+        }
     }
 
     // ------------------------------------------------------------------------------------------- receive
@@ -219,7 +270,6 @@ public final class ClientSession: WebSocketPeer, VideoSink {
     }
 
     private func handleJson(_ root: JSONObject) {
-        let cfg = ConfigStore.current
         switch root.str("t") {
         case "ping":
             sendJson(["t": "pong", "id": root.int("id") as Any?, "ts": root.double("ts") ?? 0, "host": Clock.nowUs])
@@ -229,12 +279,12 @@ public final class ClientSession: WebSocketPeer, VideoSink {
             pipeline?.requestKeyframe()
         case "monitors":
             sendJson(["t": "monitors", "monitors": Displays.enumerate().map(\.json)])
-        case "clip" where cfg.permissions.clipboard:
+        case "clip" where rights.clipboard:
             if let text = root.str("text") {
                 clipLock.lock(); lastClipboardSent = text; clipLock.unlock() // don't echo it back
                 ClipboardService.shared.setText(text)
             }
-        case "clip-get" where cfg.permissions.clipboard:
+        case "clip-get" where rights.clipboard:
             let text = ClipboardService.shared.getText()
             sendJson(["t": "clip", "text": text ?? "", "requested": true])
         case "text" where !viewOnly:
@@ -247,7 +297,7 @@ public final class ClientSession: WebSocketPeer, VideoSink {
             handleSpecial(root.str("action") ?? "")
         case "audio":
             setAudio(root.bool("enabled"))
-        case "file-token" where cfg.permissions.fileTransfer && !viewOnly:
+        case "file-token" where rights.files:
             if let path = root.str("path"), let dev = device {
                 let tok = AuthService.createEphemeral(deviceId: dev.id, purpose: "download", value: path, lifetime: 120)
                 sendJson(["t": "file-token", "path": path, "token": tok, "id": root["id"] as Any?])
@@ -299,7 +349,7 @@ public final class ClientSession: WebSocketPeer, VideoSink {
         if let p = pipeline { p.updateSettings(settings) } else { pipeline = VideoPipeline(settings: settings, sink: self, initialEpoch: epochBase) }
         attachCursor()
         if let a = root.boolIfPresent("audio") { setAudio(a) }
-        if cfg.permissions.clipboard && !clipboardSubscribed {
+        if rights.clipboard && !clipboardSubscribed {
             clipboardSubscribed = true
             ClipboardService.shared.subscribe(self) { [weak self] text in self?.onClipboardChanged(text) }
         }
@@ -578,6 +628,8 @@ public final class ClientSession: WebSocketPeer, VideoSink {
         guard !closed else { return }
         closed = true
         handshakeTimer?.cancel()
+        pendingTimer?.cancel()
+        if let who = pendingWho { SupportService.shared.withdraw(name: who.name, ip: who.ip) } // left while waiting
         tickTimer?.cancel()
         tickTimer = nil
         InputInjector.shared.releaseAll(input)
