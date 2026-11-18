@@ -220,7 +220,8 @@ jobs:
           $svc = Get-Service Headroom -ErrorAction SilentlyContinue
           if (-not $svc) {
             Get-Content "$env:RUNNER_TEMP\server-setup.log" -Tail 40
-            & "$dst\headroom.exe" service status
+            Write-Host "--- headroom service install, run again here:"
+            & "$dst\headroom.exe" service install 2>&1 | ForEach-Object { Write-Host $_ }
             throw "the installer didn't create the Headroom service"
           }
           Write-Host "Headroom service: $($svc.Status), start $($svc.StartType)"

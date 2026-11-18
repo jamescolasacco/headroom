@@ -113,17 +113,32 @@ public static class ServiceInstaller
         return key != null;
     }
 
-    private static int Sc(params string[] args) => Run("sc.exe", string.Join(' ', args.Select(Quote)));
-
-    private static string Quote(string a) => a.Contains(' ') && !a.StartsWith('"') ? $"\"{a.Replace("\"", "\\\"")}\"" : a;
+    // sc.exe reads its arguments the usual way, so each one goes in quoted as it needs: binPath= gets its value whole,
+    // inner quotes and all ("C:\Program Files\Headroom\headroom.exe" service-run), not the path and then a stray
+    // service-run that sc rejects.
+    private static int Sc(params string[] args)
+    {
+        var psi = Start("sc.exe");
+        foreach (var a in args) psi.ArgumentList.Add(a);
+        return Run(psi, quiet: false, echo: args[0] == "query");
+    }
 
     private static int Run(string file, string args, bool quiet = false)
     {
-        var psi = new ProcessStartInfo(file, args) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+        var psi = Start(file);
+        psi.Arguments = args;
+        return Run(psi, quiet, echo: false);
+    }
+
+    private static ProcessStartInfo Start(string file) =>
+        new(file) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+
+    private static int Run(ProcessStartInfo psi, bool quiet, bool echo)
+    {
         using var p = Process.Start(psi)!;
         var output = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
         p.WaitForExit();
-        if (!quiet && (p.ExitCode != 0 || file == "sc.exe" && args.StartsWith("query"))) Console.Write(output);
+        if (!quiet && (p.ExitCode != 0 || echo)) Console.Write(output);
         return p.ExitCode;
     }
 }

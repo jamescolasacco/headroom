@@ -74,10 +74,17 @@ Type: filesandordirs; Name: "{app}"
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   Code: Integer;
+  Ran: Boolean;
 begin
   if CurStep <> ssPostInstall then Exit;
   WizardForm.StatusLabel.Caption := 'Starting the Headroom service...';
-  if not Exec(ExpandConstant('{app}\headroom.exe'), 'service install', ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, Code) then
+  // What it prints goes into Setup's log (Setup /LOG=file), so a failure says why.
+#if VER >= EncodeVer(6, 3, 0)
+  Ran := ExecAndLogOutput(ExpandConstant('{app}\headroom.exe'), 'service install', ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, Code, nil);
+#else
+  Ran := Exec(ExpandConstant('{app}\headroom.exe'), 'service install', ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, Code);
+#endif
+  if not Ran then
     Code := -1;
   Log(Format('headroom service install: exit code %d', [Code]));
   if Code <> 0 then
