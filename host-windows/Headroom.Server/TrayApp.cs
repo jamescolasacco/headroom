@@ -92,6 +92,7 @@ public sealed class TrayApp : ApplicationContext
         }
         _knownViewers = ids;
         _firstPoll = false;
+        ShowSupportPrompts(st.SupportRequests);
 
         int n = st.Viewers.Count;
         _tray.Icon = n > 0 ? _activeIcon : _idleIcon;
@@ -107,6 +108,36 @@ public sealed class TrayApp : ApplicationContext
 
     private void Notify(string title, string text) => _tray.ShowBalloonTip(5000, title, text, ToolTipIcon.None);
 
+    // ------------------------------------------------------------------ remote support
+
+    private readonly Dictionary<string, SupportPrompt> _prompts = new();
+
+    /// <summary>
+    /// Someone typed this PC's Headroom ID and support code: Accept, View only or Decline, like AnyDesk. A prompt closes
+    /// by itself when its request is answered elsewhere (the settings window) or times out.
+    /// </summary>
+    private void ShowSupportPrompts(IReadOnlyList<SupportRequest> requests)
+    {
+        foreach (var (id, prompt) in _prompts.ToArray())
+        {
+            if (requests.Any(r => r.Id == id)) continue;
+            _prompts.Remove(id);
+            if (!prompt.IsDisposed) prompt.Dismiss();
+        }
+        foreach (var r in requests.Where(r => !_prompts.ContainsKey(r.Id)))
+        {
+            var prompt = new SupportPrompt(r, async (accept, viewOnly) =>
+            {
+                await _admin.AnswerSupportAsync(r.Id, accept, viewOnly);
+                await PollAsync();
+            });
+            _prompts[r.Id] = prompt;
+            prompt.Show();
+            prompt.Activate();
+            System.Media.SystemSounds.Asterisk.Play();
+        }
+    }
+
     // ------------------------------------------------------------------ menu
 
     private void BuildMenu()
@@ -121,6 +152,9 @@ public sealed class TrayApp : ApplicationContext
         m.Items.Add(new ToolStripMenuItem(header) { Enabled = false });
         m.Items.Add(new ToolStripSeparator());
         m.Items.Add(new ToolStripMenuItem("Open Headroom Server", null, (_, _) => ShowWindow("status")) { Font = new Font(m.Font, FontStyle.Bold) });
+        if (st?.RelayId is { Length: 9 } rid)
+            m.Items.Add(new ToolStripMenuItem($"Headroom ID {rid[..3]} {rid[3..6]} {rid[6..]}") { Enabled = false });
+        m.Items.Add(new ToolStripMenuItem("Remote support…", null, (_, _) => ShowWindow("support")) { Enabled = st != null });
         m.Items.Add(new ToolStripMenuItem("Pair a device…", null, (_, _) => ShowWindow("pair")) { Enabled = st != null });
 
         var copy = new ToolStripMenuItem("Copy address") { Enabled = st != null && st.Urls.Count > 0 };
