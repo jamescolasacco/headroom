@@ -137,6 +137,23 @@ computer's key as vouched for by your account), otherwise through the relay. "Go
   Ctrl+Alt+End sends Ctrl+Alt+Del.
 - Each computer can open in its own window (the arrow button next to it).
 
+## Updates
+
+Headroom Server and Headroom Viewer check for a new release every few hours and download it in the background.
+When it's ready they say so (a notification, the menu-bar or tray menu, and the window): **Restart to update**
+quits, swaps in the new version and opens it again in a few seconds. Nothing restarts by itself, so a computer
+you're reaching from far away never drops out from under you. On Windows, Headroom Server's update asks for
+administrator permission once (it replaces Program Files and restarts the service).
+
+An update is installed only when it checks out: the release's checksum list must be signed with Headroom's
+certificate (`assets/headroom-signing.cer`), every file must match it, and on a Mac the new apps must be signed
+with that same certificate. That signature is also what lets macOS keep Screen Recording and Accessibility, and
+firewalls like Little Snitch keep their rules, from one version to the next.
+
+Forks: run `tools/make-signing-cert.sh` once (it makes your own certificate and saves it as the GitHub secrets
+`MACOS_SIGN_P12` and `MACOS_SIGN_PASSWORD`; commit the `assets/headroom-signing.cer` it writes), and build with
+`HEADROOM_UPDATE_REPO=you/repo` (Mac) / `-p:HeadroomUpdateRepo=you/repo` (Windows) so the apps look at your releases.
+
 ## iPhone / iPad
 
 Open https://relay.colasac.co in Safari, sign in (or enter a code), then **Share → Add to Home Screen** for a
@@ -200,6 +217,7 @@ host-windows/Headroom.Host/   C# / .NET 10 host
   Service/   Windows service + session agent launcher (SYSTEM in the console session), installer
   Web/       Kestrel HTTPS/WSS server, file API, settings API
 host-windows/Headroom.Server/ HeadroomServer.exe: tray icon, notifications, settings window (WebView2)
+update-windows/Updater.cs     updates for HeadroomServer.exe and HeadroomViewer.exe (one file, in both)
 viewer-windows/Headroom.Viewer/ HeadroomViewer.exe: WebView2 shell, pinned-key trust, system-shortcut hook
 host-macos/                   Swift package (SwiftNIO + swift-nio-ssl + swift-certificates)
   Sources/HeadroomKit/        the engine, same structure as the Windows host:
@@ -213,6 +231,7 @@ host-macos/                   Swift package (SwiftNIO + swift-nio-ssl + swift-ce
   Sources/headroom/           the CLI / engine executable (`headroom run`, `headroom agent`, …)
   Sources/HeadroomServer/     Headroom Server.app: menu-bar icon, notifications, settings window (WKWebView)
 viewer-macos/                 Headroom Viewer.app: WKWebView shell, pinned-key trust, system-shortcut capture
+update-macos/                 updates for both Mac apps (Swift package, no dependencies) and its test harness
 web/                          the client (vanilla ES modules, no build step), also the PWA
   js/video/  worker decoder: VideoTrackGenerator→<video> on Safari, OffscreenCanvas elsewhere
   js/input/  keyboard (profiles, quirks), mouse, touch gestures, soft keyboard
@@ -257,7 +276,7 @@ connects through the relay as one of your devices. Both work against either host
   code), so the relay can't see them.
 - **Mac login window:** a LaunchDaemon helper so a Mac can be reached after a restart, before anyone logs in
   (the counterpart of Windows service mode).
-- Signed and notarized Mac builds (stable permissions across updates), and a Windows/Mac installer UI.
+- Notarized Mac builds (an Apple Developer ID: no "unidentified developer" on first install), and an installer UI.
 - A virtual display sized to the iPad, HEVC / 4:4:4 "sharp text" mode, and WebTransport for lossy
   networks.
 
