@@ -80,7 +80,7 @@ public static class AuthService
         while (GlobalFailures.Count > 0 && GlobalFailures.Peek() < DateTime.UtcNow.AddMinutes(-1)) GlobalFailures.Dequeue();
     }
 
-    private static void RecordFailure(IPAddress? ip)
+    public static void RecordFailure(IPAddress? ip)
     {
         var key = ip?.ToString() ?? "?";
         var rec = Failures.GetOrAdd(key, _ => new FailureRecord());
@@ -104,7 +104,8 @@ public static class AuthService
         Log.Warn("auth", $"failed authentication from {key} (count {rec.Count})");
     }
 
-    private static void RecordSuccess(IPAddress? ip) => Failures.TryRemove(ip?.ToString() ?? "?", out _);
+    /// <summary>A successful authentication clears the address's failures (it takes valid credentials, so it can't be abused).</summary>
+    public static void RecordSuccess(IPAddress? ip) => Failures.TryRemove(ip?.ToString() ?? "?", out _);
 
     // ---------------------------------------------------------------- pairing
 
@@ -184,12 +185,15 @@ public static class AuthService
         }
         if (match == null)
         {
+            // A remote-support session reconnecting with its resume key (checked before the slow path below).
+            if (Services.SupportService.Shared.DeviceForHash(hash) is { } support) { RecordSuccess(ip); return support; }
             // A device of this computer's account? (If not yet known, it may have signed in moments ago: check in.)
             var acct = Services.AccountService.Shared.DeviceForHash(hash);
             if (acct == null && Services.AccountService.Shared.RefreshForUnknownToken()) acct = Services.AccountService.Shared.DeviceForHash(hash);
             if (acct != null)
             {
                 // Account devices are managed (and their last-seen kept) by the account server.
+                RecordSuccess(ip);
                 return new PairedDevice
                 {
                     Id = Services.AccountService.LocalId(acct.Id), Name = acct.Name, TokenHash = acct.TokenHash,
@@ -208,6 +212,7 @@ public static class AuthService
                 if (d != null) { d.LastSeen = DateTimeOffset.UtcNow; d.LastAddress = ip?.ToString(); }
             });
         }
+        RecordSuccess(ip);
         return match;
     }
 
@@ -250,6 +255,7 @@ public static class AuthService
         if (id == null) return null;
         if (ConfigStore.Current.Devices.FirstOrDefault(d => d.Id == id) is { } d) return (d.ViewOnly, false);
         if (id.StartsWith("account:", StringComparison.Ordinal) && Services.AccountService.Shared.Device(id[8..]) is { } a) return (a.ViewOnly, true);
+        if (id.StartsWith("support:", StringComparison.Ordinal) && Services.SupportService.Shared.Device(id) is { } sd) return (sd.ViewOnly, false);
         return null;
     }
 

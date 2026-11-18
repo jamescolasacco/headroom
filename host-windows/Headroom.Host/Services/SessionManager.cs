@@ -23,6 +23,7 @@ public static class SessionManager
 
     public static void Register(ClientSession s)
     {
+        if (s.Device?.Id is { } id && id.StartsWith("support:", StringComparison.Ordinal)) SupportService.Shared.SessionStarted(id);
         lock (Gate)
         {
             Sessions.Add(s);
@@ -34,6 +35,7 @@ public static class SessionManager
 
     public static void Unregister(ClientSession s)
     {
+        if (s.Device?.Id is { } id && id.StartsWith("support:", StringComparison.Ordinal)) SupportService.Shared.SessionEnded(id);
         bool last;
         lock (Gate)
         {

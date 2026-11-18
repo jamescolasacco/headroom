@@ -32,6 +32,16 @@ public sealed class HostConfig
 
     /// <summary>Membership in a Headroom account (account-server/), if joined.</summary>
     public AccountLink? Account { get; set; }
+    /// <summary>While joined, stay reachable through the account server's relay (browsers anywhere, no port forwarding).</summary>
+    public bool RelayEnabled { get; set; } = true;
+    public SupportSettings Support { get; set; } = new();
+}
+
+/// <summary>Remote support: someone without an account connects with this PC's Headroom ID and a one-time code.</summary>
+public sealed class SupportSettings
+{
+    /// <summary>Show Accept / Decline on this PC before a support session starts. Off = the code alone lets them in.</summary>
+    public bool AskBeforeAccepting { get; set; } = true;
 }
 
 /// <summary>

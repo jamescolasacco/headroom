@@ -109,6 +109,13 @@ public static class Program
         }
 
         AccountService.Shared.Start(certs);
+        // The relay's tunnels arrive on the loopback listener Kestrel bound to a free port.
+        var bound = app.Services.GetRequiredService<Microsoft.AspNetCore.Hosting.Server.IServer>()
+            .Features.Get<Microsoft.AspNetCore.Hosting.Server.Features.IServerAddressesFeature>()?.Addresses ?? Array.Empty<string>();
+        var relayPort = bound.Select(a => Uri.TryCreate(a.Replace("://+", "://x").Replace("://*", "://x"), UriKind.Absolute, out var u) ? u.Port : 0)
+            .FirstOrDefault(p => p > 0 && p != cfg.Port && p != cfg.HttpHelperPort);
+        if (relayPort > 0) RelayService.Shared.Start(relayPort);
+        else Log.Warn("relay", "no loopback port for relay tunnels; the relay is unavailable");
         if (banner) PrintBanner(certs);
         else Log.Info("main", $"agent running in session {Process.GetCurrentProcess().SessionId} as {(Input.InputInjector.IsSystem ? "SYSTEM" : Environment.UserName)}");
         app.WaitForShutdown();

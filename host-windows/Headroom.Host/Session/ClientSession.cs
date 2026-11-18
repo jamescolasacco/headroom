@@ -74,15 +74,18 @@ public sealed class ClientSession : IVideoSink
 
     public string Id { get; } = AuthService.Base64Url(System.Security.Cryptography.RandomNumberGenerator.GetBytes(6));
     public PairedDevice? Device => _device;
-    public string RemoteAddress => _remoteIp?.ToString() ?? "?";
+    public string RemoteAddress => (_remoteIp?.ToString() ?? "?") + (_relayed ? " (via relay)" : "");
+    /// <summary>Came through the account server's relay.</summary>
+    private readonly bool _relayed;
     public DateTime ConnectedAt { get; } = DateTime.UtcNow;
 
     private long NowUs => _clock.ElapsedTicks * 1_000_000 / Stopwatch.Frequency;
 
-    public ClientSession(WebSocket ws, IPAddress? remoteIp)
+    public ClientSession(WebSocket ws, IPAddress? remoteIp, bool relayed = false)
     {
         _ws = ws;
         _remoteIp = remoteIp;
+        _relayed = relayed;
         var v = ConfigStore.Current.Video;
         _maxKbps = v.MaxBitrateKbps;
         _minKbps = v.MinBitrateKbps;
@@ -149,7 +152,37 @@ public sealed class ClientSession : IVideoSink
             await CloseAsync(WebSocketCloseStatus.PolicyViolation, "rate limited");
             return false;
         }
-        _device = AuthService.ValidateToken(Str(root, "token"), _remoteIp);
+        string? resumeToken = null;
+        if (root.TryGetProperty("support", out var support) && support.ValueKind == JsonValueKind.Object)
+        {
+            // Someone with this PC's ID and a one-time support code: check it, ask the person here, then start a
+            // session that can resume with the key sent in welcome.
+            if (!SupportService.Shared.Verify(Str(support, "code")))
+            {
+                AuthService.RecordFailure(_remoteIp);
+                await SendJsonDirect(new { t = "error", code = "bad-code", message = "That code is wrong or has expired. Ask for a new one." });
+                await CloseAsync(WebSocketCloseStatus.PolicyViolation, "bad code");
+                return false;
+            }
+            var given = (Str(support, "name") ?? (root.TryGetProperty("client", out var cl) ? Str(cl, "name") : null) ?? "").Trim();
+            var name = given.Length == 0 ? "Guest" : given[..Math.Min(48, given.Length)];
+            if (ConfigStore.Current.Support.AskBeforeAccepting)
+                await SendJsonDirect(new { t = "pending", message = $"Waiting for someone at {HostInfo.Name} to accept…" });
+            var decision = await SupportService.Shared.RequestApprovalAsync(name, _remoteIp?.ToString(), ct);
+            if (decision == null)
+            {
+                await SendJsonDirect(new { t = "error", code = "declined", message = $"The person at {HostInfo.Name} didn't accept the connection." });
+                await CloseAsync(WebSocketCloseStatus.PolicyViolation, "declined");
+                return false;
+            }
+            AuthService.RecordSuccess(_remoteIp);
+            (_device, resumeToken) = SupportService.Shared.StartSession(name, decision.ViewOnly, _remoteIp?.ToString());
+            Log.Info("support", $"{Id}: support session for '{name}' from {_remoteIp}");
+        }
+        else
+        {
+            _device = AuthService.ValidateToken(Str(root, "token"), _remoteIp);
+        }
         if (_device == null)
         {
             await SendJsonDirect(new { t = "error", code = "unauthorized", message = "This device is not paired (or was revoked). Pair again." });
@@ -177,6 +210,8 @@ public sealed class ClientSession : IVideoSink
             limits = new { maxFps = cfg.Video.MaxFps, maxBitrateKbps = cfg.Video.MaxBitrateKbps },
             elevated = InputInjector.IsSystem,
             hostTimeUs = NowUs,
+            resumeToken,
+            support = resumeToken != null ? true : (bool?)null,
         });
         return true;
     }
@@ -447,7 +482,7 @@ public sealed class ClientSession : IVideoSink
 
     /// <summary>Viewer runs on this very PC (loopback or one of our own addresses).</summary>
     private bool SameMachine =>
-        _remoteIp != null && (IPAddress.IsLoopback(_remoteIp) || CertificateManager.GetLocalAddresses().Any(a => a.Equals(_remoteIp.IsIPv4MappedToIPv6 ? _remoteIp.MapToIPv4() : _remoteIp)));
+        !_relayed && _remoteIp != null && (IPAddress.IsLoopback(_remoteIp) || CertificateManager.GetLocalAddresses().Any(a => a.Equals(_remoteIp.IsIPv4MappedToIPv6 ? _remoteIp.MapToIPv4() : _remoteIp)));
 
     private bool _sameMachineNotified;
 

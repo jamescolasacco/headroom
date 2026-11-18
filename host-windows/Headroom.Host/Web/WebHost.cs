@@ -57,6 +57,8 @@ public static class WebHost
                 });
             });
             if (cfg.HttpHelperPort > 0) Listen(cfg.HttpHelperPort, _ => { });
+            // Where RelayService delivers tunnels from the account server's relay: loopback only, any free port.
+            k.Listen(IPAddress.Loopback, 0, lo => lo.Protocols = HttpProtocols.Http1);
         });
         builder.Services.AddRouting();
 
@@ -71,7 +73,20 @@ public static class WebHost
             h["Referrer-Policy"] = "no-referrer";
             h["X-Frame-Options"] = "DENY";
 
-            bool isHttps = ctx.Request.IsHttps;
+            if (IsRelayed(ctx))
+            {
+                // Through the relay: the viewer's address comes from the relay (a client can't set it: the relay
+                // replaces the header), and only sessions and file transfers are served. The relay forwards nothing
+                // else either; this is the second lock.
+                ctx.Connection.RemoteIpAddress = IPAddress.TryParse(ctx.Request.Headers["X-Headroom-Client"].ToString(), out var viewer) ? viewer : IPAddress.None;
+                if (!RelayAllows(ctx.Request.Path.Value ?? "/"))
+                {
+                    ctx.Response.StatusCode = 403;
+                    await ctx.Response.WriteAsJsonAsync(new { error = "not-relayed" });
+                    return;
+                }
+            }
+            bool isHttps = ctx.Request.IsHttps || IsRelayed(ctx);
             bool loopback = IsLoopback(ctx);
             if (!isHttps && !loopback)
             {
@@ -205,7 +220,9 @@ public static class WebHost
                 caThumbprint = certs.CaCertificate.Thumbprint,
                 serverKeyFingerprint = certs.ServerKeyFingerprint,
                 account = AccountService.Shared.Status,
-                settings = new { c.Video, c.Audio, c.Permissions, c.LockOnDisconnect, c.NotifyOnConnect, c.DisplayName },
+                relay = RelayService.Shared.Status,
+                support = SupportService.Shared.Status,
+                settings = new { c.Video, c.Audio, c.Permissions, c.LockOnDisconnect, c.NotifyOnConnect, c.DisplayName, c.RelayEnabled, supportAsk = c.Support.AskBeforeAccepting },
             }, ConfigStore.JsonOptions);
         });
         admin.MapPost("/password", async (HttpContext ctx) =>
@@ -252,13 +269,40 @@ public static class WebHost
         {
             var s = SessionManager.Active.FirstOrDefault(x => x.Id == id);
             if (s == null) return Results.NotFound();
+            // A support session ends for good: it may not resume with its key.
+            if (s.Device?.Id is { } did && did.StartsWith("support:", StringComparison.Ordinal)) SupportService.Shared.Revoke(did);
             s.Disconnect("disconnected from the host");
             return Results.Json(new { ok = true });
         });
         admin.MapPost("/sessions/disconnect-all", () =>
         {
+            SupportService.Shared.RevokeAll();
             foreach (var s in SessionManager.Active) s.Disconnect("disconnected from the host");
             return Results.Json(new { ok = true });
+        });
+        // Remote support: a one-time code to give, with this PC's Headroom ID, to the person helping.
+        admin.MapPost("/support/code", () =>
+        {
+            var (code, expires) = SupportService.Shared.CreateCode();
+            var url = RelayService.Shared.CurrentUrl;
+            return Results.Json(new
+            {
+                code, expiresAt = new DateTimeOffset(expires, TimeSpan.Zero), id = RelayService.Shared.CurrentId,
+                url, link = url != null ? url + "&code=" + code : null,
+            });
+        });
+        admin.MapDelete("/support/code", () =>
+        {
+            SupportService.Shared.CancelCode();
+            return Results.Json(new { ok = true });
+        });
+        admin.MapPost("/support/requests/{id}", async (string id, HttpContext ctx) =>
+        {
+            var body = await ReadJson(ctx);
+            bool Flag(string n) => body.ValueKind == JsonValueKind.Object && body.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.True;
+            return SupportService.Shared.Decide(id, Flag("accept"), Flag("viewOnly"))
+                ? Results.Json(new { ok = true })
+                : Results.Json(new { error = "That request is no longer waiting." }, statusCode: 404);
         });
         admin.MapDelete("/devices/{id}", (string id) =>
         {
@@ -296,6 +340,8 @@ public static class WebHost
             {
                 if (body.TryGetProperty("lockOnDisconnect", out var l)) c.LockOnDisconnect = l.GetBoolean();
                 if (body.TryGetProperty("notifyOnConnect", out var nc)) c.NotifyOnConnect = nc.GetBoolean();
+                if (body.TryGetProperty("relayEnabled", out var re)) c.RelayEnabled = re.GetBoolean();
+                if (body.TryGetProperty("supportAsk", out var sa)) c.Support.AskBeforeAccepting = sa.GetBoolean();
                 if (body.TryGetProperty("maxFps", out var f)) c.Video.MaxFps = Math.Clamp(f.GetInt32(), 10, 240);
                 if (body.TryGetProperty("maxBitrateKbps", out var b)) c.Video.MaxBitrateKbps = Math.Clamp(b.GetInt32(), 1000, 200000);
                 if (body.TryGetProperty("encoder", out var e) && e.GetString() is "auto" or "hardware" or "software") c.Video.Encoder = e.GetString()!;
@@ -319,7 +365,7 @@ public static class WebHost
             // Disable Nagle on the underlying socket: input acks and cursor updates must not be delayed.
             ctx.Features.Get<IConnectionSocketFeature>()?.Socket?.NoDelay = true;
             using var ws = await ctx.WebSockets.AcceptWebSocketAsync(new WebSocketAcceptContext { DangerousEnableCompression = false });
-            var session = new ClientSession(ws, ctx.Connection.RemoteIpAddress);
+            var session = new ClientSession(ws, ctx.Connection.RemoteIpAddress, IsRelayed(ctx));
             await session.RunAsync(lifetime.ApplicationStopping);
         });
 
@@ -337,7 +383,18 @@ public static class WebHost
 
     // ---------------------------------------------------------------------- helpers
 
-    public static bool IsLoopback(HttpContext ctx) => ctx.Connection.RemoteIpAddress is { } ip && IPAddress.IsLoopback(ip);
+    /// <summary>
+    /// Never true through the relay: the relay may run on this very PC, so a relayed connection's address says nothing
+    /// about where the viewer is.
+    /// </summary>
+    public static bool IsLoopback(HttpContext ctx) => !IsRelayed(ctx) && ctx.Connection.RemoteIpAddress is { } ip && IPAddress.IsLoopback(ip);
+
+    /// <summary>Arrived on the private port where RelayService delivers the relay's tunnels.</summary>
+    public static bool IsRelayed(HttpContext ctx) => RelayService.LocalPort != 0 && ctx.Connection.LocalPort == RelayService.LocalPort;
+
+    /// <summary>What a relayed viewer may reach: sessions and their file transfers. Never pairing, settings or certificate pages.</summary>
+    public static bool RelayAllows(string path) =>
+        path is "/ws" or "/api/info" or "/api/me" or "/api/files/list" or "/api/files/download" or "/api/files/upload" or "/api/files/mkdir";
 
     /// <summary>
     /// The admin API is for this PC's own settings window, CLI and browser — not for web pages. A loopback peer
