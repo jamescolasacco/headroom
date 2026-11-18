@@ -1,6 +1,6 @@
 // Offline-capable app shell. Network-first so an update is picked up immediately; the cache lets the home-screen
 // app open when the network is flaky.
-const CACHE = 'headroom-shell-v5';
+const CACHE = 'headroom-shell-v6';
 const SHELL = [
   '/', '/index.html', '/manifest.webmanifest', '/css/app.css',
   '/js/app.js', '/js/account.js', '/js/config.js', '/js/qr.js', '/js/api.js', '/js/store.js', '/js/platform.js', '/js/protocol.js', '/js/connection.js',
@@ -10,6 +10,7 @@ const SHELL = [
   '/js/input/keyboard.js', '/js/input/keymap.js', '/js/input/mouse.js', '/js/input/touch.js', '/js/input/softkbd.js',
   '/js/ui/dom.js', '/js/ui/icons.js', '/js/ui/toolbar.js', '/js/ui/stats.js', '/js/ui/extrakeys.js',
   '/icons/icon.svg', '/icons/icon-192.png', '/icons/apple-touch-icon.png',
+  '/fonts/AtkinsonHyperlegibleNext-latin.woff2', '/fonts/AtkinsonHyperlegibleMono-latin.woff2',
 ];
 
 self.addEventListener('install', e => {
