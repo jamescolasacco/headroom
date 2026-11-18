@@ -131,8 +131,9 @@ public final class Updater: @unchecked Sendable {
         lock.unlock()
     }
 
-    /// Hands the downloaded update to its installer, which waits for the apps to quit, replaces them and opens them
-    /// again. The caller quits right after this returns.
+    /// Hands the downloaded update to its installer, which waits for this app to quit, replaces it and opens it
+    /// again. Each app updates only itself (Headroom Server and Headroom Viewer each have an updater), so macOS
+    /// never has to let one app modify another. The caller quits right after this returns.
     public func install() throws {
         guard state.phase == .ready, let version = state.available else { throw UpdateError.notReady }
         let stage = config.cacheDir.appendingPathComponent(version).appendingPathComponent("x/Headroom")
@@ -140,15 +141,19 @@ public final class Updater: @unchecked Sendable {
         guard FileManager.default.fileExists(atPath: script.path) else { throw UpdateError.notReady }
         // Checked again now: the download waited in this user's folder since it was checked.
         try validate(stage.deletingLastPathComponent(), version: version)
-        let installed = installedApps()
+        guard let me = installedApps().first else { throw UpdateError.badPackage }
         var args = [script.path]
-        if installed.count == 1 { args += ["--only", installed[0].id == "app.headroom.server" ? "server" : "viewer"] }
-        // Open again what's open now from this folder (this app included): nothing more, nothing less.
-        let dir = config.appURL.deletingLastPathComponent()
-        let running = Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleURL?.standardizedFileURL.path })
-        let reopen = { (name: String) in running.contains(dir.appendingPathComponent(name).standardizedFileURL.path) }
-        if !reopen("Headroom Server.app") { args.append("--no-launch") }
-        if installed.contains(where: { $0.id == "app.headroom.viewer" }) && reopen("Headroom Viewer.app") { args.append("--relaunch-viewer") }
+        if me.id == "app.headroom.server" {
+            args += ["--only", "server"] // and opens it again
+        } else {
+            args += ["--only", "viewer", "--no-launch", "--relaunch-viewer"]
+        }
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["HEADROOM_UPDATE_NO_LAUNCH"] == "1" { // tests: install, open nothing
+            args.removeAll { $0 == "--relaunch-viewer" }
+            if !args.contains("--no-launch") { args.append("--no-launch") }
+        }
+        #endif
 
         let log = config.cacheDir.appendingPathComponent("install.log")
         let p = Process()
@@ -223,13 +228,10 @@ public final class Updater: @unchecked Sendable {
         }
     }
 
-    /// The Headroom apps in this app's folder (this one always).
+    /// The app this updater replaces: this one.
     public func installedApps() -> [(name: String, id: String)] {
-        let dir = config.appURL.deletingLastPathComponent()
         let me = Self.bundleInfo(config.appURL)?.id
-        return Self.apps.filter { app in
-            app.id == me || Self.bundleInfo(dir.appendingPathComponent(app.name))?.id == app.id
-        }
+        return Self.apps.filter { $0.id == me }
     }
 
     /// Downloads of versions that are installed now (or older) are no longer needed.

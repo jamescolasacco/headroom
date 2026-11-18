@@ -32,6 +32,13 @@ DEST="${HEADROOM_INSTALL_DIR:-/Applications}"
 mkdir -p "$DEST" 2>/dev/null || true
 [ -w "$DEST" ] || { DEST="$HOME/Applications"; mkdir -p "$DEST"; }
 
+# The updater runs this with HEADROOM_INSTALL_WAIT: whatever happens, Headroom Server must be running afterwards
+# (the new one, or the old one if something failed), or a computer someone reaches from afar would be gone.
+if [ -n "${HEADROOM_INSTALL_WAIT:-}" ] && [ "$LAUNCH" = 1 ] && [ "$ONLY" != "viewer" ]; then
+  set -E # the trap also fires inside install_app
+  trap 'open "$DEST/Headroom Server.app" || true' ERR
+fi
+
 install_app() { # name
   local src="$SRC/$1.app" dst="$DEST/$1.app"
   [ -d "$src" ] || { echo "$src not found: run tools/build-macos.sh first" >&2; exit 1; }
@@ -46,9 +53,12 @@ install_app() { # name
     fi
     if pgrep -f "$dst/Contents/MacOS/$exe" >/dev/null; then pkill -f "$dst/Contents/MacOS/$exe"; sleep 1; fi
   elif pgrep -x "$exe" >/dev/null; then pkill -x "$exe"; sleep 1; fi
+  # The new copy goes next to the old one first, so a failed copy leaves the old app in place.
+  rm -rf "$dst.new"
+  ditto "$src" "$dst.new"
+  xattr -dr com.apple.quarantine "$dst.new" 2>/dev/null || true
   rm -rf "$dst"
-  ditto "$src" "$dst"
-  xattr -dr com.apple.quarantine "$dst" 2>/dev/null || true
+  mv "$dst.new" "$dst"
   echo "Installed $dst"
 }
 
