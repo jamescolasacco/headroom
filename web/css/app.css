@@ -124,6 +124,12 @@ button.small-btn { min-height: 32px; padding: 4px 10px; font-size: 13px; }
 .qr-mini { width: 168px; margin: 4px auto 8px; background: #fff; border-radius: 8px; padding: 4px; }
 .qr-mini svg { display: block; width: 100%; height: auto; }
 button.link { background: none; border: 0; padding: 4px 0; min-height: 0; color: var(--accent); }
+.person { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
+.person svg { width: 16px; height: 16px; vertical-align: -3px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+.person .row-inline { margin-top: 4px; }
+.dlg select { min-height: 32px; padding: 4px 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); width: auto; font-size: 14px; }
+.dlg .callout input.mono { font-size: 12px; }
+.dlg .qr-mini { margin-top: 8px; }
 
 /* ------------------------------------------------------------------ dialogs */
 .dlg {
@@ -132,6 +138,7 @@ button.link { background: none; border: 0; padding: 4px 0; min-height: 0; color:
 }
 .dlg::backdrop { background: rgba(0, 0, 0, .55); backdrop-filter: blur(2px); }
 .dlg form, .dlg .body { padding: 20px; }
+.dlg .body form, .dlg form form { padding: 0; }
 .dlg h2 { margin: 0 0 6px; font-size: 19px; }
 .dlg .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; flex-wrap: wrap; }
 .dlg .error { color: var(--bad); font-size: 14px; min-height: 20px; margin-top: 8px; }

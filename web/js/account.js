@@ -53,14 +53,24 @@ export async function serverInfo(server) {
   } catch { return null; }
 }
 
-/** Sign in (or create the account) and remember it on this device. */
-export async function signIn(server, { username, password, totp, deviceName, platform, register = false }) {
+/** Sign in (or create the account, with an invite) and remember it on this device. */
+export async function signIn(server, { username, password, totp, deviceName, platform, register = false, invite }) {
   const r = await call(server, register ? '/api/account/register' : '/api/account/login', {
-    method: 'POST', body: { username, password, totp, deviceName, platform },
+    method: 'POST', body: { username, password, totp, deviceName, platform, invite },
   });
-  const a = { server, token: r.token, username: r.account.username, accountId: r.account.id, deviceId: r.device.id, deviceName: r.device.name, computers: [], fetchedAt: 0 };
+  const a = {
+    server, token: r.token, username: r.account.username, accountId: r.account.id, role: r.account.role || 'user',
+    deviceId: r.device.id, deviceName: r.device.name, computers: [], fetchedAt: 0, passwordWeak: !!r.passwordWeak,
+  };
   saveAccount(a);
+  try { localStorage.setItem('headroom.lastUsername', a.username); } catch { }
   return a;
+}
+
+/** Remembers what the server says about the account (role, after an administrator changed it). */
+export function updateAccount(patch) {
+  const a = loadAccount();
+  if (a) saveAccount({ ...a, ...patch });
 }
 
 export async function signOut() {
@@ -187,3 +197,23 @@ export const totpSetup = a => call(a.server, '/api/account/totp/setup', { method
 export const totpEnable = (a, code) => call(a.server, '/api/account/totp/enable', { method: 'POST', token: a.token, body: { code } });
 export const totpDisable = (a, password) => call(a.server, '/api/account/totp/disable', { method: 'POST', token: a.token, body: { password } });
 export const me = a => call(a.server, '/api/account/me', { token: a.token });
+
+// ------------------------------------------------------------------ invite and reset links (no sign-in needed)
+
+export const inviteInfo = (server, token) => call(server, `/api/invite/${encodeURIComponent(token)}`);
+export const resetInfo = (server, token) => call(server, `/api/reset/${encodeURIComponent(token)}`);
+export const resetPassword = (server, token, password) => call(server, '/api/account/reset', { method: 'POST', body: { token, password } });
+
+// ------------------------------------------------------------------ administration (administrators only)
+
+export const listUsers = a => call(a.server, '/api/admin/users', { token: a.token }).then(r => r.users);
+export const listInvites = a => call(a.server, '/api/admin/invites', { token: a.token }).then(r => r.invites);
+export const createInvite = (a, { role, note, password }) => call(a.server, '/api/admin/invites', { method: 'POST', token: a.token, body: { role, note, password } });
+export const cancelInvite = (a, id) => call(a.server, `/api/admin/invites/${encodeURIComponent(id)}`, { method: 'DELETE', token: a.token });
+export const setUserRole = (a, id, role, password) => call(a.server, `/api/admin/users/${encodeURIComponent(id)}`, { method: 'POST', token: a.token, body: { role, password } });
+export const resetLink = (a, id) => call(a.server, `/api/admin/users/${encodeURIComponent(id)}/reset-link`, { method: 'POST', token: a.token });
+export const resetUserTwoFactor = (a, id, password) => call(a.server, `/api/admin/users/${encodeURIComponent(id)}/reset-2fa`, { method: 'POST', token: a.token, body: { password } });
+export const deleteUser = (a, id, password) => call(a.server, `/api/admin/users/${encodeURIComponent(id)}`, { method: 'DELETE', token: a.token, body: { password } });
+
+/** A link that opens the app on `server` with a token in the fragment (never sent to any server by the browser). */
+export const linkFor = (server, kind, token) => `${server}/#${kind}=${token}`;

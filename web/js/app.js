@@ -52,6 +52,9 @@ async function main() {
   const connectId = hash.get('connect');
   const toConnect = connectId && hosts.find(x => x.id === connectId);
   if (toConnect) { connect(toConnect); return; }
+  // Links from an administrator: https://<account server>/#invite=… or #reset=…
+  if (hash.get('invite')) { await inviteFlow(hash.get('invite')); return; }
+  if (hash.get('reset')) { await resetFlow(hash.get('reset')); return; }
   // A remote-support link: https://<relay>/#id=<Headroom ID>[&code=<support code>]
   if (hash.get('id')) { supportFlow({ id: hash.get('id'), code: hash.get('code') || '' }); return; }
   // Served by a computer, with nothing saved and no account server to sign in to: offer to pair with it. (With an
@@ -490,11 +493,11 @@ function signInForm({ inline = false, onDone, onCancel } = {}) {
   const where = h('span', {}, server ? server.replace(/^https?:\/\//, '') : '');
   const change = h('button', { type: 'button', class: 'link', hidden: !server || servedByAccount() || null, onclick: () => { srvWrap.hidden = false; change.hidden = true; srv.focus(); } }, 'Change server');
   const serverLine = h('p', { class: 'muted small', hidden: !server }, 'Your Headroom account on ', where, change.hidden ? null : ' · ', change);
-  const user = h('input', { type: 'text', autocomplete: 'username', autocapitalize: 'off', spellcheck: 'false', 'aria-label': 'Username' });
+  const user = h('input', { type: 'text', autocomplete: 'username', autocapitalize: 'off', spellcheck: 'false', 'aria-label': 'Username', value: pref('headroom.lastUsername') });
   const pass = h('input', { type: 'password', autocomplete: 'current-password', 'aria-label': 'Password' });
   const totp = h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code', placeholder: '123456', maxlength: '6', 'aria-label': 'Authenticator code' });
   const totpWrap = h('div', { hidden: true }, h('label', { class: 'field' }, 'Authenticator code'), totp);
-  const title = h(inline ? 'h2' : 'h2', {}, 'Sign in');
+  const title = h('h2', {}, 'Sign in');
   const switchLink = h('button', { type: 'button', class: 'link', hidden: true }, 'Create an account');
   const submit = h('button', { type: 'submit', class: inline ? 'primary wide' : 'primary' }, 'Sign in');
   const setMode = r => {
@@ -546,7 +549,9 @@ function signInForm({ inline = false, onDone, onCancel } = {}) {
       await refreshAccount();
       renderHome();
       const n = Account.accountHosts().length;
-      toast(n ? `Signed in · ${n} computer${n === 1 ? '' : 's'}` : 'Signed in. Now add your computers: Headroom Server → Settings → Account on each one.', 6000);
+      toast(Account.loadAccount()?.passwordWeak
+        ? 'Signed in. Please change your password: it doesn\'t meet this server\'s rules (tap your name).'
+        : n ? `Signed in · ${n} computer${n === 1 ? '' : 's'}` : 'Signed in. Now add your computers: Headroom Server → Settings → Account on each one.', 7000);
     } catch (ex) {
       const b = ex.body || {};
       if (b.error === 'totp-required') { totpWrap.hidden = false; totp.focus(); err.textContent = 'Enter the 6-digit code from your authenticator app.'; }
@@ -577,7 +582,7 @@ async function accountDialog() {
     const list = h('div', { class: 'list-mini' }, h('p', { class: 'muted small' }, 'Loading…'));
     const msg = h('div', { class: 'error', role: 'alert' });
     const totpBox = h('div');
-    const fail = e => { msg.textContent = e.body?.error === 'bad-credentials' ? 'Wrong password.' : e.body?.error === 'bad-totp' ? 'That code didn\'t work.' : e.message; };
+    const fail = e => { msg.textContent = e.body?.message || (e.body?.error === 'bad-credentials' ? 'Wrong password.' : e.body?.error === 'bad-totp' ? 'That code didn\'t work.' : e.message); };
     const ago = d => {
       if (!d) return 'never';
       const sec = (Date.now() - new Date(d)) / 1000;
@@ -597,16 +602,12 @@ async function accountDialog() {
             type: 'button', class: 'small-btn', title: d.viewOnly ? 'Let this device control computers' : 'This device can watch but not control',
             onclick: async () => { try { await Account.setViewOnly(a, d.id, !d.viewOnly); load(); } catch (e) { fail(e); } },
           }, d.viewOnly ? 'Allow control' : 'View only') : null,
-          d.current ? null : h('button', {
-            type: 'button', class: 'small-btn danger', onclick: async () => {
-              const q = d.kind === 'computer'
-                ? `Remove ${d.name} from the account? Your devices stop seeing it (pairings made directly with it keep working).`
-                : `Remove ${d.name}? It's signed out and loses access to every computer in the account within seconds.`;
-              if (!await confirmDialog('Remove from account?', q, 'Remove', true)) return;
-              try { await Account.removeDevice(a, d.id); load(); refreshAccount(); } catch (e) { fail(e); }
-            },
-          }, 'Remove'))));
+          d.current ? null : confirmButton('Remove', d.kind === 'computer' ? 'Remove from account?' : 'Sign it out?', async () => {
+            try { await Account.removeDevice(a, d.id); load(); refreshAccount(); } catch (e) { fail(e); }
+          }))));
         drawTotp(info.account.totpEnabled);
+        Account.updateAccount({ role: info.account.role });
+        roleLine.hidden = info.account.role !== 'admin';
       } catch (e) { fail(e); }
     };
     const drawTotp = enabled => {
@@ -638,14 +639,28 @@ async function accountDialog() {
     };
     const cur = h('input', { type: 'password', placeholder: 'Current password', autocomplete: 'current-password', 'aria-label': 'Current password' });
     const nw = h('input', { type: 'password', placeholder: 'New password', autocomplete: 'new-password', 'aria-label': 'New password' });
+    const roleLine = h('div', { hidden: a.role !== 'admin' },
+      h('p', { class: 'small' }, h('span', { class: 'tag' }, 'Administrator'), ' You can invite people and manage the accounts on this server.'),
+      h('button', { type: 'button', class: 'small-btn primary', onclick: () => { done(); peopleDialog(); } }, 'Manage people'));
+    const weak = a.passwordWeak ? h('div', { class: 'callout small' }, h('b', {}, 'Please change your password.'),
+      ' It doesn\'t meet this server\'s rules (at least 12 characters, not your username, not a common or breached password). A few random words work well.') : null;
     dlg.append(h('div', { class: 'body' },
       h('h2', {}, a.username),
-      h('p', { class: 'muted small' }, `Headroom account at ${a.server}`),
+      h('p', { class: 'muted small' }, `Headroom account at ${a.server.replace(/^https?:\/\//, '')}`),
+      roleLine,
       h('h3', { class: 'sub-h' }, 'Computers and devices'), list,
-      h('h3', { class: 'sub-h' }, 'Security'), totpBox,
+      h('h3', { class: 'sub-h' }, 'Security'), weak, totpBox,
+      h('p', { class: 'small muted' }, 'Change password: at least 12 characters (a few words work well). Your other browsers and phones will need to sign in again.'),
       h('div', { class: 'row-inline' }, cur, nw, h('button', {
         type: 'button', class: 'small-btn', onclick: async () => {
-          try { await Account.changePassword(a, cur.value, nw.value); cur.value = nw.value = ''; msg.textContent = ''; toast('Password changed'); } catch (e) { fail(e); }
+          try {
+            const r = await Account.changePassword(a, cur.value, nw.value);
+            cur.value = nw.value = '';
+            msg.textContent = '';
+            Account.updateAccount({ passwordWeak: false });
+            weak?.remove();
+            toast(r.signedOut ? `Password changed. ${r.signedOut} other device${r.signedOut === 1 ? '' : 's'} signed out.` : 'Password changed.', 5000);
+          } catch (e) { fail(e); }
         },
       }, 'Change password')),
       msg,
@@ -653,6 +668,226 @@ async function accountDialog() {
         h('button', { type: 'button', class: 'danger', onclick: async () => { done(); await Account.signOut(); renderHome(); toast('Signed out'); } }, 'Sign out'),
         h('button', { type: 'button', class: 'primary', onclick: () => done() }, 'Done'))));
     load();
+  });
+}
+
+const agoText = d => {
+  if (!d) return 'never';
+  const sec = (Date.now() - new Date(d)) / 1000;
+  return sec < 90 ? 'just now' : sec < 3600 ? `${Math.round(sec / 60)} min ago` : sec < 86400 ? `${Math.round(sec / 3600)} h ago` : new Date(d).toLocaleDateString();
+};
+
+/** A button that asks "are you sure?" in place: the first tap arms it, the second (within 5 s) runs it. */
+function confirmButton(label, question, run) {
+  let armed = 0;
+  const b = h('button', { type: 'button', class: 'small-btn danger' }, label);
+  b.onclick = async () => {
+    if (!armed) {
+      b.textContent = question;
+      armed = setTimeout(() => { armed = 0; b.textContent = label; }, 5000);
+      return;
+    }
+    clearTimeout(armed);
+    armed = 0;
+    b.disabled = true;
+    try { await run(); } finally { b.disabled = false; b.textContent = label; }
+  };
+  return b;
+}
+
+/** Password rules shown wherever a new password is chosen (the server checks them too, plus breached passwords). */
+const passwordHint = () => h('p', { class: 'muted small' }, 'At least 12 characters. A few random words make a strong, easy one; spaces are fine. Passwords known from data breaches are refused.');
+
+/** Administrators: the people on this server. Invite links, password reset links, two-factor resets, roles, removal. */
+function peopleDialog() {
+  const a = Account.loadAccount();
+  if (!a) return signInFlow();
+  return dialog((dlg, done) => {
+    const msg = h('div', { class: 'error', role: 'alert' });
+    const result = h('div');
+    const users = h('div', { class: 'list-mini' }, h('p', { class: 'muted small' }, 'Loading…'));
+    const invites = h('div', { class: 'list-mini' });
+    const fail = e => { msg.textContent = e.body?.message || (e.body?.error === 'bad-credentials' ? 'Wrong password.' : e.message); };
+    const showLink = (title, url, note) => {
+      const field = h('input', { type: 'text', readonly: true, value: url, class: 'mono', 'aria-label': 'Link', onclick: e => e.target.select() });
+      const qr = h('div', { class: 'qr-mini' });
+      qr.innerHTML = qrSvg(url, { border: 2 });
+      result.replaceChildren(h('div', { class: 'callout' }, h('b', {}, title), h('p', { class: 'small' }, note),
+        h('div', { class: 'row-inline' }, field, h('button', {
+          type: 'button', class: 'small-btn', onclick: async e => {
+            try { await navigator.clipboard.writeText(url); e.target.textContent = 'Copied'; } catch { field.select(); e.target.textContent = 'Press ⌘C / Ctrl+C'; }
+          },
+        }, 'Copy')), qr));
+      result.scrollIntoView({ block: 'nearest' });
+    };
+    // Changes that could lock someone out ask for your password again (re-authentication), right in the row.
+    const withPassword = (row, label, run) => {
+      row.querySelector('.reauth')?.remove();
+      const pw = h('input', { type: 'password', placeholder: 'Your password', autocomplete: 'current-password', 'aria-label': 'Your password' });
+      const go = h('button', { type: 'submit', class: 'small-btn danger' }, label);
+      const box = h('form', { class: 'row-inline reauth' }, pw, go, h('button', { type: 'button', class: 'small-btn', onclick: () => box.remove() }, 'Cancel'));
+      box.onsubmit = async e => {
+        e.preventDefault();
+        go.disabled = true;
+        try { await run(pw.value); msg.textContent = ''; box.remove(); load(); } catch (ex) { fail(ex); } finally { go.disabled = false; }
+      };
+      row.append(box);
+      pw.focus();
+    };
+    const userRow = u => {
+      const me = u.id === a.accountId;
+      const row = h('div', { class: 'person' },
+        h('div', {}, svg(I.user, 16), ' ', h('b', {}, u.username), me ? h('span', { class: 'tag' }, 'you') : null,
+          u.role === 'admin' ? h('span', { class: 'tag' }, 'administrator') : null, u.totpEnabled ? h('span', { class: 'tag' }, 'two-factor') : null),
+        h('div', { class: 'muted small' }, `${u.computers} computer${u.computers === 1 ? '' : 's'} · ${u.devices} signed-in device${u.devices === 1 ? '' : 's'} · active ${agoText(u.lastSeen)}`));
+      if (!me) {
+        row.append(h('div', { class: 'row-inline' },
+          h('button', {
+            type: 'button', class: 'small-btn', title: 'A link to choose a new password (24 hours, works once). Their devices are signed out when they use it.',
+            onclick: async () => {
+              try {
+                const r = await Account.resetLink(a, u.id);
+                showLink(`Password reset link for ${u.username}`, Account.linkFor(a.server, 'reset', r.token), 'Send it to them privately. It works once, for 24 hours; using it signs out their browsers and phones.');
+              } catch (e) { fail(e); }
+            },
+          }, 'Reset password'),
+          u.totpEnabled ? h('button', { type: 'button', class: 'small-btn', onclick: () => withPassword(row, 'Turn off their two-factor', pw => Account.resetUserTwoFactor(a, u.id, pw)) }, 'Reset two-factor') : null,
+          h('button', {
+            type: 'button', class: 'small-btn',
+            onclick: () => withPassword(row, u.role === 'admin' ? 'Make regular user' : 'Make administrator', pw => Account.setUserRole(a, u.id, u.role === 'admin' ? 'user' : 'admin', pw)),
+          }, u.role === 'admin' ? 'Remove administrator' : 'Make administrator'),
+          h('button', { type: 'button', class: 'small-btn danger', onclick: () => withPassword(row, `Delete ${u.username}`, pw => Account.deleteUser(a, u.id, pw)) }, 'Delete')));
+      }
+      return row;
+    };
+    const load = async () => {
+      try {
+        const [us, inv] = await Promise.all([Account.listUsers(a), Account.listInvites(a)]);
+        us.sort((x, y) => (x.id === a.accountId ? -1 : y.id === a.accountId ? 1 : x.username.localeCompare(y.username)));
+        users.replaceChildren(...us.map(userRow));
+        invites.replaceChildren(...(inv.length ? inv.map(x => h('div', { class: 'li-mini' },
+          h('div', { class: 'grow' }, h('div', {}, x.note || 'Invite', x.role === 'admin' ? h('span', { class: 'tag' }, 'administrator') : null),
+            h('div', { class: 'muted small' }, `expires ${new Date(x.expires).toLocaleDateString()}`)),
+          confirmButton('Cancel', 'Cancel invite?', async () => { try { await Account.cancelInvite(a, x.id); load(); } catch (e) { fail(e); } }))) : [h('p', { class: 'muted small' }, 'No open invites.')]));
+      } catch (e) {
+        if (e.status === 403) { msg.textContent = 'Only administrators can manage people.'; Account.updateAccount({ role: 'user' }); return; }
+        fail(e);
+      }
+    };
+    const note = h('input', { type: 'text', placeholder: 'Their name (optional)', 'aria-label': 'Their name' });
+    const role = h('select', { 'aria-label': 'Role' }, h('option', { value: 'user' }, 'Regular user'), h('option', { value: 'admin' }, 'Administrator'));
+    const create = h('button', { type: 'submit', class: 'small-btn primary' }, 'Create invite link');
+    const inviteForm = h('form', { class: 'row-inline' }, note, role, create);
+    const adminPw = h('input', { type: 'password', placeholder: 'Your password (to invite an administrator)', autocomplete: 'current-password', hidden: true, 'aria-label': 'Your password' });
+    role.onchange = () => { adminPw.hidden = role.value !== 'admin'; };
+    inviteForm.onsubmit = async e => {
+      e.preventDefault();
+      create.disabled = true;
+      try {
+        const r = await Account.createInvite(a, { role: role.value, note: note.value.trim(), password: adminPw.value || undefined });
+        msg.textContent = '';
+        note.value = adminPw.value = '';
+        showLink(`Invite link${r.role === 'admin' ? ' (administrator)' : ''}`, Account.linkFor(a.server, 'invite', r.token),
+          'Send it to the person you\'re inviting. They choose their own username and password. It works once, for 7 days.');
+        load();
+      } catch (ex) { fail(ex); } finally { create.disabled = false; }
+    };
+    dlg.append(h('div', { class: 'body' },
+      h('h2', {}, 'People'),
+      h('p', { class: 'muted small' }, `Accounts on ${a.server.replace(/^https?:\/\//, '')}. Each person has their own computers and devices; nobody sees anyone else's.`),
+      h('h3', { class: 'sub-h' }, 'Invite someone'), inviteForm, adminPw, result,
+      h('h3', { class: 'sub-h' }, 'Open invites'), invites,
+      h('h3', { class: 'sub-h' }, 'Accounts'), users,
+      msg,
+      h('div', { class: 'actions' },
+        h('button', { type: 'button', onclick: () => { done(); accountDialog(); } }, 'Back'),
+        h('button', { type: 'button', class: 'primary', onclick: () => done() }, 'Done'))));
+    load();
+  });
+}
+
+/** Someone opened an invite link (#invite=…): they choose a username and password and are signed in. */
+async function inviteFlow(token) {
+  const server = defaultServer();
+  let info;
+  try { info = await Account.inviteInfo(server, token); } catch (e) {
+    toast(e.body?.message || 'This invite link is invalid, used or expired. Ask for a new one.', 8000);
+    return;
+  }
+  if (Account.loadAccount()) await Account.signOut(); // this device joins the new account
+  return dialog((dlg, done) => {
+    const err = h('div', { class: 'error', role: 'alert' });
+    const user = h('input', { type: 'text', autocomplete: 'username', autocapitalize: 'off', spellcheck: 'false', 'aria-label': 'Username' });
+    const pass = h('input', { type: 'password', autocomplete: 'new-password', 'aria-label': 'Password' });
+    const again = h('input', { type: 'password', autocomplete: 'new-password', 'aria-label': 'Password again' });
+    const submit = h('button', { type: 'submit', class: 'primary' }, 'Create account');
+    const form = h('form', {},
+      h('h2', {}, 'Create your Headroom account'),
+      h('p', { class: 'muted small' }, `${info.from ? `${info.from} invited you` : 'You\'re invited'} to ${server.replace(/^https?:\/\//, '')}${info.role === 'admin' ? ' as an administrator' : ''}. Then add your computers and reach them from any browser.`),
+      h('label', { class: 'field' }, 'Username'), user,
+      h('p', { class: 'muted small' }, '3–64 letters, digits, dots, dashes or underscores.'),
+      h('label', { class: 'field' }, 'Password'), pass,
+      h('label', { class: 'field' }, 'Password again'), again, passwordHint(), err,
+      h('div', { class: 'actions' }, h('button', { type: 'button', onclick: () => done() }, 'Cancel'), submit));
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      err.textContent = '';
+      if (pass.value !== again.value) { err.textContent = 'The passwords don\'t match.'; return; }
+      submit.disabled = true;
+      try {
+        await Account.signIn(server, { register: true, invite: token, username: user.value.trim(), password: pass.value, deviceName: deviceLabel(), platform: platformId() });
+        done(true);
+        await refreshAccount();
+        renderHome();
+        toast('Account created. Now add your computers: Headroom Server → Settings → Account on each one.', 7000);
+      } catch (ex) {
+        err.textContent = ex.body?.message || ex.message;
+      } finally { submit.disabled = false; }
+    });
+    dlg.append(form);
+    setTimeout(() => user.focus(), 50);
+  });
+}
+
+/** Someone opened a password reset link (#reset=…) from an administrator. */
+async function resetFlow(token) {
+  const server = defaultServer();
+  let info;
+  try { info = await Account.resetInfo(server, token); } catch (e) {
+    toast(e.body?.message || 'This reset link is invalid, used or expired. Ask for a new one.', 8000);
+    return;
+  }
+  return dialog((dlg, done) => {
+    const err = h('div', { class: 'error', role: 'alert' });
+    const pass = h('input', { type: 'password', autocomplete: 'new-password', 'aria-label': 'New password' });
+    const again = h('input', { type: 'password', autocomplete: 'new-password', 'aria-label': 'New password again' });
+    const submit = h('button', { type: 'submit', class: 'primary' }, 'Set password');
+    const form = h('form', {},
+      h('h2', {}, `New password for ${info.username}`),
+      h('p', { class: 'muted small' }, 'Your browsers and phones will be signed out; sign in again with the new password.'),
+      h('input', { type: 'text', autocomplete: 'username', value: info.username, hidden: true, readonly: true }),
+      h('label', { class: 'field' }, 'New password'), pass,
+      h('label', { class: 'field' }, 'Again'), again, passwordHint(), err,
+      h('div', { class: 'actions' }, h('button', { type: 'button', onclick: () => done() }, 'Cancel'), submit));
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      err.textContent = '';
+      if (pass.value !== again.value) { err.textContent = 'The passwords don\'t match.'; return; }
+      submit.disabled = true;
+      try {
+        await Account.resetPassword(server, token, pass.value);
+        if (Account.loadAccount()?.username === info.username) await Account.signOut();
+        try { localStorage.setItem('headroom.lastUsername', info.username); } catch { }
+        done(true);
+        $('signin-slot').replaceChildren(); // rebuilt with the username filled in
+        renderHome();
+        toast('Password changed. Sign in with it now.', 6000);
+      } catch (ex) {
+        err.textContent = ex.body?.message || ex.message;
+      } finally { submit.disabled = false; }
+    });
+    dlg.append(form);
+    setTimeout(() => pass.focus(), 50);
   });
 }
 
