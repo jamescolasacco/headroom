@@ -38,6 +38,7 @@ let loginItem = null;     // Start at login (native window only): true/false, or
 const choices = {};       // request id -> { files, clipboard }: kept while the page redraws
 let knownRequests = null; // request and session ids seen at the last poll (null before the first)
 let knownSessions = null;
+let pendingFocus = null;  // where an action leaves you after the redraw it causes: a data-key, or 'heading'
 
 // ------------------------------------------------------------------ api
 async function api(path, opts = {}) {
@@ -63,13 +64,19 @@ async function refresh({ force = false } = {}) {
   st = next;
   tellAboutChanges();
   renderNav();
-  document.getElementById('side-host').textContent = st.host.name;
+  const side = document.getElementById('side-host');
+  side.textContent = st.host.name;
+  side.title = st.host.name; // the menu cuts a long name short
   document.getElementById('side-foot').textContent = `v${st.host.version}`;
   const key = viewKey();
   if (force || wasOffline || key !== shownKey) render(key);
   else updateLiveText();
   postNative({ cmd: 'status', viewers: st.sessions.length, names: st.sessions.map(s => s.device) });
 }
+
+/** JSON with every object's keys in order: the host may list them differently each time, and that's no change. */
+const stable = v => JSON.stringify(v, (_, x) => (x && typeof x === 'object' && !Array.isArray(x)
+  ? Object.fromEntries(Object.keys(x).sort().map(k => [k, x[k]])) : x));
 
 /** What the current section is drawn from. Times and countdowns aren't in it: they update in place. */
 function viewKey() {
@@ -78,10 +85,10 @@ function viewKey() {
   const requests = (s.support?.requests || []).map(r => [r.id, r.name, r.address, r.country]);
   const perms = s.permissions ? [s.permissions.screenRecording, s.permissions.accessibility] : null;
   switch (current) {
-    case 'home': return JSON.stringify(['home', sessions, requests, s.account?.email, s.relay?.state, perms, s.testPattern, s.host.name]);
-    case 'connect': return JSON.stringify(['connect', s.relay?.state, s.relay?.error, s.support?.code?.code, requests, codeError]);
-    case 'account': return JSON.stringify(['account', s.account?.email, s.account?.error, s.settings.displayName, s.host.machine, notes.account, notes.rename]);
-    default: return JSON.stringify(['settings', s.settings, perms, loginItem, s.dataDir, s.logDir, s.host.version]);
+    case 'home': return stable(['home', sessions, requests, s.account?.email, s.relay?.state, perms, s.testPattern, s.host.name, notes.request]);
+    case 'connect': return stable(['connect', s.relay?.state, s.relay?.error, s.support?.code?.code, requests, codeError, notes.request]);
+    case 'account': return stable(['account', s.account?.email, s.account?.error, s.settings.displayName, s.host.machine, notes.account, notes.rename]);
+    default: return stable(['settings', s.settings, perms, loginItem, s.dataDir, s.logDir, s.host.version]);
   }
 }
 
@@ -149,7 +156,13 @@ function render(key = viewKey()) {
   c.replaceChildren(views[current]());
   shownKey = key;
   c.scrollTop = scroll;
-  if (inContent && focusKey) c.querySelector(`[data-key="${CSS.escape(focusKey)}"]`)?.focus({ preventScroll: true });
+  // After an action, focus goes where it leaves you (its button may be gone); otherwise it stays where it was.
+  const want = pendingFocus;
+  pendingFocus = null;
+  const target = want === 'heading' ? c.querySelector('h2')
+    : want ? c.querySelector(`[data-key="${CSS.escape(want)}"]`)
+      : inContent && focusKey ? c.querySelector(`[data-key="${CSS.escape(focusKey)}"]`) : null;
+  target?.focus({ preventScroll: !want });
   updateLiveText();
 }
 
@@ -187,6 +200,14 @@ const note = section => {
   const n = notes[section];
   return h('p', { class: n ? `msg ${n.ok ? 'ok' : 'err'}` : 'msg', role: 'status' }, n?.text || '');
 };
+/** Shows a result in place for a while (it survives redraws), and says it. */
+const noteTimers = {};
+function showNote(section, n, ms = 8000) {
+  notes[section] = n;
+  announce(n.text);
+  clearTimeout(noteTimers[section]);
+  noteTimers[section] = setTimeout(() => { delete notes[section]; refresh(); }, ms);
+}
 
 function copyBtn(text, label = 'Copy', key) {
   const b = h('button', { class: 'sm copy', type: 'button', 'data-key': key || null }, label);
@@ -225,7 +246,11 @@ function armedButton(label, question, run, key) {
     if (!armed) {
       b.textContent = question;
       announce(`${question} Press again to confirm.`);
-      armed = setTimeout(() => { armed = 0; b.textContent = label; }, 5000);
+      armed = setTimeout(() => {
+        armed = 0;
+        b.textContent = label;
+        if (document.activeElement === b) announce('Not confirmed, so nothing changed.');
+      }, 5000);
       return;
     }
     clearTimeout(armed);
@@ -267,9 +292,13 @@ function requestsCard() {
     const ch = choices[r.id] ||= { files: false, clipboard: false };
     const titleId = nextId('req');
     const answer = (accept, viewOnly) => {
+      pendingFocus = 'heading'; // the card goes away: carry on from the top of the page
       post(`/support/requests/${r.id}`, { accept, viewOnly, files: ch.files, clipboard: ch.clipboard })
-        .then(() => announce(accept ? `${r.name} can now ${viewOnly ? 'see' : 'see and control'} ${thisPc()}.` : `Declined ${r.name}.`))
-        .catch(() => announce('That request is no longer waiting.'))
+        .then(() => {
+          const text = accept ? `${r.name} can now ${viewOnly ? 'watch' : 'see and control'} ${thisPc()}.` : `Declined “${r.name}”. That code no longer works.`;
+          showNote('request', { ok: true, text });
+        })
+        .catch(() => showNote('request', { ok: false, text: 'That request is no longer waiting.' }))
         .then(() => refresh({ force: true }));
     };
     const btn = (label, cls, accept, viewOnly) => h('button', { class: cls, type: 'button', 'data-key': `req:${r.id}:${label}`, 'aria-describedby': titleId, onclick: () => answer(accept, viewOnly) }, label);
@@ -286,39 +315,55 @@ function requestsCard() {
         btn('Accept', 'sm accept', true, false),
         btn('View only', 'sm accept', true, true),
         btn('Decline', 'sm decline', false, false)),
-      h('p', { class: 'muted small' }, 'No answer in 2 minutes declines.'));
+      h('p', { class: 'muted small' }, 'Accept lets them see and control; View only lets them watch. No answer in 2 minutes declines.'));
   }));
 }
 
 function sessionRow(s) {
   const r = s.rights || {};
   const set = patch => post(`/sessions/${s.id}/rights`, patch).then(() => refresh({ force: true })).catch(() => { });
-  const mini = (label, value, k) => h('label', { class: 'mini-switch' }, h('span', { class: 'small' }, label),
-    toggle(value, v => set({ [k]: v }), { label: `${label} for ${s.device || 'this guest'}`, key: `sess:${s.id}:${k}` }));
+  // One label per switch: the visible word is a label for it, and its name says whose it is.
+  const mini = (label, value, k) => {
+    const sw = toggle(value, v => set({ [k]: v }), { label: `${label} for ${s.device || 'this guest'}`, key: `sess:${s.id}:${k}` });
+    const input = sw.querySelector('input');
+    input.id = nextId('mini');
+    return h('div', { class: 'mini-switch' }, h('label', { class: 'small', for: input.id }, label), sw);
+  };
   return h('li', { class: 'li' },
     h('div', { class: 'main' },
       h('div', { class: 't' }, s.device || 'Someone', h('span', { class: `badge ${s.guest ? 'warn' : 'ok'}`, style: { marginLeft: '8px' } }, s.guest ? 'Guest (code)' : 'Your account')),
-      h('div', { class: 's' }, `${where(s)} · connected `, agoEl(s.connectedAt)),
+      h('div', { class: 's' }, where(s) ? `${where(s)} · connected ` : 'Connected ', agoEl(s.connectedAt)),
       s.guest ? h('div', { class: 'row checks' }, mini('Control', r.input, 'input'), mini('Files', r.files, 'files'), mini('Clipboard', r.clipboard, 'clipboard')) : null),
-    h('button', { class: 'sm danger', type: 'button', 'data-key': `sess:${s.id}:stop`, 'aria-label': `Stop ${s.device || 'this session'}`, onclick: () => post(`/sessions/${s.id}/disconnect`).then(() => refresh({ force: true })) }, 'Stop'));
+    h('button', {
+      class: 'sm danger', type: 'button', 'data-key': `sess:${s.id}:stop`, 'aria-label': `Stop ${s.device || 'this session'}`,
+      onclick: () => { pendingFocus = 'heading'; post(`/sessions/${s.id}/disconnect`).then(() => refresh({ force: true })); },
+    }, 'Stop'));
 }
 
 function viewHome() {
   const n = st.sessions.length;
+  const waiting = (st.support?.requests || []).length;
   const perms = st.permissions;
   const missing = mac() && perms && (!perms.screenRecording || !perms.accessibility);
   const relay = st.relay || {};
-  const state = n ? 'live' : missing ? 'warn' : 'ready';
+  // The on-air lamp while anyone is asking or connected; only then this computer's own state.
+  const state = n || waiting ? 'live' : missing ? 'warn' : 'ready';
+  const title = waiting ? plural(waiting, '1 person is waiting for your answer', `${waiting} people are waiting for your answer`)
+    : n ? plural(n, `${st.sessions[0].device || 'Someone'} is connected`, `${n} people are connected`)
+      : missing ? 'Needs permission before anyone can connect' : 'Nobody is connected';
   const hero = h('div', { class: `hero ${state}` },
-    h('div', { class: 'ring', 'aria-hidden': 'true' }, svg(n ? ICON.live : missing ? ICON.warn : ICON.check, 28)),
+    h('div', { class: 'ring', 'aria-hidden': 'true' }, svg(n || waiting ? ICON.live : missing ? ICON.warn : ICON.check, 28)),
     h('div', { class: 'grow' },
-      h('p', { class: 'title' }, n ? plural(n, `${st.sessions[0].device || 'Someone'} is connected`, `${n} people are connected`) : missing ? 'Needs permission before anyone can connect' : 'Nobody is connected'),
+      h('p', { class: 'title' }, title),
       h('div', { class: 'row', style: { marginTop: '6px' } },
         st.account ? h('span', { class: 'badge ok' }, `Signed in as ${st.account.email}`) : h('span', { class: 'badge' }, 'Not signed in'),
-        relay.state === 'online' ? h('span', { class: 'badge ok' }, 'Online') : h('span', { class: 'badge warn' }, relay.state === 'retrying' ? 'Offline: retrying' : 'Connecting…'),
-        st.testPattern ? h('span', { class: 'badge warn' }, 'Test pattern') : null)),
-    n > 1 ? h('button', { class: 'danger', type: 'button', 'data-key': 'home:stop-all', onclick: () => post('/sessions/disconnect-all').then(() => refresh({ force: true })) }, 'Stop all') : null);
-  const next = !st.account && !n ? h('div', { class: 'card' }, h('h3', {}, 'Get started'),
+        relay.state === 'online' ? h('span', { class: 'badge ok' }, 'Online') : h('span', { class: 'badge' }, relay.state === 'retrying' ? 'Offline: retrying' : 'Connecting…'),
+        st.testPattern ? h('span', { class: 'badge' }, 'Test pattern') : null)),
+    n > 1 ? h('button', {
+      class: 'danger', type: 'button', 'data-key': 'home:stop-all',
+      onclick: () => { pendingFocus = 'heading'; post('/sessions/disconnect-all').then(() => refresh({ force: true })); },
+    }, 'Stop all') : null);
+  const next = !st.account && !n && !waiting ? h('div', { class: 'card' }, h('h3', {}, 'Get started'),
     h('ul', { class: 'list' },
       h('li', { class: 'li' }, h('div', { class: 'main' }, h('div', { class: 't' }, 'Reach this computer from your other devices'),
         h('div', { class: 's' }, `Sign in with your Headroom account. Then it's in your list at ${site() || 'the Headroom website'} and in Headroom Viewer.`)),
@@ -327,10 +372,11 @@ function viewHome() {
         h('div', { class: 's' }, 'Give them a code. They connect from their browser — no account, no download — after you accept.')),
       h('button', { class: 'sm', type: 'button', 'data-key': 'home:code', onclick: () => go('connect', { focus: true }) }, 'Get a code')))) : null;
   return h('section', {}, h('h2', { tabindex: '-1' }, 'Home'),
+    note('request'),
     requestsCard(),
-    missing ? permissionsCard() : null,
-    h('div', { class: 'card' }, hero),
     n ? h('div', { class: 'card' }, h('h3', {}, 'Connected now'), h('ul', { class: 'list' }, ...st.sessions.map(sessionRow))) : null,
+    h('div', { class: 'card' }, hero),
+    missing ? permissionsCard() : null,
     next);
 }
 
@@ -353,7 +399,7 @@ function viewConnect() {
           if (!online || e.currentTarget.getAttribute('aria-disabled') === 'true') return;
           e.currentTarget.setAttribute('aria-disabled', 'true');
           codeError = '';
-          try { await post('/support/code'); announce('Code created.'); } catch (ex) { codeError = ex.message; announce(ex.message); }
+          try { await post('/support/code'); announce('Code created.'); pendingFocus = 'connect:copy-code'; } catch (ex) { codeError = ex.message; announce(ex.message); }
           refresh({ force: true });
         },
       }, 'Create a code')),
@@ -366,15 +412,18 @@ function viewConnect() {
           h('p', { class: 'muted small', id: 'code-label' }, 'Your code'),
           h('p', { class: 'code-big' }, prettyCode(c.code)),
           h('p', { class: 'muted small' }, 'For one person · expires in ', h('span', { 'data-expires': c.expiresAt, class: 'mono' })),
-          h('p', { class: 'request-warning' }, 'Only give this code to someone you know. Nobody from Headroom will ever ask you for it.'),
+          h('p', { class: 'callout' }, 'Only give this code to someone you know. Nobody from Headroom will ever ask you for it.'),
           h('div', { class: 'row' }, copyBtn(c.code, 'Copy code', 'connect:copy-code'), copyBtn(c.link, 'Copy link', 'connect:copy-link'),
-            h('button', { class: 'sm', type: 'button', 'data-key': 'connect:stop', onclick: () => api('/support/code', { method: 'DELETE' }).then(() => { announce('Stopped sharing the code.'); refresh({ force: true }); }) }, 'Stop sharing')),
+            h('button', {
+              class: 'sm', type: 'button', 'data-key': 'connect:stop',
+              onclick: () => api('/support/code', { method: 'DELETE' }).then(() => { announce('Stopped sharing. That code no longer works.'); pendingFocus = 'connect:create'; refresh({ force: true }); }),
+            }, 'Stop sharing')),
           h('p', { class: 'small' }, `They enter it at ${site()}, or open the link: `, h('span', { class: 'mono link-text' }, c.link))),
         h('figure', { class: 'share-qr' }, qrBox(c.link, 132), h('figcaption', { class: 'muted small' }, 'Or scan to open the link'))));
   }
   return h('section', {}, h('h2', { tabindex: '-1' }, 'Let someone connect'),
     h('p', { class: 'lead' }, 'For help from someone, or to reach this computer from a browser that isn\'t signed in.'),
-    requestsCard(), card);
+    note('request'), requestsCard(), card);
 }
 
 // ------------------------------------------------------------------ Account
@@ -388,7 +437,7 @@ const ACCOUNT_ERRORS = {
 function viewAccount() {
   const a = st.account;
   if (a) {
-    const name = h('input', { type: 'text', value: st.settings.displayName || '', placeholder: st.host.machine, class: 'grow', maxlength: '64', autocomplete: 'off', 'data-key': 'account:name' });
+    const name = h('input', { type: 'text', name: 'displayName', value: st.settings.displayName || '', placeholder: st.host.machine, class: 'grow', maxlength: '64', autocomplete: 'off', 'data-key': 'account:name' });
     const nameF = field(`${ThisPc()}'s name`, name, { hint: 'How it\'s listed in your account and shown to people who connect. Leave empty to use the computer\'s name.' });
     const save = h('button', { type: 'submit', 'data-key': 'account:save' }, 'Save name');
     const form = h('form', { class: 'name-form' }, ...nameF.nodes, h('div', { class: 'row' }, save), note('rename'));
@@ -403,7 +452,7 @@ function viewAccount() {
       h('p', { class: 'lead' }, `${ThisPc()} is one of your devices. Sign in at ${site()} or in Headroom Viewer on any device to see it and connect.`),
       h('div', { class: 'card' }, h('dl', { class: 'kv' },
         h('dt', { class: 'k' }, 'Signed in as'), h('dd', {}, a.email),
-        h('dt', { class: 'k' }, 'Last check-in'), h('dd', {}, a.error ? h('span', {}, h('span', { class: 'badge warn' }, 'Problem'), ` ${a.error}`) : agoEl(a.lastSync))),
+        h('dt', { class: 'k' }, 'Last check-in'), h('dd', {}, a.error ? h('span', {}, h('span', { class: 'badge bad' }, 'Problem'), ` ${a.error}`) : agoEl(a.lastSync))),
         h('div', { class: 'row', style: { marginTop: '12px' } },
           armedButton('Sign out', `Sign ${thisPc()} out of ${a.email}?`, async () => {
             await post('/account/leave').catch(() => { });
@@ -411,7 +460,7 @@ function viewAccount() {
             announce(notes.account.text);
             refresh({ force: true });
           }, 'account:signout')), note('account')),
-      h('div', { class: 'card' }, h('h3', {}, `${ThisPc()}'s name`), form));
+      h('div', { class: 'card' }, form));
   }
   const email = h('input', { type: 'email', class: 'grow', autocomplete: 'username', autocapitalize: 'off', spellcheck: 'false', name: 'email', 'data-key': 'account:email' });
   const pass = h('input', { type: 'password', class: 'grow', autocomplete: 'current-password', name: 'password', 'data-key': 'account:password' });
@@ -456,11 +505,11 @@ function viewAccount() {
 function permissionsCard() {
   const p = st.permissions || {};
   const item = (ok, title, sub, kind, url) => h('li', { class: 'li' },
-    h('div', { class: 'main' }, h('div', { class: 't' }, title, ' ', h('span', { class: `badge ${ok ? 'ok' : 'warn'}` }, ok ? 'Allowed' : 'Not allowed')),
+    h('div', { class: 'main' }, h('div', { class: 't' }, title, ' ', h('span', { class: `badge ${ok ? 'ok' : 'bad'}` }, ok ? 'Allowed' : 'Not allowed')),
       h('div', { class: 's' }, sub)),
     ok ? null : h('div', { class: 'row' },
       h('button', { class: 'sm', type: 'button', 'data-key': `perm:${kind}:ask`, onclick: () => post('/permissions/request', { kind }).then(() => refresh({ force: true })) }, 'Ask macOS'),
-      h('button', { class: 'sm primary', type: 'button', 'data-key': `perm:${kind}:open`, onclick: () => openExternal(url) }, 'Open System Settings')));
+      h('button', { class: 'sm', type: 'button', 'data-key': `perm:${kind}:open`, onclick: () => openExternal(url) }, 'Open System Settings')));
   return h('div', { class: 'card' }, h('h3', {}, 'macOS permissions'),
     h('ul', { class: 'list' },
       item(p.screenRecording, 'Screen Recording', 'Lets people who connect see the screen and hear its sound.', 'screen', p.screenRecordingUrl),
