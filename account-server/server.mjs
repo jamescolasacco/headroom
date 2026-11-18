@@ -1,19 +1,20 @@
 #!/usr/bin/env node
-// Headroom Account Server — optional accounts for Headroom: sign in once on a device and every computer in the
-// account is there, with no per-computer pairing. Zero dependencies (Node 20+), JSON-file storage.
+// Headroom Account Server — accounts and the relay. Zero dependencies (Node 20+), JSON-file storage.
 //
-//   node server.mjs                     run (PORT, BIND, DATA_DIR, WEB_ROOT, TLS_CERT/TLS_KEY, SIGNUP, NAME, TRUST_PROXY)
-//   node server.mjs add-user <name> [--admin]   create an account (asks for the password; the first is the admin)
-//   node server.mjs list-users | reset-password <name> | reset-2fa <name> | make-admin <name> | make-user <name> | delete-user <name>
+// An account (email + password) owns devices: anything that has signed in with Headroom Server. The Viewer (web or
+// app) lists the account's devices and connects to them, directly or through the relay here. Anyone can also let
+// a guest in with a one-time 9-digit code, which the person at the device must accept; guests need only a browser.
 //
-// Trust model (docs/ACCOUNTS.md): computers check in with their addresses and certificate pins and receive the
-// account's devices as (id, name, token hash). Each signed-in device gets one token *per computer*, derived as
-// HMAC(server key, device|computer|epoch): a computer only ever sees hashes, and a token is useless on any other
-// computer. Revoking a device removes its hashes at the next check-in (20 s), and computers drop its sessions.
+//   node server.mjs                     run (see the settings below and docs/ACCOUNTS.md)
+//   node server.mjs list-users | add-user <email> | disable-user <email> | enable-user <email> | reset-2fa <email> | delete-user <email>
 //
-// Relay (docs/RELAY.md): computers also keep an outbound connection here, so browsers anywhere reach them at
-// /r/<Headroom ID>/… without port forwarding, Tailscale or installing certificates. Only session paths are
-// forwarded (/ws, /api/info, /api/me, /api/files/*); the computer still authenticates every session itself.
+// Trust model (docs/ACCOUNTS.md): devices check in with how to reach them and receive the account's signed-in
+// browsers as (id, name, token hash). Each sign-in gets one token *per device*, derived as
+// HMAC(server key, sign-in|device|epoch): a device only ever sees hashes, and a token is useless on any other device.
+//
+// Relay (docs/RELAY.md): devices keep an outbound connection here, so browsers anywhere reach them without port
+// forwarding or certificates. Only session paths are forwarded (/ws, /api/info, /api/me, /api/files/*); the device
+// still authenticates every session itself.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -23,7 +24,7 @@ import readline from 'node:readline';
 import { Duplex } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const env = process.env;
 const PORT = Number(env.PORT || 8780);
@@ -34,33 +35,47 @@ const WEB_ROOT = (() => {
   const p = path.resolve(env.WEB_ROOT || path.join(here, '..', 'web'));
   return fs.existsSync(path.join(p, 'index.html')) ? p : null;
 })();
-const SIGNUP = env.SIGNUP || 'first';          // first (only while no account exists) | open | closed
+const SIGNUP = env.SIGNUP === 'closed' ? 'closed' : 'open'; // open (anyone with an email) | closed (add-user only)
 const NAME = env.NAME || 'Headroom';
 const RELAY = env.RELAY !== 'off';            // on (default) | off
 const TRUST_PROXY = env.TRUST_PROXY === '1';   // behind a reverse proxy: take the client IP from X-Forwarded-For
+// Email (verification codes, password resets, sign-in alerts) through Resend.
+const RESEND_API_KEY = env.RESEND_API_KEY || '';
+const EMAIL_FROM = env.EMAIL_FROM || '';       // e.g. "Headroom <no-reply@example.com>", on a domain verified in Resend
+const PUBLIC_URL = (env.PUBLIC_URL || '').replace(/\/+$/, ''); // e.g. https://relay.example.com (for links in emails)
+const DEV_MAIL = env.DEV_MAIL === '1';         // testing only: don't send; GET /api/dev/mail shows the last message
+// Cloudflare Turnstile on sign-up and "forgot password" (the forms that send email).
+const TURNSTILE_SITEKEY = env.TURNSTILE_SITEKEY || '';
+const TURNSTILE_SECRET = env.TURNSTILE_SECRET || '';
 // Passwords (NIST SP 800-63B, OWASP ASVS): a length floor, no composition rules, screened against common and
 // breached passwords (Have I Been Pwned's k-anonymity API: only 5 hex digits of a SHA-1 leave the server).
 const MIN_PASSWORD = Math.max(8, Number(env.MIN_PASSWORD) || 12);
 const BREACH_CHECK = env.BREACH_CHECK !== 'off';
 const DEVICE_IDLE_DAYS = Number(env.DEVICE_IDLE_DAYS ?? 90); // sign-ins unused this long expire (0 = never)
-const INVITE_DAYS = 7;
-const RESET_HOURS = 24;
+const EMAIL_CODE_MINUTES = 15;
+const GUEST_CODE_MINUTES = 10;
 const HEARTBEAT_S = 20;
-const ONLINE_S = 70;                           // a computer counts as online if it checked in this recently
+const ONLINE_S = 70;                           // a device counts as online if it checked in this recently
+const MAX_HOSTS = Number(env.MAX_HOSTS) || 5000;     // devices connected to the relay at once
+const MAX_TUNNELS = Number(env.MAX_TUNNELS) || 2000; // viewer connections through the relay at once
+const GUEST_HOSTS_PER_ADDRESS = 5;             // devices without an account, per network address
 
 // ------------------------------------------------------------------------------------------------- storage
 
-/** The whole database: small (one person's or family's devices), so a JSON file with atomic writes. */
+/** The whole database, a JSON file with atomic writes. Version 2: email accounts (older databases are set aside). */
 export class Store {
   constructor(dir) {
     this.file = path.join(dir, 'db.json');
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    this.data = fs.existsSync(this.file) ? JSON.parse(fs.readFileSync(this.file, 'utf8')) : { version: 1, accounts: [], devices: [], computers: [] };
-    // Roles: the first account (the server's owner) is an admin; older databases had none.
-    for (const a of this.data.accounts) a.role ||= 'user';
-    if (this.data.accounts.length && !this.data.accounts.some(a => a.role === 'admin')) this.data.accounts[0].role = 'admin';
-    this.data.invites ||= [];
-    this.data.resets ||= [];
+    this.data = fs.existsSync(this.file) ? JSON.parse(fs.readFileSync(this.file, 'utf8')) : null;
+    if (this.data && this.data.version !== 2) {
+      // Version 1 had usernames: start fresh, keeping the old file beside it.
+      const old = path.join(dir, `db.v1-${Date.now()}.json`);
+      fs.renameSync(this.file, old);
+      console.log(`${new Date().toISOString()} the old (username) database was set aside as ${path.basename(old)}; starting fresh`);
+      this.data = null;
+    }
+    this.data ||= { version: 2, accounts: [], devices: [], computers: [] };
     const keyFile = path.join(dir, 'secret.key');
     if (!fs.existsSync(keyFile)) fs.writeFileSync(keyFile, crypto.randomBytes(32).toString('hex'), { mode: 0o600 });
     this.key = Buffer.from(fs.readFileSync(keyFile, 'utf8').trim(), 'hex');
@@ -78,14 +93,18 @@ export class Store {
     setTimeout(() => { this.dirty = false; this.save(); }, 5000).unref();
   }
   account(id) { return this.data.accounts.find(a => a.id === id); }
-  accountByName(name) { return this.data.accounts.find(a => a.username === normalizeName(name)); }
+  accountByEmail(email) { const e = normalizeEmail(email); return this.data.accounts.find(a => a.email === e); }
   device(id) { return this.data.devices.find(d => d.id === id); }
   computer(id) { return this.data.computers.find(c => c.id === id); }
 }
 
-const normalizeName = s => String(s || '').trim().toLowerCase();
+const normalizeEmail = s => String(s || '').trim().toLowerCase();
+/** A plausible address (the emailed code is the real check). */
+const validEmail = e => e.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 const randomId = (n = 9) => crypto.randomBytes(n).toString('base64url');
 const sha256Hex = s => crypto.createHash('sha256').update(s, 'utf8').digest('hex').toUpperCase(); // = hosts' HashToken
+/** 6 random digits, for codes sent by email. */
+const emailCode = () => String(crypto.randomInt(1_000_000)).padStart(6, '0');
 
 // ------------------------------------------------------------------------------------------------- crypto
 
@@ -144,15 +163,15 @@ async function breached(password) {
 
 /**
  * What's wrong with a new password, or null (NIST SP 800-63B §3.1.1.2, OWASP ASVS V6): at least MIN_PASSWORD
- * characters, at most 256, any characters including spaces, no composition rules; refuses the username, repeated or
+ * characters, at most 256, any characters including spaces, no composition rules; refuses the email name, repeated or
  * sequential runs, common passwords and passwords known from breaches.
  */
-export async function passwordProblem(password, username, { breach = true } = {}) {
+export async function passwordProblem(password, username /* the email's name part */, { breach = true } = {}) {
   const pw = normalizePassword(password);
   if ([...pw].length < MIN_PASSWORD) return `Use at least ${MIN_PASSWORD} characters. A few words make a good one; spaces are fine.`;
   if (pw.length > 256) return 'Use at most 256 characters.';
   const lower = pw.toLowerCase();
-  if (username && username.length >= 3 && lower.includes(username.toLowerCase())) return 'Don\'t include your username.';
+  if (username && username.length >= 3 && lower.includes(username.toLowerCase())) return 'Don\'t include your email address.';
   const compact = lower.replace(/\s+/g, '');
   if (new Set(compact).size < 4) return 'That\'s too predictable: use more different characters.';
   for (const run of ['0123456789012345678901234567890', 'abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz', 'qwertyuiopasdfghjklzxcvbnmqwertyuiopasdfghjklzxcvbnm']) {
@@ -206,9 +225,13 @@ function totpVerify(account, code) {
 
 // ------------------------------------------------------------------------------------------------- rate limiting
 
-/** 5 free failures per key, then 2 s, 4 s, 8 s … up to 15 minutes; plus a global cap. Keys: IP and username. */
+/**
+ * 5 free failures per key and hour (20 for emails sent from one network address, which many people can share),
+ * then 2 s, 4 s, 8 s … up to 15 minutes; plus a global cap on failures. Keys: network address, email, account.
+ */
 class Limiter {
   constructor() { this.failures = new Map(); this.recent = []; }
+  static free(key) { return key.startsWith('mail-from:') ? 20 : 5; }
   retryAfter(...keys) {
     const now = Date.now();
     for (const k of keys) {
@@ -216,17 +239,22 @@ class Limiter {
       if (r && r.blockedUntil > now) return Math.ceil((r.blockedUntil - now) / 1000);
     }
     this.recent = this.recent.filter(t => t > now - 60000);
-    return this.recent.length >= 60 ? 60 : 0;
+    return this.recent.length >= 600 ? 60 : 0;
   }
   fail(...keys) {
+    this.recent.push(Date.now());
+    this.note(...keys);
+  }
+  /** Counts toward the keys' limits only (things that aren't failures, like emails sent). */
+  note(...keys) {
     const now = Date.now();
-    this.recent.push(now);
     for (const k of keys) {
       const r = this.failures.get(k) || { count: 0, last: 0, blockedUntil: 0 };
       if (r.last < now - 3600_000) r.count = 0;
       r.count++;
       r.last = now;
-      if (r.count >= 5) r.blockedUntil = now + Math.min(900, 2 ** (r.count - 4)) * 1000;
+      const free = Limiter.free(k);
+      if (r.count >= free) r.blockedUntil = now + Math.min(900, 2 ** (r.count - free + 1)) * 1000;
       this.failures.set(k, r);
     }
   }
@@ -297,11 +325,13 @@ function serveStatic(req, res) {
 
 /** What a viewer may reach through the relay: sessions and their file transfers. Never pairing or settings. */
 const RELAYED_PATHS = /^\/(ws|api\/info|api\/me|api\/files\/(list|download|upload|mkdir))$/;
+/** What a guest code reaches before it's accepted: the device's name, and the session. */
+const GUEST_PATHS = /^\/(ws|api\/info)$/;
 const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'proxy-authorization', 'te', 'trailer', 'upgrade', 'host']);
 const WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 const MAX_FRAME = 16 * 1024 * 1024;
 
-/** "123456789", unique among this server's computers; shown as 123 456 789. */
+/** A device's address on the relay (never shown to people): 9 digits for account devices, kept across sign-ins. */
 function newRelayId(taken) {
   for (;;) {
     const id = String(100_000_000 + crypto.randomInt(900_000_000));
@@ -393,25 +423,44 @@ function acceptWebSocket(req, socket, head) {
 }
 
 /**
- * Each connected computer holds a control WebSocket. To reach it, the relay sends {"t":"open"}; the computer
- * opens a tunnel WebSocket to /api/relay/tunnel/<nonce>, and that carries one viewer connection's raw bytes
- * (an HTTP request, or a WebSocket session) exactly as if the viewer had connected to the computer.
+ * Each connected device holds a control WebSocket. To reach it, the relay sends {"t":"open"}; the device opens a
+ * tunnel WebSocket to /api/relay/tunnel/<nonce>, and that carries one viewer connection's raw bytes (an HTTP request,
+ * or a WebSocket session) exactly as if the viewer had connected to the device.
+ *
+ * Guest codes: a device asks for a "slot" ({"t":"slot"}), 4 digits that find it here; it adds 5 secret digits of
+ * its own. The relay routes /c/<slot>/… to the device but never learns the rest of the code: the device checks it.
  */
 export class Relay {
   constructor() {
-    this.hosts = new Map();    // relayId -> { link, computerId, name, since, tunnels }
-    this.pending = new Map();  // nonce -> { relayId, resolve }
+    this.hosts = new Map();    // relayId -> { link, computerId (null: no account), name, ip, since, tunnels, slots }
+    this.pending = new Map();  // nonce -> { resolve }
+    this.slots = new Map();    // slot -> { relayId, expires }
+    this.tunnels = 0;
   }
 
   online(relayId) { return !!relayId && this.hosts.has(relayId); }
 
-  attach(relayId, computerId, name, link) {
+  guestHostsFrom(ip) {
+    let n = 0;
+    for (const h of this.hosts.values()) if (!h.computerId && h.ip === ip) n++;
+    return n;
+  }
+
+  /** Computers connected without an account. */
+  anonymous() {
+    let n = 0;
+    for (const h of this.hosts.values()) if (!h.computerId) n++;
+    return n;
+  }
+
+  attach(relayId, computerId, name, link, ip) {
     const old = this.hosts.get(relayId);
     if (old) old.link.destroy(); // reconnected (e.g. after a network change): the newest connection wins
-    const h = { link, computerId, name, since: Date.now(), tunnels: 0 };
+    const h = { link, computerId, name, ip, since: Date.now(), tunnels: 0, slots: new Set() };
     this.hosts.set(relayId, h);
     link.socket.setKeepAlive(true, 15_000);
     link.resume(); // nothing flows on the control link's byte stream
+    link.on('text', t => this.onHostMessage(relayId, h, t));
     const ping = setInterval(() => {
       if (Date.now() - link.lastHeard > 75_000) { link.destroy(); return; }
       link.ping();
@@ -419,42 +468,84 @@ export class Relay {
     ping.unref();
     link.on('close', () => {
       clearInterval(ping);
-      if (this.hosts.get(relayId) === h) { this.hosts.delete(relayId); log(`relay: '${name}' (${relayId}) disconnected`); }
+      for (const sl of h.slots) this.slots.delete(sl);
+      if (this.hosts.get(relayId) === h) { this.hosts.delete(relayId); log(`relay: '${name}' disconnected${computerId ? '' : ' (no account)'}`); }
     });
     link.on('error', () => link.destroy());
     link.sendText(JSON.stringify({ t: 'hello', relayId, ping: 25 }));
-    log(`relay: '${name}' (${relayId}) connected`);
+    log(`relay: '${name}' connected${computerId ? '' : ' (no account)'}`);
+  }
+
+  onHostMessage(relayId, h, text) {
+    let m;
+    try { m = JSON.parse(text); } catch { return; }
+    if (m.t === 'slot') {
+      // A new guest code: one at a time per device; the old one stops working.
+      this.pruneSlots();
+      for (const sl of h.slots) this.slots.delete(sl);
+      h.slots.clear();
+      if (this.slots.size >= 9000) { h.link.sendText(JSON.stringify({ t: 'slot', id: m.id, error: 'busy' })); return; }
+      let slot;
+      do { slot = String(crypto.randomInt(10_000)).padStart(4, '0'); } while (this.slots.has(slot));
+      const expires = Date.now() + GUEST_CODE_MINUTES * 60_000;
+      this.slots.set(slot, { relayId, expires });
+      h.slots.add(slot);
+      h.link.sendText(JSON.stringify({ t: 'slot', id: m.id, slot, expires: new Date(expires).toISOString() }));
+    } else if (m.t === 'slot-release') {
+      for (const sl of h.slots) this.slots.delete(sl);
+      h.slots.clear();
+    }
+  }
+
+  /** The device a guest code's first 4 digits point to, if it's still valid and connected. */
+  slotTarget(slot) {
+    this.pruneSlots();
+    const s = this.slots.get(slot);
+    return s && this.hosts.has(s.relayId) ? s.relayId : null;
+  }
+
+  pruneSlots() {
+    const now = Date.now();
+    for (const [k, v] of this.slots) {
+      if (v.expires > now) continue;
+      this.slots.delete(k);
+      this.hosts.get(v.relayId)?.slots.delete(k);
+    }
   }
 
   detachComputer(computerId) {
     for (const h of this.hosts.values()) if (h.computerId === computerId) h.link.destroy();
   }
 
-  /** Asks the computer for a tunnel; resolves with it (a duplex byte stream). */
-  openTunnel(relayId, clientIp, timeoutMs = 10_000) {
+  /**
+   * Asks the device for a tunnel; resolves with it (a duplex byte stream). `meta` tells the device who is coming:
+   * their address and country, and whether they came with a guest code.
+   */
+  openTunnel(relayId, meta = {}, timeoutMs = 10_000) {
     const h = this.hosts.get(relayId);
     if (!h) return Promise.reject(Object.assign(new Error('offline'), { status: 503 }));
-    if (h.tunnels >= 64) return Promise.reject(Object.assign(new Error('busy'), { status: 503 }));
+    if (h.tunnels >= 64 || this.tunnels >= MAX_TUNNELS) return Promise.reject(Object.assign(new Error('busy'), { status: 503 }));
     const nonce = crypto.randomBytes(18).toString('base64url');
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(nonce);
-        reject(Object.assign(new Error('the computer didn\'t answer'), { status: 504 }));
+        reject(Object.assign(new Error('the device didn\'t answer'), { status: 504 }));
       }, timeoutMs);
       this.pending.set(nonce, {
         resolve: link => {
           clearTimeout(timer);
           h.tunnels++;
-          link.once('close', () => { h.tunnels--; });
+          this.tunnels++;
+          link.once('close', () => { h.tunnels--; this.tunnels--; });
           link.on('error', () => link.destroy());
           resolve(link);
         },
       });
-      h.link.sendText(JSON.stringify({ t: 'open', id: nonce, client: clientIp }));
+      h.link.sendText(JSON.stringify({ t: 'open', id: nonce, client: meta.ip, country: meta.country || undefined, guest: !!meta.guest }));
     });
   }
 
-  /** The computer's end of a tunnel arrived. */
+  /** The device's end of a tunnel arrived. */
   acceptTunnel(nonce, req, socket, head) {
     const p = this.pending.get(nonce);
     if (!p) { rawResponse(socket, 404, 'Not Found'); return; }
@@ -466,12 +557,21 @@ export class Relay {
 
 // ------------------------------------------------------------------------------------------------- the API
 
-export function createApp({ store, now = () => Date.now() }) {
+export function createApp({ store, now = () => Date.now(), mail = sendMail }) {
   const limiter = new Limiter();
   const relay = new Relay();
   const pendingTotp = new Map(); // accountId -> secret awaiting verification
+  // Codes sent by email, kept in memory only: an unverified sign-up never becomes an account.
+  const pending = new Map();     // `${kind}:${email or accountId}` -> { codeHash, expires, attempts, ... }
+  const devMailbox = new Map();  // DEV_MAIL: email -> last message
 
-  const signupOpen = () => SIGNUP === 'open' || (SIGNUP === 'first' && store.data.accounts.length === 0);
+  const send = (to, subject, text) => {
+    if (DEV_MAIL) devMailbox.set(to, { subject, text });
+    Promise.resolve(mail(to, subject, text)).catch(e => log(`email to ${to} failed: ${e.message}`));
+  };
+  const site = () => PUBLIC_URL || NAME;
+
+  // ----------------------------------------------------------------------------------------------- helpers
 
   function authenticate(req, kind) {
     const m = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization || '');
@@ -479,15 +579,16 @@ export function createApp({ store, now = () => Date.now() }) {
     const hash = sha256Hex(m[1]);
     const dev = store.data.devices.find(d => d.tokenHash.length === hash.length && crypto.timingSafeEqual(Buffer.from(d.tokenHash), Buffer.from(hash)));
     if (!dev) fail(401, 'unauthorized');
-    if (kind && dev.kind !== kind) fail(403, kind === 'computer' ? 'computers only' : 'not allowed for computers');
+    if (kind && dev.kind !== kind) fail(403, kind === 'computer' ? 'devices only' : 'not allowed for devices');
     const account = store.account(dev.accountId);
     if (!account) fail(401, 'unauthorized');
-    // A browser or phone that hasn't been used for a long time is signed out (computers check in all the time).
+    if (account.disabled) fail(403, 'disabled', { message: 'This account is disabled.' });
+    // A browser or phone that hasn't been used for a long time is signed out (devices check in all the time).
     const last = Date.parse(dev.lastSeen || dev.created);
     if (dev.kind === 'viewer' && DEVICE_IDLE_DAYS > 0 && now() - last > DEVICE_IDLE_DAYS * 86_400_000) {
       removeDevice(dev);
       store.save();
-      audit(`'${dev.name}' of '${account.username}' signed out after ${DEVICE_IDLE_DAYS} days unused`);
+      audit(`'${dev.name}' of ${account.email} signed out after ${DEVICE_IDLE_DAYS} days unused`);
       fail(401, 'expired', { message: 'Signed out after a long time unused. Sign in again.' });
     }
     dev.lastSeen = new Date(now()).toISOString();
@@ -499,24 +600,26 @@ export function createApp({ store, now = () => Date.now() }) {
   function newDevice(account, kind, name, platform, ip) {
     const token = crypto.randomBytes(32).toString('base64url');
     const dev = {
-      id: randomId(), accountId: account.id, kind, name: name || (kind === 'computer' ? 'Computer' : 'Device'), platform: platform || '',
+      id: randomId(), accountId: account.id, kind, name: name || (kind === 'computer' ? 'Computer' : 'Browser'), platform: platform || '',
       tokenHash: sha256Hex(token), created: new Date(now()).toISOString(), lastSeen: null, lastAddress: ip, viewOnly: false, epoch: 0,
     };
     store.data.devices.push(dev);
     return { dev, token };
   }
 
+  const accountJson = a => ({ id: a.id, email: a.email, totpEnabled: !!a.totpEnabled });
+
   const deviceJson = (d, current) => ({
     id: d.id, kind: d.kind, name: d.name, platform: d.platform, created: d.created, lastSeen: d.lastSeen,
     lastAddress: d.lastAddress, viewOnly: !!d.viewOnly, current: d.id === current,
-    online: d.kind === 'computer' && !!d.lastSeen && now() - Date.parse(d.lastSeen) < ONLINE_S * 1000,
+    online: d.kind === 'computer' && (relay.online(store.computer(d.id)?.relayId) || (!!d.lastSeen && now() - Date.parse(d.lastSeen) < ONLINE_S * 1000)),
   });
 
   function computerJson(c, viewer) {
     const seen = c.lastSeen ? Date.parse(c.lastSeen) : 0;
     return {
       id: c.id, hostId: c.hostId, name: c.name, os: c.os, osVersion: c.osVersion, version: c.version,
-      urls: c.urls || [], tailscale: c.tailscale || null, lastSeen: c.lastSeen,
+      urls: c.urls || [], lastSeen: c.lastSeen,
       online: now() - seen < ONLINE_S * 1000 || relay.online(c.relayId),
       relayId: RELAY ? c.relayId || null : null, relayOnline: RELAY && relay.online(c.relayId),
       spki: c.spki || null, fingerprint: c.fingerprint || null, ca: c.ca || null,
@@ -532,125 +635,176 @@ export function createApp({ store, now = () => Date.now() }) {
     }
   }
 
-  async function login(req, body, kind) {
-    const ip = clientIp(req);
-    const username = normalizeName(body.username);
-    const retry = limiter.retryAfter(ip, 'user:' + username);
-    if (retry) fail(429, 'rate-limited', { retryAfter: retry });
-    const account = store.accountByName(username);
-    // Same work and answer for unknown users and wrong passwords.
-    const ok = await verifyPassword(body.password, account?.password || DUMMY_PASSWORD) && !!account;
-    if (!ok) { limiter.fail(ip, 'user:' + username); audit(`failed sign-in for '${username}' from ${ip}`); fail(401, 'bad-credentials'); }
-    if (account.totpEnabled) {
-      if (!body.totp) fail(401, 'totp-required');
-      if (!totpVerify(account, body.totp)) { limiter.fail(ip, 'user:' + username); audit(`wrong two-factor code for '${username}' from ${ip}`); fail(401, 'bad-totp'); }
-    }
-    limiter.ok(ip, 'user:' + username);
-    if (needsRehash(account.password)) account.password = await hashPassword(body.password); // stronger parameters
-    // Passwords set under an older, weaker rule still work; the app suggests changing them.
-    const weak = kind === 'viewer' && !!await passwordProblem(body.password, username, { breach: false });
-    const { dev, token } = newDevice(account, kind, str(body.deviceName, 64), str(body.platform, 32), ip);
-    store.save();
-    audit(`${kind} '${dev.name}' signed in to '${account.username}' from ${ip}`);
-    return { token, device: deviceJson(dev, dev.id), account: accountJson(account), passwordWeak: weak };
-  }
-
-  const accountJson = a => ({ id: a.id, username: a.username, role: a.role || 'user', totpEnabled: !!a.totpEnabled });
-
-  /** Admin endpoints: a signed-in device of an admin account. */
-  function requireAdmin(req) {
-    const ctx = authenticate(req, 'viewer');
-    if (ctx.account.role !== 'admin') fail(403, 'admin-only', { message: 'Only an administrator can do that.' });
-    return ctx;
-  }
-
-  /** Re-authentication before dangerous actions (OWASP ASVS: re-auth for sensitive operations). */
-  async function confirmPassword(req, account, password) {
-    const ip = clientIp(req);
-    const retry = limiter.retryAfter(ip, 'user:' + account.username);
-    if (retry) fail(429, 'rate-limited', { retryAfter: retry });
-    if (!await verifyPassword(password, account.password)) {
-      limiter.fail(ip, 'user:' + account.username);
-      fail(401, 'bad-credentials', { message: 'Wrong password.' });
-    }
-  }
-
-  /** Signs out an account's browsers and phones (not its computers), except `keep`. */
+  /** Signs out an account's browsers and phones (not its devices), except `keep`. */
   function signOutViewers(accountId, keep) {
     const gone = store.data.devices.filter(d => d.accountId === accountId && d.kind === 'viewer' && d.id !== keep);
     for (const d of gone) removeDevice(d);
     return gone.length;
   }
 
-  /** A single-use secret for a link (invite or password reset); only its hash is stored. */
-  function newLinkToken() {
-    const token = crypto.randomBytes(32).toString('base64url');
-    return { token, tokenHash: sha256Hex(token) };
+  function throttle(req, ...keys) {
+    const retry = limiter.retryAfter(clientIp(req), ...keys);
+    if (retry) fail(429, 'rate-limited', { retryAfter: retry, message: `Too many attempts. Try again in ${retry} s.` });
   }
-  function findByToken(list, token) {
-    const h = sha256Hex(String(token || ''));
-    const item = list.find(x => x.tokenHash.length === h.length && crypto.timingSafeEqual(Buffer.from(x.tokenHash), Buffer.from(h)));
-    return item && Date.parse(item.expires) > now() ? item : null;
-  }
-  function pruneLinks() {
-    store.data.invites = store.data.invites.filter(x => Date.parse(x.expires) > now());
-    store.data.resets = store.data.resets.filter(x => Date.parse(x.expires) > now());
-  }
-  /** Looking up link tokens is rate limited like sign-in, so they can't be probed. */
-  function tokenAttempt(req, item) {
+
+  /** Limits on emails sent: per network address and per recipient (so nobody is flooded with codes). */
+  const mailKeys = (req, email) => ['mail-from:' + clientIp(req), 'mail-to:' + email];
+
+  /** Re-authentication before sensitive changes (OWASP ASVS). */
+  async function confirmPassword(req, account, password) {
     const ip = clientIp(req);
-    const retry = limiter.retryAfter(ip);
-    if (retry) fail(429, 'rate-limited', { retryAfter: retry });
-    if (!item) { limiter.fail(ip); fail(404, 'invalid-link', { message: 'This link is invalid, used or expired. Ask for a new one.' }); }
+    throttle(req, 'account:' + account.id);
+    if (!await verifyPassword(password, account.password)) {
+      limiter.fail(ip, 'account:' + account.id);
+      fail(401, 'bad-credentials', { message: 'Wrong password.' });
+    }
   }
+
+  /** Cloudflare Turnstile, on the forms that send email (when configured). */
+  async function humanCheck(req, token) {
+    if (!TURNSTILE_SECRET) return;
+    let ok = false;
+    try {
+      const r = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+        method: 'POST', body: new URLSearchParams({ secret: TURNSTILE_SECRET, response: String(token || ''), remoteip: clientIp(req) }),
+        signal: AbortSignal.timeout(5000),
+      });
+      ok = (await r.json()).success === true;
+    } catch { }
+    if (!ok) fail(400, 'human-check', { message: 'Please complete the check and try again.' });
+  }
+
+  /** Starts an emailed-code step (sign-up, reset, new email): stores the code's hash, emails the code. */
+  function startCode(key, to, subject, intro, extra = {}) {
+    const code = emailCode();
+    if (pending.size > 10_000) for (const [k, v] of pending) if (v.expires < now()) pending.delete(k);
+    pending.set(key, { codeHash: sha256Hex(code), expires: now() + EMAIL_CODE_MINUTES * 60_000, attempts: 0, ...extra });
+    send(to, subject, `${intro}\n\nYour code: ${code}\n\nIt works for ${EMAIL_CODE_MINUTES} minutes. If you didn't ask for it, ignore this email.\n\n${site()}`);
+  }
+
+  /** Checks an emailed code: five tries, then it's gone. */
+  function takeCode(req, key, code) {
+    throttle(req, key);
+    const p = pending.get(key);
+    if (!p || p.expires < now()) { pending.delete(key); limiter.fail(clientIp(req), key); fail(400, 'bad-code', { message: 'That code is wrong or expired. Ask for a new one.' }); }
+    const c = sha256Hex(String(code || '').replace(/\D/g, ''));
+    if (!crypto.timingSafeEqual(Buffer.from(c), Buffer.from(p.codeHash))) {
+      if (++p.attempts >= 5) pending.delete(key);
+      limiter.fail(clientIp(req), key);
+      fail(400, 'bad-code', { message: p.attempts >= 5 ? 'Too many wrong codes. Ask for a new one.' : 'That code is wrong. Check the email and try again.' });
+    }
+    pending.delete(key);
+    return p;
+  }
+
+  function where(req) {
+    const country = TRUST_PROXY ? str(req.headers['cf-ipcountry'], 8) : '';
+    return `${clientIp(req)}${country && country !== 'XX' ? ` (${country})` : ''}`;
+  }
+
+  async function signIn(req, account, body, kind, { alert = true } = {}) {
+    const ip = clientIp(req);
+    const { dev, token } = newDevice(account, kind, str(body.deviceName, 64), str(body.platform, 32), ip);
+    store.save();
+    audit(`${kind === 'computer' ? 'device' : 'sign-in'} '${dev.name}' for ${account.email} from ${ip}`);
+    if (alert) send(account.email, kind === 'computer' ? `${dev.name} was added to your Headroom account` : 'New sign-in to your Headroom account',
+      kind === 'computer'
+        ? `"${dev.name}" signed in with Headroom Server and is now one of your devices.\n\nFrom: ${where(req)}\nWhen: ${new Date(now()).toUTCString()}\n\nIf this wasn't you, change your password and remove the device in your account.\n\n${site()}`
+        : `Someone signed in to your Headroom account on "${dev.name}".\n\nFrom: ${where(req)}\nWhen: ${new Date(now()).toUTCString()}\n\nIf this wasn't you, change your password now and sign out the browsers you don't recognize (Account → Where you're signed in).\n\n${site()}`);
+    const weak = alert && kind === 'viewer' && !!await passwordProblem(body.password, account.email.split('@')[0], { breach: false });
+    return { token, device: deviceJson(dev, dev.id), account: accountJson(account), passwordWeak: weak };
+  }
+
+  // ----------------------------------------------------------------------------------------------- routes
 
   const routes = {
-    'GET /api/info': () => ({ service: 'headroom-account-server', name: NAME, version: VERSION, signup: signupOpen(), firstAccount: store.data.accounts.length === 0, relay: RELAY }),
+    'GET /api/info': () => ({
+      service: 'headroom-account-server', name: NAME, version: VERSION, signup: SIGNUP === 'open', relay: RELAY,
+      turnstile: TURNSTILE_SECRET ? TURNSTILE_SITEKEY : null, email: !!RESEND_API_KEY || DEV_MAIL,
+    }),
 
-    'POST /api/account/register': async (req) => {
+    // Sign-up: email + password, then the 6-digit code from the email creates the account.
+    'POST /api/account/signup': async (req) => {
+      if (SIGNUP !== 'open') fail(403, 'signup-closed', { message: 'This server isn\'t taking new accounts.' });
       const body = await readJson(req);
-      // With an invite from an administrator, or while sign-up is open (the first account, or SIGNUP=open).
-      pruneLinks();
-      const invite = body.invite ? findByToken(store.data.invites, body.invite) : null;
-      if (body.invite) tokenAttempt(req, invite);
-      else if (!signupOpen()) fail(403, 'signup-closed', { message: 'Accounts on this server are by invitation. Ask its administrator for an invite link.' });
-      const username = normalizeName(body.username);
-      if (!/^[a-z0-9._-]{3,64}$/.test(username)) fail(400, 'bad-username', { message: 'Use 3–64 letters, digits, dots, dashes or underscores.' });
-      if (store.accountByName(username)) fail(409, 'username-taken', { message: 'That username is taken.' });
-      const problem = await passwordProblem(body.password, username);
+      const email = normalizeEmail(body.email);
+      if (!validEmail(email)) fail(400, 'bad-email', { message: 'Enter a valid email address.' });
+      throttle(req, ...mailKeys(req, email));
+      await humanCheck(req, body.turnstile);
+      const problem = await passwordProblem(body.password, email.split('@')[0]);
       if (problem) fail(400, 'weak-password', { message: problem });
-      const first = store.data.accounts.length === 0;
-      store.data.accounts.push({
-        id: randomId(), username, password: await hashPassword(body.password), created: new Date(now()).toISOString(), totpEnabled: false,
-        role: first ? 'admin' : invite?.role === 'admin' ? 'admin' : 'user',
-      });
-      if (invite) store.data.invites = store.data.invites.filter(x => x !== invite);
-      store.save();
-      audit(`account '${username}' created${invite ? ` with an invite from '${store.account(invite.createdBy)?.username || '?'}'` : ''}${first ? ' (administrator)' : ''}`);
-      return login(req, body, 'viewer');
+      limiter.note(...mailKeys(req, email));
+      if (store.accountByEmail(email)) {
+        // Same answer either way (no account enumeration); the owner hears about it instead.
+        send(email, 'Someone tried to create a Headroom account with your email',
+          `Someone tried to create a new Headroom account with this email, but you already have one.\n\nIf it was you, sign in instead, or use "Forgot password?".\n\n${site()}`);
+      } else {
+        startCode(`signup:${email}`, email, 'Your Headroom sign-up code', 'Finish creating your Headroom account with this code.');
+      }
+      return { ok: true };
     },
 
-    // Invite and password-reset links: what the page shows before the form.
-    'POST /api/account/reset': async (req) => {
+    'POST /api/account/verify': async (req) => {
       const body = await readJson(req);
-      pruneLinks();
-      const reset = findByToken(store.data.resets, body.token);
-      tokenAttempt(req, reset);
-      const account = store.account(reset.accountId);
-      if (!account) fail(404, 'invalid-link');
-      const problem = await passwordProblem(body.password, account.username);
+      const email = normalizeEmail(body.email);
+      // The password is taken here, with the code: whoever proves the address chooses it.
+      const problem = await passwordProblem(body.password, email.split('@')[0]);
       if (problem) fail(400, 'weak-password', { message: problem });
-      account.password = await hashPassword(body.password);
-      store.data.resets = store.data.resets.filter(x => x !== reset);
-      const n = signOutViewers(account.id);
-      store.save();
-      audit(`password of '${account.username}' reset with a link; ${n} device(s) signed out`);
-      return { ok: true, username: account.username };
+      takeCode(req, `signup:${email}`, body.code);
+      if (store.accountByEmail(email)) fail(409, 'exists', { message: 'That email already has an account. Sign in instead.' });
+      const account = { id: randomId(), email, password: await hashPassword(body.password), created: new Date(now()).toISOString(), totpEnabled: false };
+      store.data.accounts.push(account);
+      audit(`account created: ${email}`);
+      return signIn(req, account, body, 'viewer', { alert: false });
     },
 
     'POST /api/account/login': async (req) => {
       const body = await readJson(req);
-      return login(req, body, body.kind === 'computer' ? 'computer' : 'viewer');
+      const kind = body.kind === 'computer' ? 'computer' : 'viewer';
+      const ip = clientIp(req);
+      const email = normalizeEmail(body.email);
+      throttle(req, 'login:' + email);
+      const account = store.accountByEmail(email);
+      await dummyReady;
+      // Same work and answer for unknown emails and wrong passwords.
+      const ok = await verifyPassword(body.password, account?.password || DUMMY_PASSWORD) && !!account;
+      if (!ok) { limiter.fail(ip, 'login:' + email); audit(`failed sign-in for ${email || '?'} from ${ip}`); fail(401, 'bad-credentials', { message: 'Wrong email or password.' }); }
+      if (account.disabled) fail(403, 'disabled', { message: 'This account is disabled.' });
+      if (account.totpEnabled) {
+        if (!body.totp) fail(401, 'totp-required');
+        if (!totpVerify(account, body.totp)) { limiter.fail(ip, 'login:' + email); audit(`wrong two-factor code for ${email} from ${ip}`); fail(401, 'bad-totp', { message: 'That code didn\'t work. Wait for the next one.' }); }
+      }
+      limiter.ok(ip, 'login:' + email);
+      if (needsRehash(account.password)) account.password = await hashPassword(body.password);
+      return signIn(req, account, body, kind);
+    },
+
+    'POST /api/account/forgot': async (req) => {
+      const body = await readJson(req);
+      const email = normalizeEmail(body.email);
+      if (!validEmail(email)) fail(400, 'bad-email', { message: 'Enter a valid email address.' });
+      throttle(req, ...mailKeys(req, email));
+      await humanCheck(req, body.turnstile);
+      limiter.note(...mailKeys(req, email));
+      const account = store.accountByEmail(email);
+      if (account && !account.disabled) startCode(`reset:${account.id}`, email, 'Your Headroom password reset code', 'Use this code to choose a new password.');
+      return { ok: true }; // the same whether or not the account exists
+    },
+
+    'POST /api/account/reset': async (req) => {
+      const body = await readJson(req);
+      const account = store.accountByEmail(body.email);
+      const key = `reset:${account?.id || normalizeEmail(body.email)}`;
+      const problem = await passwordProblem(body.password, normalizeEmail(body.email).split('@')[0]);
+      if (problem) fail(400, 'weak-password', { message: problem });
+      takeCode(req, key, body.code);
+      if (!account) fail(400, 'bad-code');
+      account.password = await hashPassword(body.password);
+      const n = signOutViewers(account.id);
+      store.save();
+      audit(`password reset by email for ${account.email}; ${n} sign-in(s) ended`);
+      send(account.email, 'Your Headroom password was changed', `Your password was reset${n ? ` and ${n} browser(s) or phone(s) were signed out` : ''}.\n\nIf this wasn't you, reset it again right away with "Forgot password?".\n\n${site()}`);
+      return { ok: true };
     },
 
     'GET /api/account/me': (req) => {
@@ -679,54 +833,61 @@ export function createApp({ store, now = () => Date.now() }) {
       const { dev, account } = authenticate(req, 'viewer');
       const body = await readJson(req);
       await confirmPassword(req, account, body.current);
-      const problem = await passwordProblem(body.password, account.username);
+      const problem = await passwordProblem(body.password, account.email.split('@')[0]);
       if (problem) fail(400, 'weak-password', { message: problem });
       account.password = await hashPassword(body.password);
-      // Other browsers and phones sign in again with the new password (OWASP ASVS: invalidate sessions on change).
       const n = signOutViewers(account.id, dev.id);
       store.save();
-      audit(`'${account.username}' changed their password; ${n} other device(s) signed out`);
+      audit(`${account.email} changed their password; ${n} other sign-in(s) ended`);
+      send(account.email, 'Your Headroom password was changed', `Your password was changed${n ? ` and ${n} other browser(s) or phone(s) were signed out` : ''}.\n\nIf this wasn't you, reset it right away with "Forgot password?".\n\n${site()}`);
       return { ok: true, signedOut: n };
     },
 
-    // ------------------------------------------------------------------------------------- administration
-
-    'GET /api/admin/users': (req) => {
-      requireAdmin(req);
-      return {
-        users: store.data.accounts.map(a => {
-          const devs = store.data.devices.filter(d => d.accountId === a.id);
-          const seen = devs.map(d => d.lastSeen).filter(Boolean).sort().at(-1) || null;
-          return { ...accountJson(a), created: a.created, devices: devs.filter(d => d.kind === 'viewer').length, computers: devs.filter(d => d.kind === 'computer').length, lastSeen: seen };
-        }),
-      };
-    },
-
-    'GET /api/admin/invites': (req) => {
-      requireAdmin(req);
-      pruneLinks();
-      return { invites: store.data.invites.map(x => ({ id: x.id, role: x.role, note: x.note, created: x.created, expires: x.expires, createdBy: store.account(x.createdBy)?.username })) };
-    },
-
-    'POST /api/admin/invites': async (req) => {
-      const { account } = requireAdmin(req);
+    // Changing the email: a code to the new address proves it; the old address is told.
+    'POST /api/account/email': async (req) => {
+      const { account } = authenticate(req, 'viewer');
       const body = await readJson(req);
-      const role = body.role === 'admin' ? 'admin' : 'user';
-      if (role === 'admin') await confirmPassword(req, account, body.password);
-      pruneLinks();
-      const { token, tokenHash } = newLinkToken();
-      const invite = { id: randomId(), tokenHash, role, note: str(body.note, 80), createdBy: account.id, created: new Date(now()).toISOString(), expires: new Date(now() + INVITE_DAYS * 86_400_000).toISOString() };
-      store.data.invites.push(invite);
+      await confirmPassword(req, account, body.password);
+      const email = normalizeEmail(body.email);
+      if (!validEmail(email)) fail(400, 'bad-email', { message: 'Enter a valid email address.' });
+      if (store.accountByEmail(email)) fail(409, 'exists', { message: 'That email already has an account.' });
+      throttle(req, ...mailKeys(req, email));
+      limiter.note(...mailKeys(req, email));
+      startCode(`email:${account.id}`, email, 'Confirm your new Headroom email', 'Use this code to make this your Headroom account\'s email.', { email });
+      return { ok: true };
+    },
+
+    'POST /api/account/email/verify': async (req) => {
+      const { account } = authenticate(req, 'viewer');
+      const body = await readJson(req);
+      const p = takeCode(req, `email:${account.id}`, body.code);
+      if (store.accountByEmail(p.email)) fail(409, 'exists', { message: 'That email already has an account.' });
+      const old = account.email;
+      account.email = p.email;
       store.save();
-      audit(`'${account.username}' created an invite (${role}${invite.note ? `, "${invite.note}"` : ''})`);
-      return { id: invite.id, token, role, expires: invite.expires };
+      audit(`${old} changed their email to ${p.email}`);
+      send(old, 'Your Headroom email was changed', `Your Headroom account now uses ${p.email}.\n\nIf this wasn't you, contact the operator of ${site()} right away.\n\n${site()}`);
+      return { ok: true, email: account.email };
+    },
+
+    'POST /api/account/delete': async (req) => {
+      const { account } = authenticate(req, 'viewer');
+      const body = await readJson(req);
+      await confirmPassword(req, account, body.password);
+      for (const d of store.data.devices.filter(d => d.accountId === account.id)) removeDevice(d);
+      store.data.computers = store.data.computers.filter(c => c.accountId !== account.id);
+      store.data.accounts = store.data.accounts.filter(a => a.id !== account.id);
+      store.save();
+      audit(`account deleted: ${account.email}`);
+      send(account.email, 'Your Headroom account was deleted', `Your Headroom account and its list of devices were deleted.\n\n${site()}`);
+      return { ok: true };
     },
 
     'POST /api/account/totp/setup': (req) => {
       const { account } = authenticate(req, 'viewer');
       const secret = totpSecret();
       pendingTotp.set(account.id, secret);
-      return { secret, uri: `otpauth://totp/Headroom:${encodeURIComponent(account.username)}?secret=${secret}&issuer=Headroom&digits=6&period=30` };
+      return { secret, uri: `otpauth://totp/Headroom:${encodeURIComponent(account.email)}?secret=${secret}&issuer=Headroom&digits=6&period=30` };
     },
 
     'POST /api/account/totp/enable': async (req) => {
@@ -734,11 +895,11 @@ export function createApp({ store, now = () => Date.now() }) {
       const body = await readJson(req);
       const secret = pendingTotp.get(account.id);
       if (!secret) fail(400, 'Start setup first.');
-      if (!totpVerify({ totpSecret: secret }, body.code)) fail(400, 'That code didn\'t match. Check the time on your phone and try the next code.');
+      if (!totpVerify({ totpSecret: secret }, body.code)) fail(400, 'bad-totp', { message: 'That code didn\'t match. Check the time on your phone and try the next code.' });
       pendingTotp.delete(account.id);
       Object.assign(account, { totpSecret: secret, totpEnabled: true, totpLastStep: Math.floor(Date.now() / 30000) });
       store.save();
-      audit(`'${account.username}' turned on two-factor sign-in`);
+      audit(`${account.email} turned on two-factor sign-in`);
       return { ok: true };
     },
 
@@ -748,11 +909,12 @@ export function createApp({ store, now = () => Date.now() }) {
       await confirmPassword(req, account, body.password);
       Object.assign(account, { totpSecret: null, totpEnabled: false });
       store.save();
-      audit(`'${account.username}' turned off two-factor sign-in`);
+      audit(`${account.email} turned off two-factor sign-in`);
+      send(account.email, 'Two-factor sign-in was turned off', `Two-factor sign-in was turned off for your Headroom account.\n\nIf this wasn't you, change your password right away.\n\n${site()}`);
       return { ok: true };
     },
 
-    // Computers check in: publish how to reach them, learn which devices may connect.
+    // Devices check in: publish how to reach them, learn which sign-ins may connect.
     'POST /api/computer/heartbeat': async (req) => {
       const { dev, account } = authenticate(req, 'computer');
       const b = await readJson(req, 256 * 1024);
@@ -762,99 +924,26 @@ export function createApp({ store, now = () => Date.now() }) {
       Object.assign(c, {
         hostId: str(b.hostId, 64), name: str(b.name, 128) || c.name || dev.name, os: str(b.os, 16), osVersion: str(b.osVersion, 32),
         version: str(b.version, 32), urls: Array.isArray(b.urls) ? b.urls.filter(u => /^https:\/\//.test(u)).slice(0, 16).map(u => str(u, 300)) : [],
-        tailscale: str(b.tailscale, 255) || null, spki: str(b.spki, 64) || null, fingerprint: str(b.fingerprint, 64) || null,
-        ca: str(b.ca, 8192) || null, lastSeen: new Date(now()).toISOString(),
+        spki: str(b.spki, 64) || null, fingerprint: str(b.fingerprint, 64) || null, ca: str(b.ca, 8192) || null, lastSeen: new Date(now()).toISOString(),
       });
       if (changedName) dev.name = c.name;
       store.touch();
       const devices = store.data.devices
         .filter(d => d.accountId === account.id && d.kind === 'viewer')
         .map(d => ({ id: d.id, name: d.name, tokenHash: sha256Hex(computerToken(store, d, c)), viewOnly: !!d.viewOnly }));
-      return { computerId: c.id, account: { id: account.id, username: account.username }, devices, interval: HEARTBEAT_S };
+      return { computerId: c.id, account: { id: account.id, email: account.email }, devices, interval: HEARTBEAT_S };
     },
   };
 
   // Routes with an id in the path.
   const dynamic = [
-    [/^GET \/api\/invite\/([\w-]{20,60})$/, async (req, token) => {
-      pruneLinks();
-      const invite = findByToken(store.data.invites, token);
-      tokenAttempt(req, invite);
-      return { ok: true, role: invite.role, expires: invite.expires, from: store.account(invite.createdBy)?.username || null, name: NAME };
-    }],
-    [/^GET \/api\/reset\/([\w-]{20,60})$/, async (req, token) => {
-      pruneLinks();
-      const reset = findByToken(store.data.resets, token);
-      tokenAttempt(req, reset);
-      return { ok: true, username: store.account(reset.accountId)?.username, expires: reset.expires };
-    }],
-    [/^DELETE \/api\/admin\/invites\/([\w-]+)$/, async (req, id) => {
-      const { account } = requireAdmin(req);
-      const before = store.data.invites.length;
-      store.data.invites = store.data.invites.filter(x => x.id !== id);
-      if (store.data.invites.length === before) fail(404, 'not found');
-      store.save();
-      audit(`'${account.username}' cancelled an invite`);
-      return { ok: true };
-    }],
-    [/^POST \/api\/admin\/users\/([\w-]+)\/reset-link$/, async (req, id) => {
-      const { account } = requireAdmin(req);
-      const user = store.account(id) || fail(404, 'not found');
-      pruneLinks();
-      store.data.resets = store.data.resets.filter(x => x.accountId !== id); // one live link per account
-      const { token, tokenHash } = newLinkToken();
-      const reset = { id: randomId(), accountId: id, tokenHash, created: new Date(now()).toISOString(), expires: new Date(now() + RESET_HOURS * 3_600_000).toISOString() };
-      store.data.resets.push(reset);
-      store.save();
-      audit(`'${account.username}' created a password reset link for '${user.username}'`);
-      return { token, username: user.username, expires: reset.expires };
-    }],
-    [/^POST \/api\/admin\/users\/([\w-]+)\/reset-2fa$/, async (req, id) => {
-      const { account } = requireAdmin(req);
-      const body = await readJson(req);
-      await confirmPassword(req, account, body.password);
-      const user = store.account(id) || fail(404, 'not found');
-      Object.assign(user, { totpSecret: null, totpEnabled: false });
-      store.save();
-      audit(`'${account.username}' turned off two-factor sign-in for '${user.username}'`);
-      return { ok: true };
-    }],
-    [/^POST \/api\/admin\/users\/([\w-]+)$/, async (req, id) => {
-      const { account } = requireAdmin(req);
-      const body = await readJson(req);
-      const user = store.account(id) || fail(404, 'not found');
-      if (body.role !== 'admin' && body.role !== 'user') fail(400, 'bad-role');
-      await confirmPassword(req, account, body.password);
-      if (body.role === 'user' && user.role === 'admin' && store.data.accounts.filter(a => a.role === 'admin').length === 1) {
-        fail(409, 'last-admin', { message: 'This is the only administrator. Make someone else an administrator first.' });
-      }
-      user.role = body.role;
-      store.save();
-      audit(`'${account.username}' made '${user.username}' ${body.role === 'admin' ? 'an administrator' : 'a regular user'}`);
-      return { ok: true };
-    }],
-    [/^DELETE \/api\/admin\/users\/([\w-]+)$/, async (req, id) => {
-      const { account } = requireAdmin(req);
-      const body = await readJson(req);
-      await confirmPassword(req, account, body.password);
-      const user = store.account(id) || fail(404, 'not found');
-      if (user.id === account.id) fail(409, 'self', { message: 'You can\'t delete your own account here.' });
-      for (const d of store.data.devices.filter(d => d.accountId === id)) removeDevice(d);
-      store.data.computers = store.data.computers.filter(c => c.accountId !== id);
-      store.data.accounts = store.data.accounts.filter(a => a.id !== id);
-      store.data.invites = store.data.invites.filter(x => x.createdBy !== id);
-      store.data.resets = store.data.resets.filter(x => x.accountId !== id);
-      store.save();
-      audit(`'${account.username}' deleted the account '${user.username}' with its devices and computers`);
-      return { ok: true };
-    }],
     [/^DELETE \/api\/account\/devices\/([\w-]+)$/, async (req, id) => {
       const { account } = authenticate(req, 'viewer');
       const d = store.device(id);
       if (!d || d.accountId !== account.id) fail(404, 'not found');
       removeDevice(d);
       store.save();
-      audit(`${d.kind} '${d.name}' removed from '${account.username}'`);
+      audit(`${d.kind === 'computer' ? 'device' : 'sign-in'} '${d.name}' removed from ${account.email}`);
       return { ok: true };
     }],
     [/^POST \/api\/account\/devices\/([\w-]+)$/, async (req, id) => {
@@ -863,30 +952,52 @@ export function createApp({ store, now = () => Date.now() }) {
       const d = store.device(id);
       if (!d || d.accountId !== account.id) fail(404, 'not found');
       if (typeof body.viewOnly === 'boolean') d.viewOnly = body.viewOnly;
-      if (str(body.name, 64)) d.name = str(body.name, 64);
       store.save();
       return { ok: true };
     }],
   ];
+  if (DEV_MAIL) {
+    routes['GET /api/dev/mail'] = req => devMailbox.get(normalizeEmail(new URL(req.url, 'http://x').searchParams.get('to'))) || fail(404, 'none');
+  }
 
   // ----------------------------------------------------------------------------------------------- relay
 
-  /** The computer behind /r/<relayId>/…, or an error to answer with. */
-  function relayTarget(url) {
-    const m = /^\/r\/(\d{9})(\/.*)?$/.exec(url.pathname);
-    if (!m) return null;
-    const [, relayId, rest = '/'] = m;
-    if (!RELAY) return { error: [404, 'relay-off'] };
-    if (!RELAYED_PATHS.test(rest)) return { error: [403, 'not-relayed', 'Only sessions and file transfers go through the relay.'] };
-    if (!relay.online(relayId)) {
-      const known = store.data.computers.some(c => c.relayId === relayId);
-      return { error: known ? [503, 'offline', 'That computer isn\'t connected right now.'] : [404, 'unknown-id', 'No computer has that ID.'] };
+  /**
+   * The device behind /r/<relay id>/… (account devices, and guest sessions once accepted) or /c/<guest code
+   * slot>/… (a guest code before it's accepted: only its name and the session), or an error to answer with.
+   */
+  function relayTarget(req, url) {
+    let m = /^\/r\/([\w-]{9,24})(\/.*)?$/.exec(url.pathname);
+    if (m) {
+      const [, relayId, rest = '/'] = m;
+      if (!RELAY) return { error: [404, 'relay-off'] };
+      if (!RELAYED_PATHS.test(rest)) return { error: [403, 'not-relayed', 'Only sessions and file transfers go through the relay.'] };
+      if (!relay.online(relayId)) return { error: [503, 'offline', 'That device isn\'t connected right now.'] };
+      return { relayId, path: rest + url.search };
     }
-    return { relayId, path: rest + url.search };
+    m = /^\/c\/(\d{4})(\/.*)?$/.exec(url.pathname);
+    if (!m) return null;
+    const [, slot, rest = '/'] = m;
+    if (!RELAY) return { error: [404, 'relay-off'] };
+    if (!GUEST_PATHS.test(rest)) return { error: [403, 'not-relayed'] };
+    const key = 'guest-from:' + clientIp(req);
+    const retry = limiter.retryAfter(key);
+    if (retry) return { error: [429, 'rate-limited', `Too many attempts. Try again in ${retry} s.`] };
+    const relayId = relay.slotTarget(slot);
+    if (!relayId) {
+      limiter.fail(key); // finding valid codes by trying is throttled (per address, and overall)
+      return { error: [404, 'bad-code', 'That code isn\'t valid. Check it, or ask for a new one.'] };
+    }
+    return { relayId, path: rest + url.search, guest: true };
   }
 
-  /** Request headers as the computer should see them: hop-by-hop ones dropped, the viewer's address added. */
-  function forwardHeaders(req, ip) {
+  const countryOf = req => { const c = TRUST_PROXY ? str(req.headers['cf-ipcountry'], 8) : ''; return c && c !== 'XX' && c !== 'T1' ? c : ''; };
+
+  /**
+   * Request headers as the device should see them: hop-by-hop ones dropped, the viewer's address and country added,
+   * and whether they came with a guest code (any X-Headroom-* the viewer sent is dropped first).
+   */
+  function forwardHeaders(req, ip, guest) {
     const out = {};
     for (let i = 0; i < req.rawHeaders.length; i += 2) {
       const k = req.rawHeaders[i], lk = k.toLowerCase();
@@ -894,6 +1005,9 @@ export function createApp({ store, now = () => Date.now() }) {
       out[k] = req.rawHeaders[i + 1];
     }
     out['X-Headroom-Client'] = ip;
+    const country = countryOf(req);
+    if (country) out['X-Headroom-Country'] = country;
+    if (guest) out['X-Headroom-Guest'] = '1';
     return out;
   }
 
@@ -901,7 +1015,7 @@ export function createApp({ store, now = () => Date.now() }) {
     const ip = clientIp(req);
     let tunnel;
     try {
-      tunnel = await relay.openTunnel(target.relayId, ip);
+      tunnel = await relay.openTunnel(target.relayId, { ip, country: countryOf(req), guest: !!target.guest });
     } catch (e) {
       const body = JSON.stringify({ error: e.status === 504 ? 'timeout' : 'offline', message: e.message });
       res.writeHead(e.status || 502, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
@@ -910,7 +1024,7 @@ export function createApp({ store, now = () => Date.now() }) {
     }
     const preq = http.request({
       createConnection: () => tunnel, setHost: false, // no agent: then Node uses createConnection
-      method: req.method, path: target.path, headers: { Host: 'relay', ...forwardHeaders(req, ip), Connection: 'close' },
+      method: req.method, path: target.path, headers: { Host: 'relay', ...forwardHeaders(req, ip, target.guest), Connection: 'close' },
     });
     preq.on('response', pres => {
       const h = {};
@@ -926,7 +1040,7 @@ export function createApp({ store, now = () => Date.now() }) {
     req.pipe(preq);
   }
 
-  /** HTTP upgrades: computers' control and tunnel connections, and viewers' WebSockets to /r/<id>/ws. */
+  /** HTTP upgrades: devices' control and tunnel connections, and viewers' WebSockets to /r/… and /c/…. */
   async function upgrade(req, socket, head) {
     socket.on('error', () => socket.destroy());
     const url = new URL(req.url, 'http://x');
@@ -934,12 +1048,24 @@ export function createApp({ store, now = () => Date.now() }) {
     try {
       if (url.pathname === '/api/relay/control') {
         if (!RELAY) return rawResponse(socket, 404, 'Not Found', {}, '{"error":"relay-off"}');
+        if (relay.hosts.size >= MAX_HOSTS) return rawResponse(socket, 503, 'Busy', {}, '{"error":"busy"}');
+        const ip = clientIp(req);
+        if (!req.headers.authorization) {
+          // A device that isn't signed in to an account: reachable only with a guest code. A fresh, unguessable
+          // relay id each time; a few per network address.
+          if (relay.guestHostsFrom(ip) >= GUEST_HOSTS_PER_ADDRESS) return rawResponse(socket, 429, 'Too Many', {}, '{"error":"rate-limited"}');
+          // They can't take the room account devices need.
+          if (relay.anonymous() >= Math.floor(MAX_HOSTS * 0.6)) return rawResponse(socket, 503, 'Busy', {}, '{"error":"busy"}');
+          const link = acceptWebSocket(req, socket, head);
+          if (link) relay.attach(randomId(12), null, str(req.headers['x-headroom-name'], 64) || 'Device', link, ip);
+          return;
+        }
         const { dev, account } = authenticate(req, 'computer');
         let c = store.computer(dev.id);
         if (!c) { c = { id: dev.id, accountId: account.id, name: dev.name }; store.data.computers.push(c); }
         c.hostId ||= str(req.headers['x-headroom-host-id'], 64) || undefined;
         if (!c.relayId) {
-          // Like an AnyDesk ID, a computer keeps its Headroom ID if it leaves the account and joins again.
+          // Kept if the device leaves the account and signs in again.
           const key = c.hostId && `${account.id}:${c.hostId}`;
           const known = key && store.data.relayIds?.[key];
           const taken = id => store.data.computers.some(x => x !== c && x.relayId === id);
@@ -948,19 +1074,19 @@ export function createApp({ store, now = () => Date.now() }) {
           store.save();
         }
         const link = acceptWebSocket(req, socket, head);
-        if (link) relay.attach(c.relayId, c.id, c.name || dev.name, link);
+        if (link) relay.attach(c.relayId, c.id, c.name || dev.name, link, ip);
         return;
       }
       const tm = /^\/api\/relay\/tunnel\/([\w-]{20,40})$/.exec(url.pathname);
       if (tm) return relay.acceptTunnel(tm[1], req, socket, head);
-      const target = relayTarget(url);
+      const target = relayTarget(req, url);
       if (target && proto === 'websocket') {
-        if (target.error) return rawResponse(socket, target.error[0], 'Error', {}, JSON.stringify({ error: target.error[1] }));
+        if (target.error) return rawResponse(socket, target.error[0], 'Error', {}, JSON.stringify({ error: target.error[1], message: target.error[2] }));
         const ip = clientIp(req);
-        const tunnel = await relay.openTunnel(target.relayId, ip).catch(e => { rawResponse(socket, e.status || 502, 'Unavailable'); return null; });
+        const tunnel = await relay.openTunnel(target.relayId, { ip, country: countryOf(req), guest: !!target.guest }).catch(e => { rawResponse(socket, e.status || 502, 'Unavailable'); return null; });
         if (!tunnel) return;
         const lines = [`GET ${target.path} HTTP/1.1`, 'Host: relay', 'Connection: Upgrade', 'Upgrade: websocket'];
-        for (const [k, v] of Object.entries(forwardHeaders(req, ip))) lines.push(`${k}: ${v}`);
+        for (const [k, v] of Object.entries(forwardHeaders(req, ip, target.guest))) lines.push(`${k}: ${v}`);
         tunnel.write(lines.join('\r\n') + '\r\n\r\n');
         if (head?.length) tunnel.write(head);
         socket.setNoDelay(true);
@@ -982,16 +1108,18 @@ export function createApp({ store, now = () => Date.now() }) {
     const headers = {
       'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY',
       'Cross-Origin-Opener-Policy': 'same-origin', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=()',
-      // The web app runs only its own scripts; it connects to computers anywhere (directly or through this relay).
-      'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; " +
-        "media-src 'self' blob:; font-src 'self'; connect-src 'self' https: wss: http: ws:; worker-src 'self'; manifest-src 'self'; " +
-        "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      // The web app runs only its own scripts (plus Cloudflare Turnstile on sign-up); it connects to devices
+      // anywhere (directly or through this relay).
+      'Content-Security-Policy': "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; " +
+        "img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; connect-src 'self' https: wss: http: ws:; " +
+        "frame-src https://challenges.cloudflare.com; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none'; " +
+        "form-action 'self'; frame-ancestors 'none'",
     };
     if (req.socket.encrypted || (TRUST_PROXY && String(req.headers['x-forwarded-proto'] || '').startsWith('https'))) {
       headers['Strict-Transport-Security'] = 'max-age=31536000';
     }
     for (const [k, v] of Object.entries(headers)) res.setHeader(k, v);
-    const target = relayTarget(url);
+    const target = relayTarget(req, url);
     if (target) {
       if (target.error) {
         const [status, error, message] = target.error;
@@ -1002,7 +1130,7 @@ export function createApp({ store, now = () => Date.now() }) {
       return proxyRequest(req, res, target);
     }
     if (url.pathname.startsWith('/api/')) {
-      // Bearer tokens, no cookies: any origin may call the API (the web app is often served by a computer).
+      // Bearer tokens, no cookies: any origin may call the API (the Viewer app is served from its own origin).
       res.setHeader('Cache-Control', 'no-store');
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type');
@@ -1035,11 +1163,27 @@ export function createApp({ store, now = () => Date.now() }) {
 
   handle.upgrade = upgrade;
   handle.relay = relay;
+  handle.limiter = limiter;
   return handle;
 }
 
-// An existing hash to verify against when the username doesn't exist, so timing doesn't reveal accounts.
+/** Sends an email through Resend (or, unconfigured, writes it to the log so a local test can read the code). */
+export async function sendMail(to, subject, text) {
+  if (!RESEND_API_KEY || !EMAIL_FROM) {
+    if (!DEV_MAIL) log(`email not configured (RESEND_API_KEY, EMAIL_FROM); would send to ${to}: ${subject}\n${text}`);
+    return;
+  }
+  const r = await fetch('https://api.resend.com/emails', {
+    method: 'POST', signal: AbortSignal.timeout(10_000),
+    headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: EMAIL_FROM, to: [to], subject, text }),
+  });
+  if (!r.ok) throw new Error(`Resend answered ${r.status}: ${(await r.text()).slice(0, 200)}`);
+}
+
+// An existing hash to verify against when the email has no account, so timing doesn't reveal accounts.
 let DUMMY_PASSWORD = null;
+const dummyReady = hashPassword(crypto.randomBytes(16).toString('hex')).then(h => { DUMMY_PASSWORD = h; });
 
 function log(msg) { console.log(`${new Date().toISOString()} ${msg}`); }
 /** Security events (sign-ins, password and two-factor changes, administration), never secrets. */
@@ -1068,75 +1212,81 @@ function runningServer() {
 }
 
 async function cli(cmd, args) {
+  const changes = ['add-user', 'reset-password', 'reset-2fa', 'disable-user', 'enable-user', 'delete-user'];
   // A running server would overwrite changes made here with its in-memory copy: refuse instead.
-  if (['add-user', 'reset-password', 'reset-2fa', 'make-admin', 'make-user', 'delete-user'].includes(cmd) && runningServer()) {
+  if (changes.includes(cmd) && runningServer()) {
     console.log('The account server is running on this data directory. Stop it first (e.g. sudo systemctl stop headroom-accounts),');
     console.log('run this again, then start it.');
     return 1;
   }
   const store = new Store(DATA_DIR);
-  const name = normalizeName(args[0]);
-  const account = name && store.accountByName(name);
+  const email = normalizeEmail(args[0]);
+  const account = email && store.accountByEmail(email);
+  if (changes.includes(cmd) && cmd !== 'add-user' && !account) { console.log(email ? 'No account with that email.' : `usage: ${cmd} <email>`); return 1; }
+  const viewers = () => store.data.devices.filter(d => d.accountId === account.id && d.kind === 'viewer');
   switch (cmd) {
     case 'add-user': {
-      if (!/^[a-z0-9._-]{3,64}$/.test(name)) { console.log('usage: add-user <username>  (3–64 letters, digits, . - _)'); return 1; }
-      if (account) { console.log('That username exists.'); return 1; }
+      if (!validEmail(email)) { console.log('usage: add-user <email>'); return 1; }
+      if (account) { console.log('That email already has an account.'); return 1; }
       const pw = await ask(`Password (${MIN_PASSWORD}+ characters): `, true);
-      const problem = await passwordProblem(pw, name);
+      const problem = await passwordProblem(pw, email.split('@')[0]);
       if (problem) { console.log(problem); return 1; }
-      const admin = store.data.accounts.length === 0 || args.includes('--admin');
-      store.data.accounts.push({ id: randomId(), username: name, password: await hashPassword(pw), created: new Date().toISOString(), totpEnabled: false, role: admin ? 'admin' : 'user' });
+      store.data.accounts.push({ id: randomId(), email, password: await hashPassword(pw), created: new Date().toISOString(), totpEnabled: false });
       store.save();
-      audit(`account '${name}' created from the command line${admin ? ' (administrator)' : ''}`);
-      console.log(`Created '${name}'${admin ? ' (administrator)' : ''}.`);
+      audit(`account created from the command line: ${email}`);
+      console.log(`Created ${email}.`);
       return 0;
     }
     case 'list-users':
       for (const a of store.data.accounts) {
         const devs = store.data.devices.filter(d => d.accountId === a.id);
-        console.log(`${a.username.padEnd(24)} ${(a.role || 'user').padEnd(6)} ${devs.filter(d => d.kind === 'computer').length} computer(s), ${devs.filter(d => d.kind === 'viewer').length} device(s)${a.totpEnabled ? ', 2FA on' : ''}`);
+        const n = devs.filter(d => d.kind === 'computer').length;
+        console.log(`${a.email.padEnd(40)} ${n} device(s), ${devs.length - n} sign-in(s)${a.totpEnabled ? ', 2FA on' : ''}${a.disabled ? ', DISABLED' : ''}`);
       }
       return 0;
     case 'reset-password': {
-      if (!account) { console.log('No such user.'); return 1; }
       const pw = await ask(`New password (${MIN_PASSWORD}+ characters): `, true);
-      const problem = await passwordProblem(pw, name);
+      const problem = await passwordProblem(pw, email.split('@')[0]);
       if (problem) { console.log(problem); return 1; }
       account.password = await hashPassword(pw);
-      const out = store.data.devices.filter(d => d.accountId === account.id && d.kind === 'viewer');
+      const out = viewers();
       store.data.devices = store.data.devices.filter(d => !out.includes(d));
       store.save();
-      audit(`password of '${name}' reset from the command line; ${out.length} device(s) signed out`);
+      audit(`password of ${email} reset from the command line; ${out.length} sign-in(s) ended`);
       console.log(`Password changed; ${out.length} signed-in browser(s)/phone(s) must sign in again.`);
       return 0;
     }
     case 'reset-2fa':
-      if (!account) { console.log('No such user.'); return 1; }
       Object.assign(account, { totpSecret: null, totpEnabled: false });
       store.save();
+      audit(`two-factor sign-in of ${email} turned off from the command line`);
       console.log('Two-factor sign-in turned off.');
       return 0;
-    case 'make-admin':
-    case 'make-user': {
-      if (!account) { console.log('No such user.'); return 1; }
-      const admins = store.data.accounts.filter(a => a.role === 'admin');
-      if (cmd === 'make-user' && account.role === 'admin' && admins.length === 1) { console.log('That is the only administrator.'); return 1; }
-      account.role = cmd === 'make-admin' ? 'admin' : 'user';
+    case 'disable-user': {
+      account.disabled = true;
+      const out = viewers();
+      store.data.devices = store.data.devices.filter(d => !out.includes(d));
       store.save();
-      audit(`'${name}' made ${account.role === 'admin' ? 'an administrator' : 'a regular user'} from the command line`);
-      console.log(`'${name}' is now ${account.role === 'admin' ? 'an administrator' : 'a regular user'}.`);
+      audit(`${email} disabled from the command line`);
+      console.log(`Disabled: it can't sign in, its devices can't be reached, and ${out.length} sign-in(s) ended. Undo with enable-user.`);
       return 0;
     }
+    case 'enable-user':
+      account.disabled = false;
+      store.save();
+      audit(`${email} enabled from the command line`);
+      console.log('Enabled.');
+      return 0;
     case 'delete-user':
-      if (!account) { console.log('No such user.'); return 1; }
       store.data.devices = store.data.devices.filter(d => d.accountId !== account.id);
       store.data.computers = store.data.computers.filter(c => c.accountId !== account.id);
       store.data.accounts = store.data.accounts.filter(a => a.id !== account.id);
       store.save();
-      console.log('Deleted, with its devices and computers.');
+      audit(`${email} deleted from the command line`);
+      console.log('Deleted, with its devices and sign-ins.');
       return 0;
     default:
-      console.log('commands: add-user <name> [--admin] | list-users | reset-password <name> | reset-2fa <name> | make-admin <name> | make-user <name> | delete-user <name>');
+      console.log('commands: list-users | add-user <email> | reset-password <email> | reset-2fa <email> | disable-user <email> | enable-user <email> | delete-user <email>');
       return cmd ? 1 : 0;
   }
 }
@@ -1146,7 +1296,6 @@ async function cli(cmd, args) {
 async function main() {
   const [cmd, ...args] = process.argv.slice(2);
   if (cmd) process.exit(await cli(cmd, args));
-  DUMMY_PASSWORD = await hashPassword(crypto.randomBytes(16).toString('hex'));
   const store = new Store(DATA_DIR);
   const handler = createApp({ store });
   const tls = env.TLS_CERT && env.TLS_KEY;
@@ -1158,9 +1307,10 @@ async function main() {
   server.requestTimeout = 0; // relayed uploads and downloads can take a while; headersTimeout still guards slow clients
   server.listen(PORT, BIND, () => {
     log(`Headroom Account Server ${VERSION} on ${tls ? 'https' : 'http'}://${BIND}:${PORT}/ — data ${DATA_DIR}${WEB_ROOT ? `, web app ${WEB_ROOT}` : ''}`);
-    log(`sign-up: ${SIGNUP === 'first' ? (store.data.accounts.length ? 'closed (an account exists; use add-user)' : 'open for the first account') : SIGNUP}`);
+    log(`sign-up: ${SIGNUP}; email: ${RESEND_API_KEY && EMAIL_FROM ? `Resend, from ${EMAIL_FROM}` : DEV_MAIL ? 'testing mailbox (DEV_MAIL=1)' : 'NOT CONFIGURED (set RESEND_API_KEY and EMAIL_FROM): codes are only written to this log'}`);
+    log(`human check: ${TURNSTILE_SECRET && TURNSTILE_SITEKEY ? 'Cloudflare Turnstile' : 'off (set TURNSTILE_SITEKEY and TURNSTILE_SECRET)'}`);
     if (!tls) log('serving plain HTTP: put it behind HTTPS (a reverse proxy, or TLS_CERT/TLS_KEY) before using it beyond this machine');
-    log(`relay: ${RELAY ? 'on — computers in an account are reachable at /r/<Headroom ID>/' : 'off'}`);
+    log(`relay: ${RELAY ? 'on' : 'off'}`);
   });
   const pidFile = path.join(DATA_DIR, 'server.pid');
   fs.writeFileSync(pidFile, String(process.pid));
