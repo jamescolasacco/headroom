@@ -11,9 +11,9 @@
 </head>
 <body>
 <div class="app">
-  <nav class="side" aria-label="Settings sections">
+  <nav class="side" aria-label="Headroom Server">
     <div class="brand">
-      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="6" width="26" height="17" rx="3.5" fill="none" stroke="currentColor" stroke-width="2.4"/><path d="M11 27h10" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M10 14.5l4 4 8-8" fill="none" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="6" width="26" height="17" rx="3.5" fill="none" stroke="currentColor" stroke-width="2.4"/><path d="M11 27h10" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M10 14.5l4 4 8-8" fill="none" stroke="var(--ready)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
       <div><h1>Headroom Server</h1><div class="sub" id="side-host">…</div></div>
     </div>
     <div id="nav"></div>
@@ -22,6 +22,7 @@
   </nav>
   <main class="content" id="content" tabindex="-1"></main>
 </div>
+<div id="announcer" class="sr-only" role="status" aria-live="polite"></div>
 <script type="module" src="/js/admin.js" data-cfasync="false"></script>
 </body>
 </html>

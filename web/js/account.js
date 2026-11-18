@@ -70,6 +70,8 @@ export const signIn = async (server, { email, password, totp, deviceName, platfo
   remember(server, await call(server, '/api/account/login', { method: 'POST', body: { email, password, totp, deviceName, platform } }));
 export const forgotPassword = (server, { email, turnstile }) => call(server, '/api/account/forgot', { method: 'POST', body: { email, turnstile } });
 export const resetPassword = (server, { email, code, password }) => call(server, '/api/account/reset', { method: 'POST', body: { email, code, password } });
+/** Emails a fresh code for a sign-up or reset that's waiting for one (the earlier code stops working). */
+export const resendCode = (server, { email, kind }) => call(server, '/api/account/resend', { method: 'POST', body: { email, kind } });
 
 export function updateAccount(patch) {
   const a = loadAccount();

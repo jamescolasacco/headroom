@@ -118,8 +118,8 @@ export class KeyboardInput {
     if (!this.enabled) return false;
     const t = e.target;
     if (t && t !== this.ctx.sink && t !== document.body && t.closest) {
-      // Typing into our own UI (dialogs, sheets) stays local.
-      if (t.closest('#sheet, dialog, .local-input')) return false;
+      // Typing into our own UI (dialogs, sheets, the toolbar, the overlay's buttons) stays local.
+      if (t.closest('#sheet, dialog, .local-input, #toolbar, #overlay')) return false;
       if (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) && t !== this.ctx.sink) return false;
     }
     if (this.ctx.softKeyboardHandles?.(e)) return false; // soft keyboard sends text instead

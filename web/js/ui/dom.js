@@ -27,35 +27,152 @@ export function svg(pathData, size = 22) {
   return s;
 }
 
-let toastTimer = 0;
-export function toast(message, ms = 2600) {
+/** The English plural for a count, by the language's rules: plural(3, '1 device', '3 devices'). */
+const pluralRules = new Intl.PluralRules('en');
+export const plural = (n, one, other) => (pluralRules.select(n) === 'one' ? one : other);
+
+// Switching between light and dark mustn't animate every colour at once: transitions are off for that frame.
+matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => {
+  const root = document.documentElement;
+  root.classList.add('theme-switching');
+  void root.offsetHeight; // apply the new colours with transitions off
+  requestAnimationFrame(() => requestAnimationFrame(() => root.classList.remove('theme-switching')));
+});
+
+let uid = 0;
+/** A unique id for wiring labels, hints and errors to their controls. */
+export const nextId = (prefix = 'hr') => `${prefix}-${++uid}`;
+
+/**
+ * Tells screen readers about something that changed, politely. The region (#announcer) is always in the page and
+ * starts empty, so every update is read; clearing it first makes a repeated message read again.
+ */
+export function announce(message) {
+  const el = document.getElementById('announcer');
+  if (!el) return;
+  el.textContent = '';
+  requestAnimationFrame(() => { el.textContent = message; });
+}
+
+let toastTimer = 0, toastLeft = 0, toastSince = 0, toastWired = false;
+const hideToast = el => {
+  if (el.hidePopover && el.matches(':popover-open')) { try { el.hidePopover(); } catch { } }
+  else el.hidden = true;
+};
+/** (Re)starts the countdown to hiding the message, with the time it has left. */
+function armToast(el) {
+  clearTimeout(toastTimer);
+  toastSince = Date.now();
+  toastTimer = setTimeout(() => hideToast(el), toastLeft);
+}
+/** Stops the countdown (pointer on the message, or the tab in the background): nobody misses a message. */
+function pauseToast() {
+  if (!toastTimer) return;
+  clearTimeout(toastTimer);
+  toastTimer = 0;
+  toastLeft = Math.max(1200, toastLeft - (Date.now() - toastSince));
+}
+/**
+ * A short message at the bottom of the screen, on every screen. It sits in the top layer (a popover) so it also
+ * shows above an open dialog, and it is announced. Longer messages stay longer.
+ */
+export function toast(message, ms) {
   const el = document.getElementById('toast');
   if (!el) return;
+  if (!toastWired) {
+    toastWired = true;
+    el.addEventListener('pointerenter', pauseToast);
+    el.addEventListener('pointerleave', () => { if (!toastTimer) armToast(el); });
+    document.addEventListener('visibilitychange', () => { if (document.hidden) pauseToast(); else if (!toastTimer && el.textContent) armToast(el); });
+    el.addEventListener('toggle', e => { if (e.newState === 'closed') { el.hidden = true; el.textContent = ''; clearTimeout(toastTimer); toastTimer = 0; } });
+  }
   el.textContent = message;
   el.hidden = false;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.hidden = true; }, ms);
+  if (el.showPopover && !el.matches(':popover-open')) { try { el.showPopover(); } catch { } }
+  announce(message);
+  toastLeft = ms ?? Math.min(9000, Math.max(2600, message.length * 60));
+  if (document.hidden) { clearTimeout(toastTimer); toastTimer = 0; } else armToast(el);
+}
+
+/**
+ * A labelled form field: the label is bound to the input, an optional hint is linked as its description, and
+ * an error line below it is linked too and starts empty. Returns the nodes to append plus `error(text)` to show
+ * or clear the error (which also marks the field invalid).
+ */
+export function field(label, input, { hint } = {}) {
+  input.id ||= nextId('f');
+  const lab = h('label', { class: 'field', for: input.id }, label);
+  const hintEl = hint ? h('p', { class: 'hint', id: nextId('hint') }, hint) : null;
+  const errEl = h('p', { class: 'field-error', id: nextId('err'), hidden: true });
+  const describe = () => {
+    const ids = [hintEl?.id, errEl.hidden ? null : errEl.id].filter(Boolean).join(' ');
+    if (ids) input.setAttribute('aria-describedby', ids); else input.removeAttribute('aria-describedby');
+  };
+  describe();
+  const error = text => {
+    errEl.textContent = text || '';
+    errEl.hidden = !text;
+    if (text) input.setAttribute('aria-invalid', 'true'); else input.removeAttribute('aria-invalid');
+    describe();
+  };
+  input.addEventListener('input', () => { if (!errEl.hidden) error(''); });
+  return { nodes: [lab, input, hintEl, errEl], error, input };
+}
+
+/**
+ * Marks a submit button busy without disabling it (a disabled button drops keyboard focus): it shows `busyLabel`,
+ * ignores further presses, and is restored by the returned function.
+ */
+export function busy(button, busyLabel) {
+  if (button.getAttribute('aria-disabled') === 'true') return null;
+  const label = button.textContent;
+  button.setAttribute('aria-disabled', 'true');
+  button.classList.add('busy');
+  if (busyLabel) button.textContent = busyLabel;
+  return () => {
+    button.removeAttribute('aria-disabled');
+    button.classList.remove('busy');
+    button.textContent = label;
+  };
 }
 
 // ------------------------------------------------------------------ sheet (popover menus in the viewer)
 let sheetClose = null;
 
+/**
+ * Opens the session's sheet (a small panel of options). It is named by its first heading, takes focus, closes on
+ * Escape or a tap outside, and gives focus back to whatever opened it.
+ */
 export function openSheet(build, { onClose } = {}) {
   const sheet = document.getElementById('sheet');
   const backdrop = document.getElementById('sheet-backdrop');
+  const opener = document.activeElement;
   closeSheet();
   sheet.replaceChildren();
   build(sheet);
+  const title = sheet.querySelector('h2, h3');
+  if (title) { title.id ||= nextId('sheet'); sheet.setAttribute('aria-labelledby', title.id); } else sheet.removeAttribute('aria-labelledby');
   sheet.hidden = false;
   backdrop.hidden = false;
+  const onKey = e => {
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    e.stopPropagation();
+    close();
+  };
   const close = () => {
     sheet.hidden = true; backdrop.hidden = true; sheet.replaceChildren();
     backdrop.removeEventListener('pointerdown', close);
+    sheet.removeEventListener('keydown', onKey);
     sheetClose = null;
     onClose?.();
+    if (opener?.isConnected && opener.focus) opener.focus({ preventScroll: true });
   };
   backdrop.addEventListener('pointerdown', close);
+  sheet.addEventListener('keydown', onKey);
   sheetClose = close;
+  // Focus the selected option, else the first control (keyboard users land inside; pointer users don't see a ring).
+  (sheet.querySelector('.item.active, [aria-pressed="true"]') || sheet.querySelector('button, input, textarea, select, [tabindex="0"]'))?.focus({ preventScroll: true });
   return close;
 }
 
@@ -67,8 +184,8 @@ export function sheetItem(label, { sub, onClick, active, icon } = {}) {
     h('span', {}, icon || null, label), sub != null ? h('span', { class: 'sub' }, sub) : null);
 }
 
-export function segmented(options, value, onChange) {
-  const wrap = h('div', { class: 'seg', role: 'group' });
+export function segmented(options, value, onChange, label) {
+  const wrap = h('div', { class: 'seg', role: 'group', 'aria-label': label || null });
   for (const o of options) {
     const b = h('button', { type: 'button', 'aria-pressed': String(o.value === value) }, o.label);
     b.addEventListener('click', () => {
@@ -82,18 +199,36 @@ export function segmented(options, value, onChange) {
 }
 
 // ------------------------------------------------------------------ modal dialog
+/**
+ * Opens the modal dialog. It is named by its first heading. Focus goes to the element marked `autofocus`, else
+ * to the heading (so the dialog is read from the top and no keyboard pops up on phones); closing (Escape too)
+ * gives focus back to whatever opened it.
+ */
 export function dialog(build) {
   const dlg = document.getElementById('dlg');
+  const opener = document.activeElement;
   dlg.replaceChildren();
   return new Promise(resolve => {
     const done = v => { dlg.close(); resolve(v); };
     build(dlg, done);
-    dlg.onclose = () => resolve(undefined);
+    const title = dlg.querySelector('h2');
+    if (title) {
+      title.id ||= nextId('dlg');
+      title.tabIndex = -1;
+      dlg.setAttribute('aria-labelledby', title.id);
+    } else dlg.removeAttribute('aria-labelledby');
+    dlg.onclose = () => {
+      resolve(undefined);
+      if (opener?.isConnected && opener.focus) opener.focus({ preventScroll: true });
+    };
     dlg.showModal();
+    const first = dlg.querySelector('[autofocus]') || title;
+    first?.focus({ preventScroll: true });
+    dlg.scrollTop = 0;
   });
 }
 
-export function confirmDialog(title, message, okLabel = 'OK', danger = false) {
+export function confirmDialog(title, message, okLabel = 'Continue', danger = false) {
   return dialog((dlg, done) => {
     dlg.append(h('div', { class: 'body' },
       h('h2', {}, title), h('p', { class: 'muted' }, message),

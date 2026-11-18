@@ -26,7 +26,8 @@ export class Session {
     this.prefs = loadPrefs(host.id);
     this.monitors = [];
     this.monitorId = this.prefs.monitor || null;
-    this.permissions = { input: true, clipboard: true, files: true, audio: true };
+    // Until the computer says what this session may do (welcome), offer nothing beyond watching.
+    this.permissions = { input: false, clipboard: false, files: false, audio: false };
     this.hostStats = null;
     this.videoConfig = null;
     this.lastFrameAt = 0;
@@ -222,8 +223,11 @@ export class Session {
         this._hideOverlay();
       }
     });
-    c.addEventListener('pending', e => {
-      this._overlay('Waiting for them to accept…', e.detail.message || 'The person at the other computer needs to click Accept.', true,
+    c.addEventListener('pending', () => {
+      // Our own words (the computer repeats its message every 20 s to keep the connection alive).
+      const who = this.host.support?.name;
+      this._overlay('Waiting for them to accept…',
+        `${who ? `They see your name, “${who}”,` : 'They see your name'} and choose what you can do. If nobody answers within 2 minutes, it's declined.`, true,
         [{ label: 'Cancel', onClick: () => this.stop() }]);
     });
     c.addEventListener('fatal', e => {
@@ -231,9 +235,14 @@ export class Session {
       const back = [{ label: 'Back', primary: true, onClick: () => this.stop() }];
       if (this.host.support && (m.code === 'unauthorized' || m.code === 'bad-code' || m.code === 'declined')) {
         // A guest: a wrong or used code, "Decline", or the session ended from the other computer.
+        // Always words written for guests (the computer's own message may be about account sign-ins).
         const titles = { 'bad-code': 'Code not accepted', declined: 'Not accepted', unauthorized: 'Session ended' };
-        const text = { 'bad-code': 'That code is wrong or was already used. Ask for a new one.', declined: 'They declined, or didn\'t answer in time.', unauthorized: 'The person at the other computer ended the session. Ask for a new code to connect again.' };
-        this._overlay(titles[m.code], m.message || text[m.code], false, back);
+        const text = {
+          'bad-code': 'That code is wrong, expired or already used. Ask the person at the other computer for a new one.',
+          declined: 'They declined, or didn\'t answer within 2 minutes. You can ask them for a new code.',
+          unauthorized: 'The person at the other computer ended the session. To connect again, ask them for a new code.',
+        };
+        this._overlay(titles[m.code], text[m.code], false, back);
       } else if (m.code === 'unauthorized') {
         this._overlay('No access', 'This device doesn\'t accept your sign-in right now. It may have left your account; check it\'s still signed in with your email.', false, [
           { label: 'Back', primary: true, onClick: () => { this.stop(); this.onUnauthorized?.(this.host); } },
@@ -454,7 +463,7 @@ export class Session {
 
   _hotkey(code) {
     switch (code) {
-      case 'KeyM': this.toolbar.toggle(); return true;
+      case 'KeyM': this.toolbar.toggle({ focus: true }); return true;
       case 'KeyF': this.toggleFullscreen(); return true;
       case 'KeyS': this.setPref('stats', !this.prefs.stats); return true;
       case 'KeyQ': this.stop(); return true;
@@ -485,6 +494,8 @@ export class Session {
     $('overlay-spinner').hidden = !spinner;
     const a = $('overlay-actions');
     a.replaceChildren(...actions.map(x => h('button', { type: 'button', class: x.primary ? 'primary' : '', onclick: x.onClick }, x.label)));
+    // An ending (no spinner): put focus on what to do next, so Enter works.
+    if (!spinner && a.firstChild) (a.querySelector('.primary') || a.firstChild).focus({ preventScroll: true });
   }
 
   _hideOverlay() { $('overlay').hidden = true; }

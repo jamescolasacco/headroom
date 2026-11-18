@@ -13,7 +13,29 @@ export class Toolbar {
     this.el.addEventListener('pointerenter', () => { this.hovering = true; clearTimeout(this.hideTimer); });
     this.el.addEventListener('pointerleave', () => { this.hovering = false; this.peek(1500); });
     this.el.addEventListener('pointerdown', e => e.stopPropagation());
+    // Keyboard: Ctrl+Alt+Shift+M focuses the toolbar; arrows move along it, Escape goes back to the remote screen.
+    this.el.addEventListener('focusin', () => { clearTimeout(this.hideTimer); this.el.classList.remove('hidden'); this.el.inert = false; });
+    this.el.addEventListener('focusout', e => { if (!this.dismissing && !this.el.contains(e.relatedTarget)) this.peek(1500); });
+    this.el.addEventListener('keydown', e => this._key(e));
     this.refresh();
+  }
+
+  _key(e) {
+    const buttons = [...this.el.querySelectorAll('button')];
+    const i = buttons.indexOf(document.activeElement);
+    if (e.key === 'Escape' || (e.code === 'KeyM' && e.ctrlKey && e.altKey && e.shiftKey)) {
+      e.preventDefault();
+      e.stopPropagation();
+      this.dismissing = true; // leaving with Escape hides it now, without the usual peek
+      document.getElementById('kbd-sink')?.focus({ preventScroll: true });
+      this.dismissing = false;
+      clearTimeout(this.hideTimer);
+      this.el.classList.add('hidden');
+      this.el.inert = true;
+    } else if ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && i >= 0) {
+      e.preventDefault();
+      buttons[(i + (e.key === 'ArrowRight' ? 1 : buttons.length - 1)) % buttons.length].focus();
+    }
   }
 
   btn(icon, label, onClick, { pressed, danger, text } = {}) {
@@ -37,8 +59,13 @@ export class Toolbar {
       items.push(this.btn(s.inputMode === 'trackpad' ? I.trackpad : I.touch, s.inputMode === 'trackpad' ? 'Trackpad mode (tap to switch to touch)' : 'Touch mode (tap to switch to trackpad)',
         () => { s.setPref('inputMode', s.inputMode === 'trackpad' ? 'touch' : 'trackpad'); toast(s.inputMode === 'trackpad' ? 'Trackpad mode: slide to move, tap to click' : 'Touch mode: tap where you want to click'); }));
     }
-    items.push(this.btn(I.keys, 'Extra keys', () => s.toggleExtraKeys(), { pressed: s.extraKeys?.visible }));
-    items.push(this.btn(I.bolt, 'Shortcuts', () => this.specialSheet()));
+    // Watching only: say so (the on-air lamp), and leave out what only works with control.
+    if (s.conn?.welcome && !s.permissions.input) {
+      items.unshift(h('span', { class: 'tb-lamp', role: 'status' }, h('span', { class: 'dot live', 'aria-hidden': 'true' }), h('span', { class: 'lamp-text' }, 'View only')));
+    } else {
+      items.push(this.btn(I.keys, 'Extra keys', () => s.toggleExtraKeys(), { pressed: s.extraKeys?.visible }));
+      items.push(this.btn(I.bolt, 'Shortcuts', () => this.specialSheet()));
+    }
     if (s.permissions.clipboard) items.push(this.btn(I.clipboard, 'Clipboard', () => this.clipboardSheet()));
     if (s.permissions.files) items.push(this.btn(I.files, 'Files', () => this.filesSheet()));
     if (s.permissions.audio && s.audio.supported) items.push(this.btn(s.prefs.audio ? I.sound : I.mute, s.prefs.audio ? 'Mute' : 'Unmute', () => s.setPref('audio', !s.prefs.audio)));
@@ -49,12 +76,24 @@ export class Toolbar {
 
   peek(ms = 3000) {
     this.el.classList.remove('hidden');
+    this.el.inert = false;
     clearTimeout(this.hideTimer);
-    this.hideTimer = setTimeout(() => { if (!this.hovering && !sheetOpen()) this.el.classList.add('hidden'); }, ms);
+    this.hideTimer = setTimeout(() => {
+      if (this.hovering || sheetOpen() || this.el.contains(document.activeElement)) return;
+      this.el.classList.add('hidden');
+      this.el.inert = true; // hidden buttons stay out of the tab order
+    }, ms);
   }
 
-  toggle() {
-    if (this.el.classList.contains('hidden')) this.peek(6000); else this.el.classList.add('hidden');
+  /** Shows or hides the toolbar; from the keyboard (`focus`), it also takes focus so its buttons can be used. */
+  toggle({ focus = false } = {}) {
+    if (this.el.classList.contains('hidden') || (focus && !this.el.contains(document.activeElement))) {
+      this.peek(6000);
+      if (focus) this.el.querySelector('button')?.focus({ preventScroll: true });
+    } else {
+      this.el.classList.add('hidden');
+      this.el.inert = true;
+    }
   }
 
   _sheet(build) {
@@ -100,7 +139,7 @@ export class Toolbar {
           'Ctrl+Alt+Del and the lock/UAC screens need Headroom installed as a service on the host.'));
       }
       el.append(h('h3', {}, 'Type text'));
-      const ta = h('textarea', { class: 'local-input', placeholder: 'Text to type on the remote (useful at login screens)…' });
+      const ta = h('textarea', { class: 'local-input', 'aria-label': 'Text to type on the remote computer', placeholder: 'Text to type on the remote (useful at login screens)…' });
       el.append(h('div', { class: 'row' }, ta, h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px' } },
         h('button', { type: 'button', class: 'primary', onclick: () => { s.typeText(ta.value); closeSheet(); } }, 'Type it'))));
       if (!isTouchPrimary) {
@@ -117,7 +156,7 @@ export class Toolbar {
     const s = this.s;
     this._sheet(el => {
       el.append(h('h3', {}, 'Remote clipboard'));
-      const remote = h('textarea', { class: 'local-input', readonly: true }, s.clipboard.remote || '');
+      const remote = h('textarea', { class: 'local-input', readonly: true, 'aria-label': 'Remote clipboard' }, s.clipboard.remote || '');
       el.append(h('div', { class: 'row' }, remote, h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap' } },
         h('button', {
           type: 'button', class: 'primary', onclick: async () => {
@@ -129,7 +168,7 @@ export class Toolbar {
       const onRemote = e => { remote.value = e.detail; };
       s.clipboard.addEventListener('remote', onRemote);
       el.append(h('h3', {}, 'Send to remote'));
-      const local = h('textarea', { class: 'local-input', placeholder: 'Paste or type here…' });
+      const local = h('textarea', { class: 'local-input', 'aria-label': 'Text to send to the remote clipboard', placeholder: 'Paste or type here…' });
       el.append(h('div', { class: 'row' }, local, h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap' } },
         h('button', { type: 'button', class: 'primary', onclick: () => { s.clipboard.lastPushed = null; s.clipboard.pushLocal(local.value); toast('Remote clipboard updated'); } }, 'Set remote clipboard'),
         h('button', { type: 'button', onclick: () => { s.typeText(local.value); closeSheet(); } }, 'Type it'),
@@ -157,7 +196,7 @@ export class Toolbar {
     const render = () => {
       pathEl.textContent = state.path || (s.macHost ? 'This Mac' : 'This PC');
       const rows = [];
-      if (state.error) rows.push(h('p', { class: 'small', style: { color: 'var(--bad)', padding: '8px 12px' } }, state.error));
+      if (state.error) rows.push(h('p', { class: 'small', style: { color: 'var(--stop-ink)', padding: '8px 12px' } }, state.error));
       if (state.path) rows.push(sheetItem(h('span', { class: 'file-row' }, svg(I.folderUp, 20), '..', ''), { onClick: () => load(state.parent || '') }));
       for (const e of state.entries) {
         rows.push(sheetItem(h('span', { class: 'file-row' }, svg(e.dir ? I.files : I.file, 20), e.name, ''), {
@@ -203,12 +242,12 @@ export class Toolbar {
       const bar = this.progressEl?.isConnected ? this.progressEl : null;
       if (bar) bar.hidden = false;
       try {
-        const r = await uploadFile(s.host, f, dir, p => { if (bar) bar.firstChild.style.width = `${Math.round(p * 100)}%`; });
+        const r = await uploadFile(s.host, f, dir, p => { if (bar) bar.firstChild.style.transform = `scaleX(${Math.min(1, Math.max(0, p))})`; });
         toast(`Saved ${r.name || f.name} on ${s.host.name}${dir ? '' : ' (Downloads)'}`, 4000);
       } catch (e) {
         toast(`${f.name}: ${e.message}`, 5000);
       } finally {
-        if (bar) { bar.hidden = true; bar.firstChild.style.width = '0'; }
+        if (bar) { bar.hidden = true; bar.firstChild.style.transform = 'scaleX(0)'; }
       }
     }
   }
@@ -216,7 +255,11 @@ export class Toolbar {
   // ------------------------------------------------------------------ settings
   settingsSheet() {
     const s = this.s, p = s.prefs;
-    const row = (label, control) => h('div', {}, h('h3', {}, label), h('div', { class: 'row' }, control));
+    // Each option group is named by its heading.
+    const row = (label, control) => {
+      if (control.getAttribute?.('role') === 'group' && !control.hasAttribute('aria-label')) control.setAttribute('aria-label', label);
+      return h('div', {}, h('h3', {}, label), h('div', { class: 'row' }, control));
+    };
     this._sheet(el => {
       el.append(row('Scaling', segmented([
         { value: 'fit', label: 'Fit' }, { value: 'actual', label: '1:1' }, { value: 'fill', label: 'Fill' },
@@ -246,13 +289,16 @@ export class Toolbar {
           isApple ? 'Mac shortcuts: ⌘C/V/X/Z/A/S/F… act as Ctrl, ⌘Q closes, ⌘ alone opens Start, ⌥←/→ jump words.' : 'PC: keys are sent exactly as pressed.',
           !hasKeyboardLock && !isTouchPrimary ? ' Tip: in Chrome/Edge full screen, Alt+Tab and the Windows key go to the remote too.' : ''));
       }
-      el.append(row('Frame rate', segmented([
+      // The technical options, folded away: most sessions never need them.
+      const more = h('details', {}, h('summary', {}, 'Picture and network'));
+      const advanced = node => more.append(node);
+      advanced(row('Frame rate (fps)', segmented([
         { value: 30, label: '30' }, { value: 60, label: '60' }, { value: 120, label: '120' }, { value: 144, label: '144' },
       ], p.maxFps, v => s.setPref('maxFps', v))));
-      el.append(row('Bandwidth', segmented([
-        { value: 0, label: 'Auto' }, { value: 5000, label: '5' }, { value: 12000, label: '12' }, { value: 25000, label: '25' }, { value: 50000, label: '50 Mb/s' },
+      advanced(row('Bandwidth (Mb/s)', segmented([
+        { value: 0, label: 'Auto' }, { value: 5000, label: '5' }, { value: 12000, label: '12' }, { value: 25000, label: '25' }, { value: 50000, label: '50' },
       ], p.maxBitrateKbps, v => s.setPref('maxBitrateKbps', v))));
-      el.append(row('Resolution', segmented([
+      advanced(row('Resolution', segmented([
         { value: 'native', label: 'Native' }, { value: '1440', label: '1440p' }, { value: '1080', label: '1080p' }, { value: '720', label: '720p' }, { value: 'device', label: 'This screen' },
       ], p.resolution, v => s.setPref('resolution', v))));
       if (isTouchPrimary) {
@@ -263,12 +309,14 @@ export class Toolbar {
           { value: 0.7, label: 'Slow' }, { value: 1, label: 'Normal' }, { value: 1.4, label: 'Fast' }, { value: 2, label: 'Faster' },
         ], p.pointerSpeed, v => s.setPref('pointerSpeed', v))));
       }
-      el.append(row('Overlay', segmented([
-        { value: false, label: 'Clean' }, { value: true, label: 'Show stats' },
+      advanced(row('Connection stats', segmented([
+        { value: false, label: 'Hidden' }, { value: true, label: 'Shown' },
       ], !!p.stats, v => s.setPref('stats', v))));
-      el.append(row('Renderer', segmented([
+      advanced(row('Video drawing', segmented([
         { value: 'auto', label: 'Auto' }, { value: 'video', label: 'Video' }, { value: 'canvas', label: 'Canvas' },
-      ], p.renderer, v => { s.setPref('renderer', v); toast('Renderer applies on next connect'); })));
+      ], p.renderer, v => { s.setPref('renderer', v); toast('Takes effect the next time you connect'); })));
+      advanced(h('p', { class: 'muted small', style: { padding: '0 12px' } }, 'Leave these on Auto unless the picture misbehaves.'));
+      el.append(more);
       el.append(h('p', { class: 'muted small', style: { padding: '8px 12px 4px' } },
         `Ctrl+Alt+Shift+M toggles this toolbar · F full screen · S stats · Q disconnect`));
     });

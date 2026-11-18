@@ -3,9 +3,10 @@
 <head>
   <meta charset="utf-8">
   <title>Headroom</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="description" content="Reach your computers from any browser, or let someone connect to yours with a code.">
-  <meta name="theme-color" content="#0b0d11">
+  <meta name="theme-color" content="#131312" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f6f4ef" media="(prefers-color-scheme: light)">
   <meta name="color-scheme" content="dark light">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
@@ -20,10 +21,10 @@
 </head>
 <body>
   <!-- ======================================================== home -->
-  <section id="home" class="screen" hidden>
+  <main id="home" class="screen" hidden>
     <header class="home-head">
       <div class="brand">
-        <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="6" width="26" height="17" rx="3.5" fill="none" stroke="currentColor" stroke-width="2.4"/><path d="M11 27h10" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M10 14.5l4 4 8-8" fill="none" stroke="var(--accent)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect x="3" y="6" width="26" height="17" rx="3.5" fill="none" stroke="currentColor" stroke-width="2.4"/><path d="M11 27h10" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M10 14.5l4 4 8-8" fill="none" stroke="var(--ready)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <h1>Headroom</h1>
       </div>
       <button class="account-chip" id="account-chip" type="button" hidden></button>
@@ -35,18 +36,19 @@
     </div>
     <!-- signed in: your devices -->
     <div id="signed-in" hidden>
-      <div id="host-list" class="host-list" aria-live="polite"></div>
+      <h2 class="list-heading" id="devices-heading" tabindex="-1">Your devices</h2>
+      <div id="host-list" class="host-list" role="list" aria-labelledby="devices-heading"></div>
       <div id="home-empty" class="empty" hidden>
         <p class="empty-title">No devices yet</p>
-        <p class="muted">Install Headroom Server on your Mac or Windows PC and sign in there with this email. It shows up here.</p>
+        <p class="muted">Install Headroom Server on the Mac or Windows PC you want to reach, then sign in there with this email. It appears here.</p>
       </div>
       <p class="home-links"><button class="link" id="btn-code" type="button">Got a code?</button></p>
     </div>
     <p class="muted small center" id="home-hint"></p>
-  </section>
+  </main>
 
   <!-- ======================================================== viewer -->
-  <section id="viewer" class="screen" hidden>
+  <section id="viewer" class="screen" hidden aria-label="Remote session">
     <div id="stage-wrap">
       <div id="stage">
         <video id="video" muted playsinline autoplay disablepictureinpicture disableremoteplayback></video>
@@ -62,23 +64,28 @@
 
     <div id="overlay" class="overlay" hidden>
       <div class="overlay-card">
-        <div class="spinner" id="overlay-spinner"></div>
-        <p id="overlay-title">Connecting…</p>
-        <p class="muted small" id="overlay-detail"></p>
+        <div class="spinner" id="overlay-spinner" aria-hidden="true"></div>
+        <div role="status" aria-live="polite">
+          <p id="overlay-title">Connecting…</p>
+          <p class="muted small" id="overlay-detail"></p>
+        </div>
         <div class="overlay-actions" id="overlay-actions"></div>
       </div>
     </div>
 
-    <div id="toolbar-handle" aria-label="Show toolbar"></div>
+    <!-- Pointer and touch reach the toolbar here; keyboards use Ctrl+Alt+Shift+M. -->
+    <div id="toolbar-handle" aria-hidden="true"></div>
     <nav id="toolbar" class="toolbar" aria-label="Session toolbar"></nav>
     <div id="extra-keys" class="extra-keys" hidden></div>
     <div id="stats" class="stats" hidden></div>
-    <div id="toast" class="toast" hidden></div>
     <div id="sheet-backdrop" class="sheet-backdrop" hidden></div>
     <div id="sheet" class="sheet" hidden role="dialog" aria-modal="true"></div>
   </section>
 
-  <!-- ======================================================== dialogs -->
+  <!-- ======================================================== dialogs, messages -->
   <dialog id="dlg" class="dlg"></dialog>
+  <!-- A short message on any screen (top layer, so above dialogs too); screen readers hear it from #announcer. -->
+  <div id="toast" class="toast" popover="manual" aria-hidden="true" hidden></div>
+  <div id="announcer" class="sr-only" role="status" aria-live="polite"></div>
 </body>
 </html>
