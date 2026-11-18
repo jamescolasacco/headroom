@@ -36,7 +36,8 @@ async function main() {
   const own = !nativeViewer && await Account.serverInfo(location.origin);
   if (own) { server = location.origin; info = own; }
   renderHome();
-  if (!info) Account.serverInfo(server).then(i => { info = i; if (!Account.loadAccount()) rebuildSignIn(); });
+  // Headroom Viewer learns the service's details a moment later: "Create account" shows or hides in place.
+  if (!info) Account.serverInfo(server).then(i => { info = i; applyInfo(); });
 
   const refreshed = refreshAccount();
   // Keep the devices (online state) fresh while the home screen is showing.
@@ -59,6 +60,7 @@ async function refreshAccount() {
   if (!Account.loadAccount()) return;
   const before = snapshot();
   const a = await Account.refreshComputers();
+  if (a === undefined) return; // signed out (or in again) here meanwhile
   if (!a) {
     signedOutNotice = 'You were signed out: from another device, or because your password changed.';
     if (!session) { rebuildSignIn(); renderHome(); }
@@ -79,8 +81,9 @@ function renderHome() {
   const chip = $('account-chip');
   chip.hidden = !acct;
   if (acct) {
-    chip.replaceChildren(svg(I.user, 16), h('span', {}, acct.email), ...(acct.error ? [h('span', { class: 'warn-text' }, '· offline')] : []));
+    chip.replaceChildren(svg(I.user, 16), h('span', {}, acct.email), ...(acct.error ? [h('span', { class: 'chip-note' }, '· offline')] : []));
     chip.setAttribute('aria-label', `Account: ${acct.email}${acct.error ? ' (offline)' : ''}`);
+    chip.title = acct.email; // the chip cuts a long email short
     chip.onclick = () => accountPage();
     $('signin-slot').replaceChildren();
     renderDevices(acct);
@@ -90,8 +93,7 @@ function renderHome() {
     if (!$('signin-slot').firstChild) $('signin-slot').append(authCard());
   }
   const hint = [];
-  if (!secure) hint.push('Not a secure connection: video needs HTTPS.');
-  else if (!hasWebCodecs) hint.push('This browser lacks WebCodecs (needs Safari 16.4+, Chrome/Edge 94+, Firefox 130+).');
+  if (cantShow()) hint.push(cantShow());
   if (acct && isIOS && !isStandalone) hint.push('Tip: Share → Add to Home Screen for a full-screen app (sign in again inside it).');
   if (acct && nativeViewer) hint.push(isMac
     ? 'Tip: ⌘Tab, ⌘Space and other system shortcuts go to the remote computer while its window is focused.'
@@ -101,6 +103,16 @@ function renderHome() {
 
 /** Starts the sign-in card over (it's kept between renders so typing isn't lost). */
 function rebuildSignIn() { $('signin-slot').replaceChildren(); }
+
+/** The service's details arrived after the card was drawn: show "Create account" only when sign-up is open. */
+function applyInfo() {
+  const link = $('signin-slot').querySelector('[data-signup]');
+  if (link) link.hidden = !!info && !info.signup;
+}
+
+/** Why this browser can't show a remote screen ('' when it can). */
+const cantShow = () => !secure ? 'This page isn\'t on a secure (HTTPS) connection, so it can\'t show a remote screen.'
+  : !hasWebCodecs ? 'This browser can\'t show a remote screen. Use Safari 16.4 or later, Chrome or Edge 94+, or Firefox 130+.' : '';
 
 function renderDevices(acct) {
   const hosts = Account.accountHosts(acct).sort((a, b) =>
@@ -143,6 +155,7 @@ function hostCard(host) {
 
 function connect(host) {
   if (session) return;
+  if (cantShow()) { toast(cantShow()); return; }
   if (!host.online && !host.support) {
     toast(`${host.name} is offline. Start Headroom Server on it, then try again.`);
     return;
@@ -204,35 +217,46 @@ function codeForm({ inline = false, code = '', onDone, onCancel } = {}) {
   const codeField = field('Code', codeIn);
   const nameIn = h('input', { type: 'text', value: pref('headroom.guestName'), name: 'name', placeholder: 'Alex', autocomplete: 'name', maxlength: '40' });
   const nameField = field('Your name', nameIn, { hint: 'Shown to them when they decide whether to let you in.' });
-  const nameWrap = h('div', { hidden: inline && !code }, ...nameField.nodes);
-  codeIn.addEventListener('focus', () => { nameWrap.hidden = false; });
   // On the signed-out page it's a compact row (signing in is that page's main action); in its dialog, the main one.
   const submit = h('button', { type: 'submit', class: inline ? '' : 'primary' }, 'Connect');
   const [codeLabel, , , codeErr] = codeField.nodes;
-  if (inline) codeLabel.classList.add('sr-only');
+  const [nameLabel, , nameHint, nameErr] = nameField.nodes;
+  const codeRow = h('div', { class: 'code-row' }, codeIn, submit);
+  const nameRow = h('div', { class: 'code-row' }, nameIn);
+  const nameWrap = inline ? h('div', { hidden: true }, nameLabel, nameRow, nameHint, nameErr) : h('div', {}, ...nameField.nodes);
+  // The name appears once you start on the code, and Connect moves down to follow it: code, name, Connect.
+  const revealName = () => {
+    if (!nameWrap.hidden) return;
+    nameWrap.hidden = false;
+    nameRow.append(submit);
+  };
+  if (inline) { codeLabel.classList.add('sr-only'); codeIn.addEventListener('focus', revealName); }
   const form = h('form', { class: inline ? 'signin-card code-card' : null, novalidate: true },
     h('h2', {}, 'Got a code?'),
     h('p', { class: 'muted small' }, 'Enter the code from the person at the other computer. They\'ll be asked to accept.'),
-    ...(inline ? [codeLabel, h('div', { class: 'code-row' }, codeIn, submit), codeErr] : codeField.nodes), nameWrap, err,
+    ...(inline ? [codeLabel, codeRow, codeErr] : codeField.nodes), nameWrap, err,
     inline ? null : h('div', { class: 'actions' }, h('button', { type: 'button', onclick: () => onCancel?.() }, 'Cancel'), submit));
   form.addEventListener('submit', async e => {
     e.preventDefault();
     err.textContent = '';
+    const why = cantShow();
+    if (why) { err.textContent = why; return; }
     const c = codeIn.value.replace(/\D/g, '');
     if (c.length !== 9) { codeField.error('Enter all 9 digits of the code.'); codeIn.focus(); return; }
     const name = nameIn.value.trim();
-    if (!name && nameWrap.hidden) { nameWrap.hidden = false; nameIn.focus(); return; }
+    // They decide whether to let you in by this name, so it's needed (never this browser's own name).
+    if (!name) { if (inline) revealName(); nameField.error('Enter your name, so they know who\'s asking.'); nameIn.focus(); return; }
     const restore = busy(submit, 'Connecting…');
     if (!restore) return;
     try {
       const { url, info: hi } = await Account.lookUpCode(server, c);
-      if (name) pref('headroom.guestName', name);
+      pref('headroom.guestName', name);
       onDone?.();
       codeIn.value = '';
       // A one-off: nothing is saved. Once accepted, the session continues with a key only it holds.
       connect({
         id: `guest:${c.slice(0, 4)}`, name: hi.host?.name || 'Remote computer', os: hi.host?.os, url, online: true,
-        support: { code: c, name: name || deviceLabel() },
+        support: { code: c, name },
       });
     } catch (ex) {
       if (/code/i.test(ex.message)) { codeField.error(ex.message); codeIn.focus(); } else err.textContent = ex.message;
@@ -299,9 +323,13 @@ function authCard() {
   const card = h('div', { class: 'signin-card' });
   const show = (step, opts = {}, { focus = true } = {}) => {
     card.replaceChildren(step(show, opts));
-    if (focus) card.querySelector('input:not([type=hidden])')?.focus({ preventScroll: true });
+    if (!focus) return;
+    card.querySelector('input:not([type=hidden])')?.focus({ preventScroll: true });
+    // Focus lands on the first field; say which step this is too ("Check your email. We sent a code…").
+    announce([card.querySelector('h2')?.textContent, card.querySelector('h2 + p')?.textContent].filter(Boolean).join('. '));
   };
   show(signInStep, { notice: signedOutNotice }, { focus: false });
+  if (signedOutNotice) announce(signedOutNotice);
   signedOutNotice = '';
   return card;
 }
@@ -318,12 +346,12 @@ function signInStep(show, { email = pref('headroom.lastEmail'), notice = '' } = 
   const web = path => () => window.open(`${server}/${path}`, '_blank', 'noopener');
   const form = h('form', { novalidate: true },
     h('h2', {}, 'Sign in'),
-    notice ? h('p', { class: 'notice', role: 'status' }, notice) : h('p', { class: 'muted small' }, 'See and connect to your devices.'),
+    notice ? h('p', { class: 'notice' }, notice) : h('p', { class: 'muted small' }, 'See and connect to your devices.'),
     ...emailF.nodes, ...passF.nodes, totpWrap, err, submit,
     h('div', { class: 'row-center links' },
-      h('button', { type: 'button', class: 'link', hidden: info && !info.signup, onclick: nativeViewer && info?.turnstile ? web('#signup') : () => show(signUpStep, { email: emailIn.value.trim() }) }, 'Create account'),
+      h('button', { type: 'button', class: 'link', 'data-signup': '', hidden: !!info && !info.signup, onclick: () => nativeViewer && info?.turnstile ? web('#signup')() : show(signUpStep, { email: emailIn.value.trim() }) }, 'Create account'),
       h('span', { 'aria-hidden': 'true' }, ' · '),
-      h('button', { type: 'button', class: 'link', onclick: nativeViewer && info?.turnstile ? web('#forgot') : () => show(forgotStep, { email: emailIn.value.trim() }) }, 'Forgot password?')));
+      h('button', { type: 'button', class: 'link', onclick: () => nativeViewer && info?.turnstile ? web('#forgot')() : show(forgotStep, { email: emailIn.value.trim() }) }, 'Forgot password?')));
   form.addEventListener('submit', async e => {
     e.preventDefault();
     err.textContent = '';
@@ -486,7 +514,8 @@ async function signedIn() {
   renderHome();
   const a = Account.loadAccount();
   const n = Account.accountHosts().length;
-  (n ? $('devices-heading') : $('home-empty').querySelector('a, h2, p'))?.focus({ preventScroll: true });
+  // Focus where the next step is: your devices, or (none yet) "Get Headroom Server".
+  (n ? $('devices-heading') : $('home-empty').querySelector('.empty-actions a'))?.focus({ preventScroll: true });
   toast(a?.passwordWeak
     ? 'Signed in. Choose a stronger password: open Account at the top.'
     : n ? `Signed in · ${plural(n, '1 device', `${n} devices`)}` : 'Signed in');
@@ -517,7 +546,7 @@ function accountPage() {
         signins.replaceChildren(...views.map(d => h('li', { class: 'li-mini' },
           h('div', { class: 'grow' },
             h('div', {}, d.name, d.current ? h('span', { class: 'tag' }, 'this browser') : null),
-            h('div', { class: 'muted small' }, `${d.current ? 'now' : `last used ${ago(d.lastSeen)}`}${d.lastAddress ? ` · ${d.lastAddress}` : ''}`)),
+            h('div', { class: 'muted small' }, `${d.current ? 'Now' : `Last used ${ago(d.lastSeen)}`}${d.lastAddress ? ` · ${d.lastAddress}` : ''}`)),
           d.current ? null : confirmButton('Sign out', `Sign out ${d.name}?`, async () => {
             await Account.removeDevice(a, d.id);
             toast(`Signed out ${d.name}`);
@@ -526,8 +555,8 @@ function accountPage() {
         const comps = list.filter(d => d.kind === 'computer').sort((x, y) => x.name.localeCompare(y.name));
         devices.replaceChildren(...(comps.length ? comps.map(d => h('li', { class: 'li-mini' },
           h('div', { class: 'grow' },
-            h('div', {}, svg(I.monitor, 16), ' ', d.name),
-            h('div', { class: 'muted small' }, d.online ? 'online' : `last seen ${ago(d.lastSeen)}`)),
+            h('div', {}, svg(d.platform === 'macos' ? I.apple : d.platform === 'windows' ? I.windows : I.monitor, 16), ' ', d.name),
+            h('div', { class: 'muted small' }, d.online ? 'Online' : `Last seen ${ago(d.lastSeen)}`)),
           confirmButton('Remove', `Remove ${d.name}?`, async () => {
             await Account.removeDevice(a, d.id);
             toast(`Removed ${d.name}. Sign in again in Headroom Server on it to add it back.`);
@@ -550,7 +579,7 @@ function accountPage() {
         const panel = h('div', { class: 'task-panel', id: `task-${id}`, hidden: openTask !== id });
         const btn = h('button', {
           type: 'button', class: `task-row${danger ? ' danger' : ''}`, 'aria-expanded': String(openTask === id), 'aria-controls': panel.id,
-        }, h('span', { class: 'task-name' }, name), h('span', { class: `task-value${attention ? ' warn-text' : ''}` }, value || ''), svg(CHEVRON, 16));
+        }, h('span', { class: 'task-name' }, name), h('span', { class: `task-value${attention ? ' stop-text' : ''}` }, value || ''), svg(CHEVRON, 16));
         btn.onclick = () => {
           openTask = openTask === id ? '' : id;
           drawTasks();
@@ -558,7 +587,7 @@ function accountPage() {
           if (openTask === id) (opened.querySelector('input, button') || opened).focus({ preventScroll: false });
           else tasks.querySelector(`[aria-controls="task-${id}"]`)?.focus();
         };
-        if (openTask === id) panel.append(...panels[id]());
+        if (openTask === id) panel.append(...panels[id]().filter(Boolean));
         return [btn, panel];
       };
       tasks.replaceChildren(
@@ -576,7 +605,7 @@ function accountPage() {
       const err = formError(), status = taskStatus();
       const submit = h('button', { type: 'submit', class: 'primary' }, 'Change password');
       const form = h('form', { novalidate: true },
-        a.passwordWeak ? h('p', { class: 'small warn-text' }, 'Your password doesn\'t meet the current rules (not a common or breached password).') : null,
+        a.passwordWeak ? h('p', { class: 'small stop-text' }, 'Your password doesn\'t meet the current rules (not a common or breached password).') : null,
         ...curF.nodes, ...nwF.nodes, err, h('div', { class: 'actions' }, submit), status);
       form.onsubmit = async e => {
         e.preventDefault();
@@ -711,8 +740,13 @@ function accountPage() {
       const pw = h('input', { type: 'password', name: 'current-password', autocomplete: 'current-password' });
       const pwF = field('Password', pw);
       const err = formError();
+      const needPassword = () => {
+        if (pw.value) return true;
+        pwF.error('Enter your password to delete the account.');
+        pw.focus();
+        return false;
+      };
       const go = confirmButton('Delete account', 'Delete for good?', async () => {
-        if (!pw.value) { pwF.error('Enter your password to delete the account.'); pw.focus(); return; }
         try {
           await Account.deleteAccount(a, pw.value);
           Account.forget();
@@ -726,9 +760,13 @@ function accountPage() {
         } catch (ex) {
           if (ex.body?.error === 'bad-credentials') { pwF.error('Wrong password.'); pw.focus(); } else err.textContent = errorText(ex);
         }
-      }, 'Delete account', { primaryDanger: true });
-      return [h('p', { class: 'small' }, 'Deletes your account and its list of devices for good. Headroom Server on your computers is signed out; codes keep working on them.'),
-        ...pwF.nodes, err, h('div', { class: 'actions' }, go)];
+      }, 'Delete account', { primaryDanger: true, check: needPassword });
+      // A form, so Enter in the password field presses the button (once to arm it, again to delete).
+      const form = h('form', { novalidate: true },
+        h('p', { class: 'small' }, 'Deletes your account and its list of devices for good. Headroom Server on your computers is signed out; codes keep working on them.'),
+        ...pwF.nodes, err, h('div', { class: 'actions' }, go));
+      form.onsubmit = e => { e.preventDefault(); go.click(); };
+      return [form];
     }
 
     dlg.append(h('div', { class: 'body acct' },
@@ -741,7 +779,7 @@ function accountPage() {
       h('h3', { class: 'sub-h' }, 'Settings'), tasks,
       h('div', { class: 'actions' },
         h('button', { type: 'button', onclick: async () => { done(); await Account.signOut(); signedOutNotice = 'Signed out.'; rebuildSignIn(); renderHome(); $('signin-slot').querySelector('input')?.focus(); } }, 'Sign out'),
-        h('button', { type: 'button', class: 'primary', onclick: () => done() }, 'Done'))));
+        h('button', { type: 'button', onclick: () => done() }, 'Done'))));
     if (a.passwordWeak) openTask = 'password';
     drawTasks();
     load();
@@ -752,16 +790,22 @@ function accountPage() {
  * A button that asks "are you sure?" in place: the first press arms it (and says so), the second (within 5 s)
  * runs it. `name` is its full accessible name when the visible label is shared by several buttons.
  */
-function confirmButton(label, question, run, name, { primaryDanger = false } = {}) {
+function confirmButton(label, question, run, name, { primaryDanger = false, check } = {}) {
   let armed = 0;
   const b = h('button', { type: 'button', class: primaryDanger ? 'danger-fill' : 'small-btn danger', 'aria-label': name || null }, label);
   b.onclick = async () => {
     if (b.getAttribute('aria-disabled') === 'true') return;
     if (!armed) {
+      if (check && !check()) return; // something's missing: say what, don't ask "are you sure?"
       b.textContent = question;
       if (name) b.setAttribute('aria-label', `${question} Press again to confirm.`);
       announce(`${question} Press again to confirm.`);
-      armed = setTimeout(() => { armed = 0; b.textContent = label; if (name) b.setAttribute('aria-label', name); }, 5000);
+      armed = setTimeout(() => {
+        armed = 0;
+        b.textContent = label;
+        if (name) b.setAttribute('aria-label', name);
+        if (document.activeElement === b) announce('Not confirmed, so nothing changed.');
+      }, 5000);
       return;
     }
     clearTimeout(armed);

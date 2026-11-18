@@ -3,6 +3,7 @@
 import * as P from '../protocol.js';
 import { isApple, hasKeyboardLock } from '../platform.js';
 import { codeFromEvent, isModifier, macCmdTranslation, macOptionTranslation } from './keymap.js';
+import { sheetOpen, closeSheet } from '../ui/dom.js';
 
 export class KeyboardInput {
   /**
@@ -119,7 +120,7 @@ export class KeyboardInput {
     const t = e.target;
     if (t && t !== this.ctx.sink && t !== document.body && t.closest) {
       // Typing into our own UI (dialogs, sheets, the toolbar, the overlay's buttons) stays local.
-      if (t.closest('#sheet, dialog, .local-input, #toolbar, #overlay')) return false;
+      if (t.closest('#sheet, dialog, .local-input, #toolbar, #overlay, #extra-keys')) return false;
       if (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) && t !== this.ctx.sink) return false;
     }
     if (this.ctx.softKeyboardHandles?.(e)) return false; // soft keyboard sends text instead
@@ -137,6 +138,8 @@ export class KeyboardInput {
 
   _keydown(e) {
     if (!this._ours(e)) return;
+    // An option sheet is open: Escape closes it (it isn't meant for the remote computer).
+    if (e.key === 'Escape' && sheetOpen()) { e.preventDefault(); e.stopPropagation(); closeSheet(); return; }
     this.ctx.onUserGesture?.(e);
     const code = codeFromEvent(e);
     if (!code) return;

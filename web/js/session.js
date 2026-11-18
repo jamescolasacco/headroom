@@ -172,6 +172,13 @@ export class Session {
       if (!this.monitors.some(m => m.id === this.monitorId)) this.monitorId = (this.monitors.find(m => m.primary) || this.monitors[0])?.id;
       this.sendStart();
       this.toolbar.refresh();
+      // A guest's first welcome: they let you in. Say so, and what they can do about it.
+      if (this.host.support && !this._welcomed) {
+        toast(this.permissions.input
+          ? `You're connected to ${this.host.name}. They can stop this at any time.`
+          : `You're connected to ${this.host.name} to watch: they didn't give you control. They can stop this at any time.`, 6000);
+      }
+      this._welcomed = true;
     });
     c.addEventListener('video-config', e => {
       const cfg = e.detail;
@@ -233,7 +240,11 @@ export class Session {
     c.addEventListener('fatal', e => {
       const m = e.detail;
       const back = [{ label: 'Back', primary: true, onClick: () => this.stop() }];
-      if (this.host.support && (m.code === 'unauthorized' || m.code === 'bad-code' || m.code === 'declined')) {
+      if (m.code === 'ended') {
+        // The other computer ended it (its Stop, its sign-in removed, Headroom Server quit): no reconnecting.
+        this.keyboard?.releaseAll();
+        this._overlay('Session ended', `${m.message || 'The other computer ended the session.'}${this.host.support ? ' To connect again, ask them for a new code.' : ''}`, false, back);
+      } else if (this.host.support && (m.code === 'unauthorized' || m.code === 'bad-code' || m.code === 'declined')) {
         // A guest: a wrong or used code, "Decline", or the session ended from the other computer.
         // Always words written for guests (the computer's own message may be about account sign-ins).
         const titles = { 'bad-code': 'Code not accepted', declined: 'Not accepted', unauthorized: 'Session ended' };

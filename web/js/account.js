@@ -90,14 +90,19 @@ export const forget = () => saveAccount(null);
 // ------------------------------------------------------------------ devices
 
 /**
- * Refreshes the account's devices. Returns the account (updated), or null when this sign-in ended elsewhere
- * (signed out from another browser, password reset, account deleted) — then it's forgotten here.
+ * Refreshes the account's devices. Returns the account (updated); null when this sign-in ended elsewhere (signed
+ * out from another browser, password reset, account deleted), and then it's forgotten here; or undefined when this
+ * browser signed out, or in again, while the request was out (the newer state stands: nothing to do).
  */
 export async function refreshComputers() {
-  const a = loadAccount();
-  if (!a) return null;
+  const started = loadAccount();
+  if (!started) return null;
+  // Signing out (or in as someone else) while this request was out wins: never save the old sign-in back.
+  const current = () => { const a = loadAccount(); return a && a.token === started.token ? a : null; };
   try {
-    const { computers } = await call(a.server, '/api/account/computers', { token: a.token });
+    const { computers } = await call(started.server, '/api/account/computers', { token: started.token });
+    const a = current();
+    if (!a) return undefined;
     // Keep what this device learned about each one: the address that worked, when it was last used.
     const prev = new Map(a.computers.map(c => [c.id, c]));
     a.computers = computers.map(c => ({ ...c, lastUrl: prev.get(c.id)?.lastUrl, lastConnected: prev.get(c.id)?.lastConnected }));
@@ -105,12 +110,15 @@ export async function refreshComputers() {
     a.error = null;
     saveAccount(a);
     trustPins(computers);
+    return a;
   } catch (e) {
+    const a = current();
+    if (!a) return undefined;
     if (e.status === 401 || e.status === 403) { saveAccount(null); return null; }
     a.error = e.message; // offline: keep showing the last list
     saveAccount(a);
+    return a;
   }
-  return a;
 }
 
 /** Headroom Viewer: devices vouched for by the account get their certificate pinned (for direct connections). */

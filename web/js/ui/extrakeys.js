@@ -82,6 +82,8 @@ export class ExtraKeysBar {
     this.onLayout = onLayout;
     this.visible = false;
     this.macHost = false;
+    el.setAttribute('role', 'group');
+    el.setAttribute('aria-label', 'Extra keys');
     this._render();
     mods.addEventListener('change', () => this._sync());
     const vv = window.visualViewport;
@@ -105,8 +107,9 @@ export class ExtraKeysBar {
       if (k.pcOnly && this.macHost) continue;
       const b = document.createElement('button');
       b.type = 'button';
-      b.className = 'xk' + (k.mod ? ' mod' : '') + (k.wide ? ' wide' : '');
+      b.className = 'xk' + (k.mod ? ' mod' : '') + (k.wide ? ' xk-wide' : ''); // not .wide: that's a full-width button
       b.textContent = this.macHost && k.mac ? k.mac : k.label;
+      if (k.mod) b.setAttribute('aria-pressed', 'false'); // held for the next key (or locked) = pressed
       const title = this.macHost && k.macTitle ? k.macTitle : k.title;
       if (title) b.title = title;
       if (k.code) b.dataset.code = k.code;
@@ -115,6 +118,8 @@ export class ExtraKeysBar {
       b.addEventListener('pointerup', () => this._stopRepeat());
       b.addEventListener('pointercancel', () => this._stopRepeat());
       b.addEventListener('pointerleave', () => this._stopRepeat());
+      // From a keyboard (Enter or Space: a click with no pointer), press it once.
+      b.addEventListener('click', e => { if (e.detail === 0) { this._press(k, b); this._stopRepeat(); } });
       this.el.append(b);
     }
   }
@@ -139,6 +144,8 @@ export class ExtraKeysBar {
     for (const b of this.el.querySelectorAll('.xk.mod')) {
       const s = this.mods.state.get(b.dataset.code);
       if (s) b.dataset.state = s; else delete b.dataset.state;
+      b.setAttribute('aria-pressed', String(!!s));
+      if (s === 'locked') b.setAttribute('aria-label', `${b.textContent}, locked`); else b.removeAttribute('aria-label');
     }
   }
 

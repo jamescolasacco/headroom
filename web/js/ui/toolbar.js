@@ -17,15 +17,23 @@ export class Toolbar {
     this.el.addEventListener('focusin', () => { clearTimeout(this.hideTimer); this.el.classList.remove('hidden'); this.el.inert = false; });
     this.el.addEventListener('focusout', e => { if (!this.dismissing && !this.el.contains(e.relatedTarget)) this.peek(1500); });
     this.el.addEventListener('keydown', e => this._key(e));
+    // Its focus ring shows when you arrive from the keyboard, even the first time (not after a tap or click).
+    this.el.addEventListener('pointerdown', () => this.el.classList.remove('kbd'), true);
     this.refresh();
   }
 
   _key(e) {
     const buttons = [...this.el.querySelectorAll('button')];
     const i = buttons.indexOf(document.activeElement);
-    if (e.key === 'Escape' || (e.code === 'KeyM' && e.ctrlKey && e.altKey && e.shiftKey)) {
+    if (e.key === 'Escape' && sheetOpen()) {
+      // A sheet is open (its button is focused here): Escape closes the sheet first.
       e.preventDefault();
       e.stopPropagation();
+      closeSheet();
+    } else if (e.key === 'Escape' || (e.code === 'KeyM' && e.ctrlKey && e.altKey && e.shiftKey)) {
+      e.preventDefault();
+      e.stopPropagation();
+      this.el.classList.remove('kbd');
       this.dismissing = true; // leaving with Escape hides it now, without the usual peek
       document.getElementById('kbd-sink')?.focus({ preventScroll: true });
       this.dismissing = false;
@@ -49,6 +57,8 @@ export class Toolbar {
     const s = this.s;
     const items = [];
     items.push(this.btn(I.close, 'Disconnect', () => s.stop(), { danger: true }));
+    // Until the computer lets this session in, there's nothing to use yet but leaving.
+    if (!s.conn?.welcome) { this.el.replaceChildren(...items); return; }
     items.push(h('span', { class: 'tb-sep' }));
     if (s.monitors.length > 1) {
       const cur = s.monitors.findIndex(m => m.id === s.monitorId);
@@ -89,22 +99,27 @@ export class Toolbar {
   toggle({ focus = false } = {}) {
     if (this.el.classList.contains('hidden') || (focus && !this.el.contains(document.activeElement))) {
       this.peek(6000);
-      if (focus) this.el.querySelector('button')?.focus({ preventScroll: true });
+      if (focus) {
+        // Land on the first tool, not on Disconnect (one Enter away from ending the session).
+        this.el.classList.add('kbd');
+        (this.el.querySelector('button:not(.danger)') || this.el.querySelector('button'))?.focus({ preventScroll: true });
+      }
     } else {
       this.el.classList.add('hidden');
       this.el.inert = true;
     }
   }
 
-  _sheet(build) {
+  /** Opens a sheet named like the button that opened it ("Settings", "Shortcuts"…). */
+  _sheet(label, build) {
     clearTimeout(this.hideTimer);
-    openSheet(build, { onClose: () => this.peek(1500) });
+    openSheet(build, { label, onClose: () => this.peek(1500) });
   }
 
   // ------------------------------------------------------------------ displays
   displaysSheet() {
     const s = this.s;
-    this._sheet(el => {
+    this._sheet('Displays', el => {
       el.append(h('h3', {}, 'Displays'));
       s.monitors.forEach((m, i) => el.append(sheetItem(`${i + 1}. ${m.name}`, {
         sub: `${m.width}×${m.height}${m.refreshHz ? ` · ${Math.round(m.refreshHz)} Hz` : ''}${m.primary ? ' · main' : ''}`,
@@ -119,7 +134,7 @@ export class Toolbar {
   specialSheet() {
     const s = this.s;
     const b = (label, action, title) => h('button', { type: 'button', title: title || label, onclick: () => { s.special(action); closeSheet(); } }, label);
-    this._sheet(el => {
+    this._sheet('Shortcuts', el => {
       el.append(h('h3', {}, 'Send keys'));
       if (s.macHost) {
         el.append(h('div', { class: 'grid' },
@@ -154,7 +169,7 @@ export class Toolbar {
   // ------------------------------------------------------------------ clipboard
   clipboardSheet() {
     const s = this.s;
-    this._sheet(el => {
+    this._sheet('Clipboard', el => {
       el.append(h('h3', {}, 'Remote clipboard'));
       const remote = h('textarea', { class: 'local-input', readonly: true, 'aria-label': 'Remote clipboard' }, s.clipboard.remote || '');
       el.append(h('div', { class: 'row' }, remote, h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap' } },
@@ -206,7 +221,7 @@ export class Toolbar {
       }
       listEl.replaceChildren(...rows);
     };
-    this._sheet(el => {
+    this._sheet('Files', el => {
       const input = h('input', { type: 'file', multiple: true, hidden: true });
       input.addEventListener('change', () => { this.uploadFiles([...input.files], state.path); input.value = ''; });
       el.append(h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between' } },
@@ -260,7 +275,7 @@ export class Toolbar {
       if (control.getAttribute?.('role') === 'group' && !control.hasAttribute('aria-label')) control.setAttribute('aria-label', label);
       return h('div', {}, h('h3', {}, label), h('div', { class: 'row' }, control));
     };
-    this._sheet(el => {
+    this._sheet('Settings', el => {
       el.append(row('Scaling', segmented([
         { value: 'fit', label: 'Fit' }, { value: 'actual', label: '1:1' }, { value: 'fill', label: 'Fill' },
       ], p.scaling, v => s.setPref('scaling', v))));
@@ -317,8 +332,11 @@ export class Toolbar {
       ], p.renderer, v => { s.setPref('renderer', v); toast('Takes effect the next time you connect'); })));
       advanced(h('p', { class: 'muted small', style: { padding: '0 12px' } }, 'Leave these on Auto unless the picture misbehaves.'));
       el.append(more);
-      el.append(h('p', { class: 'muted small', style: { padding: '8px 12px 4px' } },
-        `Ctrl+Alt+Shift+M toggles this toolbar · F full screen · S stats · Q disconnect`));
+      // Keyboard shortcuts: only where there's a keyboard to press them on.
+      if (!isTouchPrimary) {
+        el.append(h('p', { class: 'muted small', style: { padding: '8px 12px 4px' } },
+          'Ctrl+Alt+Shift+M toggles this toolbar · F full screen · S stats · Q disconnect'));
+      }
     });
   }
 }

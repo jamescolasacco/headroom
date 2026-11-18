@@ -47,11 +47,15 @@ export const nextId = (prefix = 'hr') => `${prefix}-${++uid}`;
  * Tells screen readers about something that changed, politely. The region (#announcer) is always in the page and
  * starts empty, so every update is read; clearing it first makes a repeated message read again.
  */
+let announceTimer = 0, announceQueue = [];
 export function announce(message) {
   const el = document.getElementById('announcer');
-  if (!el) return;
+  if (!el || !message) return;
+  announceQueue.push(message);
   el.textContent = '';
-  requestAnimationFrame(() => { el.textContent = message; });
+  clearTimeout(announceTimer);
+  // A moment after clearing (so the same words twice are read again); messages that arrive together are read together.
+  announceTimer = setTimeout(() => { el.textContent = announceQueue.join(' '); announceQueue = []; }, 60);
 }
 
 let toastTimer = 0, toastLeft = 0, toastSince = 0, toastWired = false;
@@ -105,15 +109,18 @@ export function field(label, input, { hint } = {}) {
   const hintEl = hint ? h('p', { class: 'hint', id: nextId('hint') }, hint) : null;
   const errEl = h('p', { class: 'field-error', id: nextId('err'), hidden: true });
   const describe = () => {
-    const ids = [hintEl?.id, errEl.hidden ? null : errEl.id].filter(Boolean).join(' ');
+    const ids = [hintEl && !hintEl.hidden ? hintEl.id : null, errEl.hidden ? null : errEl.id].filter(Boolean).join(' ');
     if (ids) input.setAttribute('aria-describedby', ids); else input.removeAttribute('aria-describedby');
   };
   describe();
   const error = text => {
     errEl.textContent = text || '';
     errEl.hidden = !text;
+    if (hintEl) hintEl.hidden = !!text; // the error says what to do; the hint would only repeat it
     if (text) input.setAttribute('aria-invalid', 'true'); else input.removeAttribute('aria-invalid');
     describe();
+    // Moving focus to the field reads the error out; when focus is already there, say it.
+    if (text && document.activeElement === input) announce(text);
   };
   input.addEventListener('input', () => { if (!errEl.hidden) error(''); });
   return { nodes: [lab, input, hintEl, errEl], error, input };
@@ -143,22 +150,46 @@ let sheetClose = null;
  * Opens the session's sheet (a small panel of options). It is named by its first heading, takes focus, closes on
  * Escape or a tap outside, and gives focus back to whatever opened it.
  */
-export function openSheet(build, { onClose } = {}) {
+/**
+ * Opens the session's option sheet. It's named `label` (the name of the button that opened it), else by its first
+ * heading; it takes focus, keeps Tab inside it, closes on Escape, and gives focus back to its button.
+ */
+export function openSheet(build, { onClose, label } = {}) {
   const sheet = document.getElementById('sheet');
   const backdrop = document.getElementById('sheet-backdrop');
   const opener = document.activeElement;
+  const openerName = opener?.getAttribute?.('aria-label');
   closeSheet();
   sheet.replaceChildren();
   build(sheet);
   const title = sheet.querySelector('h2, h3');
-  if (title) { title.id ||= nextId('sheet'); sheet.setAttribute('aria-labelledby', title.id); } else sheet.removeAttribute('aria-labelledby');
+  if (label) { sheet.setAttribute('aria-label', label); sheet.removeAttribute('aria-labelledby'); }
+  else if (title) { sheet.removeAttribute('aria-label'); title.id ||= nextId('sheet'); sheet.setAttribute('aria-labelledby', title.id); }
+  else { sheet.removeAttribute('aria-label'); sheet.removeAttribute('aria-labelledby'); }
   sheet.hidden = false;
   backdrop.hidden = false;
   const onKey = e => {
-    if (e.key !== 'Escape') return;
-    e.preventDefault();
-    e.stopPropagation();
-    close();
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    // Modal: Tab and Shift+Tab go round the sheet's own controls (the ones showing: not inside a folded section).
+    const shown = el => {
+      if (el.disabled || !el.getClientRects().length) return false;
+      for (let d = el.closest('details'); d; d = d.parentElement?.closest('details')) {
+        if (!d.open && !d.querySelector(':scope > summary')?.contains(el)) return false;
+      }
+      return true;
+    };
+    const stops = [...sheet.querySelectorAll('button, input:not([type=hidden]), textarea, select, summary, a[href], [tabindex]:not([tabindex="-1"])')]
+      .filter(shown);
+    if (!stops.length) { e.preventDefault(); return; }
+    const first = stops[0], last = stops[stops.length - 1];
+    if (e.shiftKey && (document.activeElement === first || !sheet.contains(document.activeElement))) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
   };
   const close = () => {
     sheet.hidden = true; backdrop.hidden = true; sheet.replaceChildren();
@@ -166,7 +197,10 @@ export function openSheet(build, { onClose } = {}) {
     sheet.removeEventListener('keydown', onKey);
     sheetClose = null;
     onClose?.();
-    if (opener?.isConnected && opener.focus) opener.focus({ preventScroll: true });
+    // Back to the button that opened it, even if the toolbar was redrawn meanwhile (found again by its name).
+    const back = opener?.isConnected ? opener
+      : openerName ? document.querySelector(`#toolbar [aria-label="${CSS.escape(openerName)}"]`) : null;
+    back?.focus?.({ preventScroll: true });
   };
   backdrop.addEventListener('pointerdown', close);
   sheet.addEventListener('keydown', onKey);
