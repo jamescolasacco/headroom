@@ -166,6 +166,9 @@ export function openSheet(build, { onClose, label } = {}) {
   if (label) { sheet.setAttribute('aria-label', label); sheet.removeAttribute('aria-labelledby'); }
   else if (title) { sheet.removeAttribute('aria-label'); title.id ||= nextId('sheet'); sheet.setAttribute('aria-labelledby', title.id); }
   else { sheet.removeAttribute('aria-label'); sheet.removeAttribute('aria-labelledby'); }
+  // A way out you can see (on a phone a tall sheet leaves little to tap around it).
+  sheet.prepend(h('button', { type: 'button', class: 'sheet-close', 'aria-label': 'Close', onclick: () => close() },
+    svg('<path d="M18 6 6 18M6 6l12 12"/>', 20)));
   sheet.hidden = false;
   backdrop.hidden = false;
   const onKey = e => {
@@ -206,7 +209,7 @@ export function openSheet(build, { onClose, label } = {}) {
   sheet.addEventListener('keydown', onKey);
   sheetClose = close;
   // Focus the selected option, else the first control (keyboard users land inside; pointer users don't see a ring).
-  (sheet.querySelector('.item.active, [aria-pressed="true"]') || sheet.querySelector('button, input, textarea, select, [tabindex="0"]'))?.focus({ preventScroll: true });
+  (sheet.querySelector('.item.active, [aria-pressed="true"]') || sheet.querySelector('button:not(.sheet-close), input, textarea, select, [tabindex="0"]'))?.focus({ preventScroll: true });
   return close;
 }
 

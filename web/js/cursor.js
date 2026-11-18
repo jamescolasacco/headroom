@@ -47,6 +47,14 @@ export class CursorRenderer {
     this._placeOverlay();
   }
 
+  /** Shows or hides it where it is (the computer's report while a finger here is moving the pointer). */
+  setVisible(visible) {
+    if (visible === this.visible) return;
+    this.visible = visible;
+    this._applyCss();
+    this._placeOverlay();
+  }
+
   /** Remote cursor position as normalized coords. */
   get normalized() {
     const v = this.viewport;

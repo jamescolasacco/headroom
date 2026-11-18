@@ -64,7 +64,16 @@ export class TouchInput {
 
   /** Remote cursor moved by the host (e.g. an app warped it): adopt it unless we moved recently. */
   remoteCursor(nx, ny) {
-    if (performance.now() - this.cursorLocalAt > 400 && !this.buttonDown) this.cursor = { nx, ny };
+    if (!this.drivingCursor()) this.cursor = { nx, ny };
+  }
+
+  /**
+   * A finger is moving the pointer (or just did): this side knows where it is. The computer's reports of its
+   * position arrive a round trip late, so drawing them now would pull the pointer back: it jitters.
+   */
+  drivingCursor() {
+    return this.buttonDown || (this.g && this.g.kind !== 'pinch' && this.g.kind !== 'scroll' && this.g.kind !== 'pan3')
+      || performance.now() - this.cursorLocalAt < 700;
   }
 
   // ------------------------------------------------------------------ helpers
@@ -213,15 +222,27 @@ export class TouchInput {
       const dcx = c.x - g.cx, dcy = c.y - g.cy;
       const dt = Math.max(1, now - g.lastMoveT);
       if (g.kind === 'multi-pending') {
+        // Each finger reports on its own, so halfway through a frame one finger has moved and the other not yet:
+        // the centre seems to shift by half a pinch. Decide only once one kind of movement clearly leads.
         const moved = Math.hypot(dcx, dcy);
         const pinchDelta = Math.abs(spread - g.spread0);
-        if (this.touches.size === 2 && pinchDelta > 28 && pinchDelta > moved) g.kind = 'pinch';
-        else if (moved > SLOP) g.kind = this.touches.size >= 3 ? 'pan3' : 'scroll';
+        if (this.touches.size === 2 && pinchDelta > 24 && pinchDelta > moved) g.kind = 'pinch';
+        else if (moved > SLOP * 2 && moved > pinchDelta * 1.2) g.kind = this.touches.size >= 3 ? 'pan3' : 'scroll';
         else return;
+        g.pinchSpread = g.spread0; g.pinchX = g.cx; g.pinchY = g.cy; // what the picture shows so far
       }
       if (g.kind === 'pinch' && this.touches.size >= 2) {
-        if (g.spread > 0 && spread > 0) v.zoomAt(spread / g.spread, c.x, c.y);
-        v.panBy(dcx, dcy);
+        // Once per frame, with every finger's latest position: zoom around their centre and follow it.
+        if (!g.pinchFrame) {
+          g.pinchFrame = requestAnimationFrame(() => {
+            g.pinchFrame = 0;
+            if (this.g !== g || this.touches.size < 2) return;
+            const cc = this._centroid(), sp = this._spread();
+            const r = this.ctx.layer.getBoundingClientRect();
+            v.pinch(g.pinchSpread > 0 && sp > 0 ? sp / g.pinchSpread : 1, cc.x - r.left, cc.y - r.top, cc.x - g.pinchX, cc.y - g.pinchY);
+            g.pinchSpread = sp; g.pinchX = cc.x; g.pinchY = cc.y;
+          });
+        }
         g.spread = spread;
       } else if (g.kind === 'pan3') {
         v.panBy(dcx, dcy);
@@ -265,6 +286,7 @@ export class TouchInput {
       // Fingers lifting one by one: recompute the reference for the remaining ones.
       const c = this._centroid();
       g.cx = c.x; g.cy = c.y; g.spread0 = g.spread = this._spread();
+      g.pinchSpread = g.spread; g.pinchX = c.x; g.pinchY = c.y;
       return;
     }
     clearTimeout(g.holdTimer);

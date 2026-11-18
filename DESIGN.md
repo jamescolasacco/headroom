@@ -96,8 +96,17 @@ still uses them; new code uses the names above.
   just that task's form with its result shown in place.
 - **Session toolbar:** keyboard route Ctrl+Alt+Shift+M (focuses the first tool, never Disconnect), arrows move
   along it, Escape returns to the remote; hidden toolbar is `inert`. Until the computer lets you in it holds only
-  Disconnect. Sheets are named like their buttons, take focus, keep Tab inside, close on Escape (from the remote
-  too) and give focus back. Technical options fold under "Picture and network".
+  Disconnect. Sheets are named like their buttons (which close them again), have a Close button, take focus,
+  keep Tab inside, close on Escape (from the remote too) and give focus back. Technical options fold under
+  "Picture and network".
+  - With a mouse it hides by itself and comes back at the top edge.
+  - On touch screens it stays put, with 44px buttons, and the picture sits below it, never under it. "Hide tools"
+    folds it to a small tab (remembered per computer). A phone held upright keeps Keyboard, Trackpad/Touch and
+    Extra keys on the bar and the rest under More; wider screens show everything.
+  - The on-screen keyboard: the session shrinks to what's visible above it (iOS doesn't resize the page), the
+    extra keys sit right on top of it, and the picture keeps its size and zoom, panning to the pointer instead
+    of shrinking. When the keyboard leaves no room (a phone on its side), the bar steps aside until it does.
+  - Pinching zooms the remote screen, never the page (page zoom is locked during a session only).
 - **Endings:** the computer says why a session ended (its Stop, a removed sign-in, Headroom Server quitting) and the
   website shows that, with no "Reconnecting…" first. A guest who's let in hears "You're connected…" and that the
   other person can stop it at any time.

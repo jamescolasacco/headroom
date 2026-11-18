@@ -13,7 +13,7 @@ const RIGHT = '⁠'.repeat(12);  // word joiner
 const STRIP = /[​⁠]/g;
 
 export class SoftKeyboard extends EventTarget {
-  /** @param {object} ctx { sink, conn, keyboard (KeyboardInput), mods } */
+  /** @param {object} ctx { sink, conn, keyboard (KeyboardInput), mods, touch (focus means the keyboard is up) } */
   constructor(ctx) {
     super();
     this.ctx = ctx;
@@ -24,7 +24,12 @@ export class SoftKeyboard extends EventTarget {
     s.addEventListener('compositionstart', () => { this.composing = true; });
     s.addEventListener('compositionend', () => { this.composing = false; this._input(); });
     s.addEventListener('blur', () => { if (this.open) { this.open = false; this.dispatchEvent(new Event('change')); } });
-    s.addEventListener('focus', () => this._reset());
+    s.addEventListener('focus', () => {
+      this._reset();
+      // On a touch screen the keyboard comes up whenever this field has focus, also when iOS gives it back by
+      // itself (after the app switcher, or a hardware keyboard coming and going): say so.
+      if (ctx.touch && !this.open) { this.open = true; this.dispatchEvent(new Event('change')); }
+    });
     this._reset();
   }
 
@@ -33,8 +38,7 @@ export class SoftKeyboard extends EventTarget {
     const s = this.ctx.sink;
     this._reset();
     s.focus({ preventScroll: true });
-    this.open = true;
-    this.dispatchEvent(new Event('change'));
+    if (!this.open) { this.open = true; this.dispatchEvent(new Event('change')); } // (focus may have said so already)
   }
 
   hide() {

@@ -335,7 +335,8 @@ button.task-row:not(:disabled):not([aria-disabled="true"]):active { transform: n
 
 /* ------------------------------------------------------------------ the session */
 #viewer {
-  position: fixed; inset: 0; background: #000; overflow: hidden; touch-action: none; color: var(--ink);
+  /* min-height 0: the session shrinks to what's visible above the on-screen keyboard (session.js) */
+  position: fixed; inset: 0; min-height: 0; background: #000; overflow: hidden; touch-action: none; color: var(--ink);
   user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
 }
 #stage-wrap { position: absolute; inset: 0; overflow: hidden; }
@@ -345,8 +346,9 @@ button.task-row:not(:disabled):not([aria-disabled="true"]):active { transform: n
 #input-layer { position: absolute; inset: 0; touch-action: none; outline: none; z-index: 2; }
 #remote-cursor { position: absolute; left: 0; top: 0; pointer-events: none; z-index: 3; image-rendering: auto; will-change: transform; }
 #kbd-sink {
-  /* Must stay inside the viewport, non-zero, and >=16px font or iOS won't show the keyboard / will zoom. */
-  position: fixed; left: 0; bottom: 0; width: 2px; height: 2px; padding: 0; border: 0; margin: 0; min-height: 0;
+  /* Must stay inside the viewport, non-zero, and >=16px font or iOS won't show the keyboard / will zoom. At the
+     top of the session: where the keyboard never covers it, so iOS has no reason to scroll the page up to it. */
+  position: absolute; left: 0; top: 0; width: 2px; height: 2px; padding: 0; border: 0; margin: 0; min-height: 0;
   opacity: 0.011; font-size: 16px; color: transparent; background: transparent; caret-color: transparent;
   resize: none; overflow: hidden; z-index: 1; white-space: pre;
 }
@@ -376,9 +378,16 @@ button.task-row:not(:disabled):not([aria-disabled="true"]):active { transform: n
   display: flex; align-items: center; gap: 2px; padding: 4px; border-radius: 14px; z-index: 31;
   background: rgba(27, 27, 25, .86); border: 1px solid var(--rule); color: var(--ink);
   backdrop-filter: blur(16px) saturate(140%); -webkit-backdrop-filter: blur(16px) saturate(140%);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, .45); max-width: calc(100vw - 16px); overflow-x: auto; scrollbar-width: none;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .45); max-width: calc(100% - 16px); overflow-x: auto; scrollbar-width: none;
+  touch-action: pan-x; /* it may scroll sideways; a pinch or double tap here never zooms the page */
   transition: opacity .2s var(--ease-out), transform .2s var(--ease-out);
 }
+/* touch screens: it stays put, with finger-sized buttons; folded, it's a small tab that brings it back */
+.toolbar.pinned .tb { min-width: 44px; min-height: 44px; }
+.toolbar.collapsed { padding: 2px; border-radius: 12px; background: rgba(27, 27, 25, .7); }
+.toolbar.collapsed .tb { position: relative; min-width: 56px; min-height: 30px; border-radius: 10px; color: var(--ink-2); }
+.toolbar.collapsed .tb::after { content: ""; position: absolute; inset: -8px -6px; } /* a finger-sized target around the small tab */
+#toolbar.pinned ~ .sheet { top: calc(70px + var(--sat)); max-height: calc(100% - 86px - var(--sat) - var(--sab)); }
 .toolbar::-webkit-scrollbar { display: none; }
 .toolbar.hidden { opacity: 0; transform: translate(-50%, -12px); pointer-events: none; }
 .tb { min-height: 40px; min-width: 42px; padding: 0 9px; border: 0; border-radius: 10px; gap: 6px; color: inherit; font-size: var(--t-label); font-weight: 500; }
@@ -392,9 +401,9 @@ button.task-row:not(:disabled):not([aria-disabled="true"]):active { transform: n
 .tb-lamp { display: inline-flex; align-items: center; gap: 7px; padding: 0 10px 0 8px; font-size: var(--t-small); font-weight: 500; color: var(--air-ink); white-space: nowrap; }
 @media (max-width: 440px) {
   .toolbar { gap: 0; padding: 3px; }
-  .tb { min-width: 36px; padding: 0 6px; }
+  .toolbar:not(.pinned) .tb { min-width: 36px; padding: 0 6px; }
   .tb span { display: none; }
-  .tb-lamp .lamp-text { display: none; }
+  .toolbar:not(.pinned) .tb-lamp .lamp-text { display: none; } /* a phone's bar has room to say "View only" */
   .tb-sep { margin: 6px 1px; }
 }
 
@@ -411,9 +420,12 @@ button.task-row:not(:disabled):not([aria-disabled="true"]):active { transform: n
 @starting-style { .sheet { opacity: 0; } }
 @media (prefers-reduced-motion: no-preference) { @starting-style { .sheet { transform: translate(-50%, -6px); } } }
 .sheet h3 { font-size: var(--t-small); font-weight: 650; color: var(--ink-2); margin: var(--s3) 10px 6px; }
+.sheet-close { position: absolute; top: 4px; right: 4px; z-index: 1; width: 44px; min-height: 44px; padding: 0; border: 0; border-radius: 12px; color: var(--ink-2); }
+.sheet > .sheet-close + * { margin-right: 44px; } /* the first row keeps clear of it */
 .sheet .item { justify-content: space-between; gap: 10px; width: 100%; text-align: left; border: 0; border-radius: 8px; padding: 10px 12px; min-height: 44px; font-weight: 400; }
 @media (hover: hover) and (pointer: fine) { .sheet .item:hover { background: rgba(238, 235, 229, .08); } }
 .sheet .item .sub { color: var(--ink-3); font-size: var(--t-small); }
+.sheet .item > span:first-child { display: inline-flex; align-items: center; gap: var(--s3); }
 .sheet .item.active { color: var(--ready-ink); font-weight: 500; }
 .sheet .row { padding: 6px 10px 10px; }
 .sheet .muted { color: var(--ink-2); }

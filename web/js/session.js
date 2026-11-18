@@ -81,14 +81,19 @@ export class Session {
       onRelativeChange: rel => { this.relative = rel; this.toolbar?.refresh(); if (rel) toast('Mouse captured — press Esc to release'); },
     });
 
-    this.softkbd = new SoftKeyboard({ sink, conn: this.conn, keyboard: this.keyboard, mods: this.mods });
+    this.softkbd = new SoftKeyboard({ sink, conn: this.conn, keyboard: this.keyboard, mods: this.mods, touch: isTouchPrimary || isIPad });
     this.extraKeys = new ExtraKeysBar($('extra-keys'), {
       keyboard: this.keyboard, mods: this.mods, conn: this.conn,
       onLayout: px => this.viewport.setInsetBottom(px),
     });
     this.extraKeys.setHost(this.hostOs);
     this.softkbd.addEventListener('change', () => {
-      if (this.softkbd.open) this.extraKeys.show();
+      const open = this.softkbd.open;
+      // First: the picture keeps its size while the keyboard takes the bottom of the screen (it pans instead).
+      this.viewport.setKeyboard(open);
+      this.extraKeys.keyboardOpen = open;
+      if (open) { this.extraKeys.show(); this._followUntil = performance.now() + 1500; }
+      else if (!this.extraKeysPinned) this.extraKeys.hide();
       this.toolbar?.refresh();
     });
 
@@ -104,6 +109,12 @@ export class Session {
     this.toolbar = new Toolbar(this);
     this.stats = new StatsOverlay($('stats'), this);
     this.stats.setVisible(this.prefs.stats);
+    this._lockPageZoom(true);
+    this._onScreen = () => this._fitToScreen();
+    window.addEventListener('resize', this._onScreen);
+    window.visualViewport?.addEventListener('resize', this._onScreen);
+    window.visualViewport?.addEventListener('scroll', this._onScreen);
+    this._fitToScreen();
 
     this._wireConnection();
     this._wirePresenter();
@@ -198,7 +209,21 @@ export class Session {
     c.addEventListener('cursor-shape', e => this.cursor.setShape(e.detail));
     c.addEventListener('cursor-pos', e => {
       const p = e.detail;
-      this.cursor.setPosition(p.x, p.y, p.visible);
+      // While a finger here moves the pointer, the computer's reports lag a round trip behind: drawing them
+      // would tug the pointer back and forth. Show its shape and visibility only, until the finger is done.
+      clearTimeout(this._lateCursorTimer);
+      if (this.touch.drivingCursor()) {
+        this.cursor.setVisible(p.visible);
+        // Its last word still counts once the finger is done (an app may have moved the pointer meanwhile).
+        const settle = () => {
+          if (this.disposed) return;
+          if (this.touch.drivingCursor()) { this._lateCursorTimer = setTimeout(settle, 300); return; }
+          this.cursor.setPosition(p.x, p.y, p.visible);
+        };
+        this._lateCursorTimer = setTimeout(settle, 800);
+      } else {
+        this.cursor.setPosition(p.x, p.y, p.visible);
+      }
       const v = this.viewport;
       if (v.srcW) this.touch.remoteCursor(p.x / v.srcW, p.y / v.srcH);
     });
@@ -339,7 +364,7 @@ export class Session {
     };
     this._onPageShow = e => { if (e.persisted && !this.conn.isOpen) this.conn.reconnectNow(); };
     this._onGesture = e => e.preventDefault();
-    this._onTouchMove = e => { if (!e.target.closest?.('#sheet, #extra-keys')) e.preventDefault(); };
+    this._onTouchMove = e => { if (!e.target.closest?.('#sheet, #extra-keys, #toolbar')) e.preventDefault(); };
     this._onFs = () => this._fullscreenChanged();
     this._onMouseTop = e => { if (e.clientY < 6 && e.pointerType === 'mouse') this.toolbar.peek(2500); };
     this._onDragOver = e => { if (this.permissions.files && e.dataTransfer?.types?.includes('Files')) { e.preventDefault(); this._dropHint(true); } };
@@ -363,6 +388,42 @@ export class Session {
     window.addEventListener('drop', this._onDrop);
     $('toolbar-handle').onclick = () => this.toolbar.peek(4000);
     $('toolbar-handle').onpointerdown = e => e.stopPropagation();
+  }
+
+  /**
+   * Keeps the whole session (picture, toolbar, extra keys) inside the part of the page that's showing. When the
+   * on-screen keyboard comes up, iOS shrinks that part, and can shift it, without resizing the page itself.
+   */
+  _fitToScreen() {
+    const vv = window.visualViewport, viewer = $('viewer');
+    if (vv) {
+      Object.assign(viewer.style, {
+        top: `${vv.offsetTop}px`, left: `${vv.offsetLeft}px`, width: `${vv.width}px`, height: `${vv.height}px`, right: 'auto', bottom: 'auto',
+      });
+    }
+    this.extraKeys?.position();
+    this.toolbar?.fit();
+    // Messages (shown outside the session) sit above the keyboard and the extra keys as well.
+    const covered = vv ? Math.max(0, document.documentElement.clientHeight - vv.offsetTop - vv.height) : 0;
+    document.documentElement.style.setProperty('--inset-bottom', `${Math.round(covered + this.viewport.insetBottom)}px`);
+    this.viewport.layout();
+    // The keyboard just came up: bring the pointer (where you clicked to type) into view above it.
+    if (this.viewport.keyboard && performance.now() < (this._followUntil || 0)) {
+      const n = this.cursor.normalized;
+      this.viewport.follow(n.nx, n.ny, 72);
+    }
+  }
+
+  /** While a session is up, pinching zooms the remote screen, never the page (that would throw the layout off). */
+  _lockPageZoom(on) {
+    const meta = document.querySelector('meta[name=viewport]');
+    if (!meta) return;
+    if (on) {
+      this._viewportMeta ??= meta.content;
+      meta.content = `${this._viewportMeta}, maximum-scale=1, user-scalable=no`;
+    } else if (this._viewportMeta != null) {
+      meta.content = this._viewportMeta;
+    }
   }
 
   _dropHint(on) {
@@ -489,9 +550,10 @@ export class Session {
 
   _ripple(x, y, kind) {
     const layer = $('ripples');
+    const box = layer.getBoundingClientRect(); // x, y are page coordinates; the session may sit lower (keyboard)
     const r = document.createElement('div');
     r.className = 'ripple' + (kind === 'right' ? ' right' : kind === 'hold' ? ' hold' : '');
-    r.style.left = `${x}px`; r.style.top = `${y}px`;
+    r.style.left = `${x - box.left}px`; r.style.top = `${y - box.top}px`;
     layer.append(r);
     setTimeout(() => r.remove(), 800);
   }
@@ -516,6 +578,7 @@ export class Session {
   stop() {
     if (this.disposed) return;
     this.disposed = true;
+    clearTimeout(this._lateCursorTimer);
     this._offNative?.();
     postNative({ cmd: 'session', active: false });
     closeSheet();
@@ -542,6 +605,12 @@ export class Session {
     window.removeEventListener('dragover', this._onDragOver);
     window.removeEventListener('dragleave', this._onDragLeave);
     window.removeEventListener('drop', this._onDrop);
+    window.removeEventListener('resize', this._onScreen);
+    window.visualViewport?.removeEventListener('resize', this._onScreen);
+    window.visualViewport?.removeEventListener('scroll', this._onScreen);
+    this._lockPageZoom(false);
+    for (const k of ['top', 'left', 'width', 'height', 'right', 'bottom']) $('viewer').style.removeProperty(k);
+    document.documentElement.style.removeProperty('--inset-bottom');
     $('overlay').hidden = true;
     $('stats').hidden = true;
     $('toolbar').replaceChildren();

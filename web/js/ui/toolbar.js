@@ -1,8 +1,14 @@
-// Session toolbar (auto-hiding pill at the top) and its sheets.
+// Session toolbar and its sheets. With a mouse it's a pill at the top that hides by itself (it comes back at the
+// top edge); on touch screens it stays put, since that's where the keyboard is, and can be folded to a small tab.
 import { h, svg, openSheet, closeSheet, sheetOpen, sheetItem, segmented, toast, fmtBytes } from './dom.js';
 import { I } from './icons.js';
 import { isTouchPrimary, isIPad, canFullscreen, isApple, hasKeyboardLock } from '../platform.js';
 import { listFiles, uploadFile } from '../api.js';
+
+const FOLD = '<path d="m6 15 6-6 6 6"/>';
+const UNFOLD = '<path d="m6 9 6 6 6-6"/>';
+const MORE = '<circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/>';
+const NARROW = 560; // narrower than this (a phone held upright): the bar keeps the everyday tools, the rest go under More
 
 export class Toolbar {
   constructor(session) {
@@ -10,9 +16,16 @@ export class Toolbar {
     this.el = document.getElementById('toolbar');
     this.hideTimer = 0;
     this.hovering = false;
+    this.touchUi = isTouchPrimary || isIPad;
+    this.el.classList.toggle('pinned', this.touchUi);
+    document.getElementById('toolbar-handle').hidden = this.touchUi; // the folded tab takes its place
     this.el.addEventListener('pointerenter', () => { this.hovering = true; clearTimeout(this.hideTimer); });
     this.el.addEventListener('pointerleave', () => { this.hovering = false; this.peek(1500); });
-    this.el.addEventListener('pointerdown', e => e.stopPropagation());
+    this.el.addEventListener('pointerdown', e => {
+      e.stopPropagation();
+      // A tap here mustn't take focus from the remote keyboard (that would close the on-screen keyboard).
+      if (e.pointerType === 'touch') e.preventDefault();
+    });
     // Keyboard: Ctrl+Alt+Shift+M focuses the toolbar; arrows move along it, Escape goes back to the remote screen.
     this.el.addEventListener('focusin', () => { clearTimeout(this.hideTimer); this.el.classList.remove('hidden'); this.el.inert = false; });
     this.el.addEventListener('focusout', e => { if (!this.dismissing && !this.el.contains(e.relatedTarget)) this.peek(1500); });
@@ -38,6 +51,7 @@ export class Toolbar {
       document.getElementById('kbd-sink')?.focus({ preventScroll: true });
       this.dismissing = false;
       clearTimeout(this.hideTimer);
+      if (this.touchUi) return; // a pinned bar stays where it is
       this.el.classList.add('hidden');
       this.el.inert = true;
     } else if ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && i >= 0) {
@@ -53,38 +67,102 @@ export class Toolbar {
     return b;
   }
 
-  refresh() {
-    const s = this.s;
-    const items = [];
-    items.push(this.btn(I.close, 'Disconnect', () => s.stop(), { danger: true }));
-    // Until the computer lets this session in, there's nothing to use yet but leaving.
-    if (!s.conn?.welcome) { this.el.replaceChildren(...items); return; }
-    items.push(h('span', { class: 'tb-sep' }));
+  /** Touch screens: folded away to a small tab (the person's choice, kept for this computer). */
+  get collapsed() { return this.touchUi && !!this.s.prefs.toolbarCollapsed; }
+  narrow() { return (this.s.viewport?.cw || window.innerWidth) < NARROW; }
+
+  setCollapsed(on) {
+    const hadFocus = this.el.contains(document.activeElement);
+    this.s.setPref('toolbarCollapsed', on); // redraws the bar
+    if (hadFocus) this.el.querySelector(on ? 'button' : 'button:not(.danger)')?.focus({ preventScroll: true });
+  }
+
+  /** What the bar offers right now, most used first. `always`: stays on a phone's bar (the rest go under More). */
+  tools() {
+    const s = this.s, t = [];
+    const control = s.permissions.input;
+    // Watching only: say so (the on-air lamp), and leave out what only works with control.
+    if (!control) {
+      t.push({ always: true, el: h('span', { class: 'tb-lamp', role: 'status' }, h('span', { class: 'dot live', 'aria-hidden': 'true' }), h('span', { class: 'lamp-text' }, 'View only')) });
+    }
+    if (control && this.touchUi) {
+      t.push({ always: true, icon: I.keyboard, label: 'Keyboard', pressed: !!s.softkbd?.open, onClick: () => s.toggleKeyboard() });
+      const pad = s.inputMode === 'trackpad';
+      t.push({
+        always: true, icon: pad ? I.trackpad : I.touch, label: pad ? 'Trackpad mode (tap to switch to touch)' : 'Touch mode (tap to switch to trackpad)',
+        onClick: () => { s.setPref('inputMode', pad ? 'touch' : 'trackpad'); toast(pad ? 'Touch mode: tap where you want to click' : 'Trackpad mode: slide to move, tap to click'); },
+      });
+    }
+    if (control) {
+      t.push({ always: true, icon: I.keys, label: 'Extra keys', pressed: !!s.extraKeys?.visible, onClick: () => s.toggleExtraKeys() });
+      t.push({ icon: I.bolt, label: 'Shortcuts', onClick: () => this.specialSheet() });
+    }
     if (s.monitors.length > 1) {
       const cur = s.monitors.findIndex(m => m.id === s.monitorId);
-      items.push(this.btn(I.monitor, 'Displays', () => this.displaysSheet(), { text: String(cur + 1) }));
+      t.push({ icon: I.monitor, label: 'Displays', text: String(cur + 1), onClick: () => this.displaysSheet() });
     }
-    if (isTouchPrimary || isIPad) {
-      items.push(this.btn(I.keyboard, 'Keyboard', () => s.toggleKeyboard(), { pressed: s.softkbd?.open }));
-      items.push(this.btn(s.inputMode === 'trackpad' ? I.trackpad : I.touch, s.inputMode === 'trackpad' ? 'Trackpad mode (tap to switch to touch)' : 'Touch mode (tap to switch to trackpad)',
-        () => { s.setPref('inputMode', s.inputMode === 'trackpad' ? 'touch' : 'trackpad'); toast(s.inputMode === 'trackpad' ? 'Trackpad mode: slide to move, tap to click' : 'Touch mode: tap where you want to click'); }));
+    if (s.permissions.clipboard) t.push({ icon: I.clipboard, label: 'Clipboard', onClick: () => this.clipboardSheet() });
+    if (s.permissions.files) t.push({ icon: I.files, label: 'Files', onClick: () => this.filesSheet() });
+    if (s.permissions.audio && s.audio.supported) t.push({ icon: s.prefs.audio ? I.sound : I.mute, label: s.prefs.audio ? 'Mute' : 'Unmute', onClick: () => s.setPref('audio', !s.prefs.audio) });
+    if (canFullscreen()) t.push({ icon: s.fullscreen ? I.exitFullscreen : I.fullscreen, label: s.fullscreen ? 'Exit full screen' : 'Full screen', onClick: () => s.toggleFullscreen() });
+    t.push({ icon: I.settings, label: 'Settings', onClick: () => this.settingsSheet() });
+    return t;
+  }
+
+  refresh() {
+    const s = this.s;
+    this._compact = this.touchUi && this.narrow();
+    // Folded away: one tab brings it back.
+    this.el.classList.toggle('collapsed', this.collapsed);
+    if (this.collapsed) {
+      this.el.replaceChildren(this.btn(UNFOLD, 'Show tools', () => this.setCollapsed(false)));
+      this.fit();
+      return;
     }
-    // Watching only: say so (the on-air lamp), and leave out what only works with control.
-    if (s.conn?.welcome && !s.permissions.input) {
-      items.unshift(h('span', { class: 'tb-lamp', role: 'status' }, h('span', { class: 'dot live', 'aria-hidden': 'true' }), h('span', { class: 'lamp-text' }, 'View only')));
-    } else {
-      items.push(this.btn(I.keys, 'Extra keys', () => s.toggleExtraKeys(), { pressed: s.extraKeys?.visible }));
-      items.push(this.btn(I.bolt, 'Shortcuts', () => this.specialSheet()));
+    const items = [this.btn(I.close, 'Disconnect', () => s.stop(), { danger: true })];
+    // Until the computer lets this session in, there's nothing to use yet but leaving.
+    if (s.conn?.welcome) {
+      const tools = this.tools();
+      const shown = this._compact ? tools.filter(t => t.always) : tools;
+      const more = this._compact ? tools.filter(t => !t.always) : [];
+      items.push(h('span', { class: 'tb-sep' }));
+      for (const t of shown) items.push(t.el || this.btn(t.icon, t.label, t.onClick, { pressed: t.pressed, text: t.text }));
+      if (more.length) items.push(this.btn(MORE, 'More', () => this.moreSheet(more)));
     }
-    if (s.permissions.clipboard) items.push(this.btn(I.clipboard, 'Clipboard', () => this.clipboardSheet()));
-    if (s.permissions.files) items.push(this.btn(I.files, 'Files', () => this.filesSheet()));
-    if (s.permissions.audio && s.audio.supported) items.push(this.btn(s.prefs.audio ? I.sound : I.mute, s.prefs.audio ? 'Mute' : 'Unmute', () => s.setPref('audio', !s.prefs.audio)));
-    if (canFullscreen()) items.push(this.btn(s.fullscreen ? I.exitFullscreen : I.fullscreen, s.fullscreen ? 'Exit full screen' : 'Full screen', () => s.toggleFullscreen()));
-    items.push(this.btn(I.settings, 'Settings', () => this.settingsSheet()));
+    if (this.touchUi) items.push(h('span', { class: 'tb-sep' }), this.btn(FOLD, 'Hide tools', () => this.setCollapsed(true)));
     this.el.replaceChildren(...items);
+    this.fit();
+  }
+
+  /**
+   * After a redraw or a change of screen size: a phone turned sideways gets the whole bar (and back), and on touch
+   * screens the picture keeps clear of the bar (it sits below it rather than under it).
+   */
+  fit() {
+    if (this.touchUi && !this.collapsed && this.narrow() !== this._compact) { this.refresh(); return; }
+    const v = this.s.viewport;
+    if (!v || !this.touchUi) return;
+    // No room for it (a phone on its side with the keyboard up leaves a strip): it steps aside until there is,
+    // so the strip shows the picture and the extra keys. (The keyboard's own Done button still closes it.)
+    const below = this.el.offsetTop + this.el.offsetHeight + 6;
+    const cramped = v.viewer.clientHeight - below - v.insetBottom < 120;
+    this.el.classList.toggle('hidden', cramped);
+    this.el.inert = cramped;
+    v.setInsetTop(!this.collapsed && !cramped && this.el.offsetHeight > 0 ? below : 0);
+  }
+
+  /** The tools a phone's bar has no room for. */
+  moreSheet(tools) {
+    this._sheet('More', el => {
+      el.append(h('h3', {}, 'More'));
+      for (const t of tools) {
+        el.append(sheetItem(t.label, { icon: svg(t.icon, 20), sub: t.text ? `Showing ${t.text}` : undefined, onClick: () => { closeSheet(); t.onClick(); } }));
+      }
+    });
   }
 
   peek(ms = 3000) {
+    if (this.touchUi) return; // pinned: it doesn't hide by itself (only when there's no room: fit())
     this.el.classList.remove('hidden');
     this.el.inert = false;
     clearTimeout(this.hideTimer);
@@ -97,6 +175,15 @@ export class Toolbar {
 
   /** Shows or hides the toolbar; from the keyboard (`focus`), it also takes focus so its buttons can be used. */
   toggle({ focus = false } = {}) {
+    if (this.touchUi) {
+      if (this.collapsed) this.setCollapsed(false);
+      else if (!focus) { this.setCollapsed(true); return; }
+      if (focus) {
+        this.el.classList.add('kbd');
+        (this.el.querySelector('button:not(.danger)') || this.el.querySelector('button'))?.focus({ preventScroll: true });
+      }
+      return;
+    }
     if (this.el.classList.contains('hidden') || (focus && !this.el.contains(document.activeElement))) {
       this.peek(6000);
       if (focus) {
@@ -110,10 +197,12 @@ export class Toolbar {
     }
   }
 
-  /** Opens a sheet named like the button that opened it ("Settings", "Shortcuts"…). */
+  /** Opens a sheet named like the button that opened it ("Settings", "Shortcuts"…); that button closes it again. */
   _sheet(label, build) {
     clearTimeout(this.hideTimer);
-    openSheet(build, { label, onClose: () => this.peek(1500) });
+    if (sheetOpen() && this._sheetLabel === label) { closeSheet(); return; }
+    this._sheetLabel = label;
+    openSheet(build, { label, onClose: () => { this._sheetLabel = null; this.peek(1500); } });
   }
 
   // ------------------------------------------------------------------ displays

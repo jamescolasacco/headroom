@@ -86,9 +86,7 @@ export class ExtraKeysBar {
     el.setAttribute('aria-label', 'Extra keys');
     this._render();
     mods.addEventListener('change', () => this._sync());
-    const vv = window.visualViewport;
-    vv?.addEventListener('resize', () => this.position());
-    vv?.addEventListener('scroll', () => this.position());
+    this.keyboardOpen = false; // set by the session (it follows the on-screen keyboard)
   }
 
   /** Re-label for the host's platform ('macos' | 'windows'). */
@@ -153,13 +151,13 @@ export class ExtraKeysBar {
   hide() { this.visible = false; this.el.hidden = true; this.onLayout?.(0); }
   toggle() { if (this.visible) this.hide(); else this.show(); }
 
-  /** Sit directly above the on-screen keyboard (visualViewport shrinks when it's up). */
+  /**
+   * Sits at the bottom of the session, which the session keeps inside the visible area: right above the
+   * on-screen keyboard when it's up (where the home-indicator spacing isn't needed).
+   */
   position() {
     if (!this.visible) return;
-    const vv = window.visualViewport;
-    const kbHeight = vv ? Math.max(0, window.innerHeight - vv.height - vv.offsetTop) : 0;
-    this.el.style.bottom = `${kbHeight}px`;
-    this.el.style.paddingBottom = kbHeight > 0 ? '6px' : '';
-    this.onLayout?.(this.el.offsetHeight + kbHeight);
+    this.el.style.paddingBottom = this.keyboardOpen ? '6px' : '';
+    this.onLayout?.(this.el.offsetHeight);
   }
 }
