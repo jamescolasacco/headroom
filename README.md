@@ -210,7 +210,8 @@ Put the account server on the internet with HTTPS (Cloudflare Tunnel, Tailscale 
   the account server's address, choose **Connect with an ID**, and you click **Accept** (or *View only*) when
   Headroom asks. The code works once; disconnecting the session ends it for good.
 
-To keep the account server running on a Mac: `tools/install-account-server-macos.sh` (needs Node.js 20+).
+To run the account server as a service: `sudo tools/install-account-server-linux.sh --admin <you>` on a Linux
+server or VPS (systemd), or `tools/install-account-server-macos.sh` on a Mac. Both need Node.js 20+.
 
 ## Keyboard shortcuts in a session
 

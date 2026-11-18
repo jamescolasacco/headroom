@@ -25,6 +25,19 @@ jobs:
         run: node account-server/test.mjs
       - name: Syntax check (web client, tools)
         run: for f in web/js/*.js web/js/*/*.js web/sw.js tools/*.mjs account-server/*.mjs; do node --check "$f"; done
+      - name: Linux service install (tools/install-account-server-linux.sh)
+        run: |
+          echo 'ci-password-123' | sudo tools/install-account-server-linux.sh --admin ci-admin --port 8790
+          curl -fs http://127.0.0.1:8790/api/info
+          curl -fs -X POST -H 'Content-Type: application/json' -d '{"username":"ci-admin","password":"ci-password-123","deviceName":"ci"}' \
+            http://127.0.0.1:8790/api/account/login | grep -q '"token"'
+          status=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+            -d '{"username":"eve","password":"longenough1"}' http://127.0.0.1:8790/api/account/register)
+          test "$status" = 403 || { echo "public sign-up should be closed, got $status"; exit 1; }
+          sudo tools/install-account-server-linux.sh --port 8790   # updating keeps the account
+          curl -fs -X POST -H 'Content-Type: application/json' -d '{"username":"ci-admin","password":"ci-password-123","deviceName":"ci"}' \
+            http://127.0.0.1:8790/api/account/login | grep -q '"token"'
+          sudo tools/install-account-server-linux.sh --uninstall
 
   macos:
     name: macOS (universal)

@@ -83,9 +83,39 @@ Behind any of these, start the server with `TRUST_PROXY=1` so rate limiting and 
 real address (taken from `X-Forwarded-For`; only do this when the server isn't also reachable directly), and
 `BIND=127.0.0.1` so it's only reachable through the proxy.
 
-On a Mac that should host it permanently, `tools/install-account-server-macos.sh` installs it as a login item
-(it needs Node.js 20 or later). Then join each computer to `https://<your public address>` in Headroom Server →
-Account, so they connect to the relay at the address browsers use.
+On a Linux server or VPS, from a checkout of the repository:
+
+```bash
+sudo tools/install-account-server-linux.sh --admin <your username>
+```
+
+It installs a systemd service (`headroom-accounts`) listening on `127.0.0.1:8780` behind your tunnel or proxy,
+creates your account (asking for the password), and keeps public sign-up off, so nobody can claim a fresh
+server before you. Run it again after `git pull` to update. On a Mac, `tools/install-account-server-macos.sh`
+does the same with a login item. Both need Node.js 20 or later.
+
+Then join each computer to `https://<your public address>` in Headroom Server → Account, so they connect to the
+relay at the address browsers use.
+
+### With Cloudflare Tunnel
+
+Point a public hostname at the server: in cloudflared's `config.yml`
+
+```yaml
+ingress:
+  - hostname: relay.example.com
+    service: http://localhost:8780
+  - service: http_status:404
+```
+
+(or **Public Hostname** in the Zero Trust dashboard for a dashboard-managed tunnel). WebSockets pass through
+Cloudflare by default. Two things to know:
+
+- **Bot Fight Mode** (and similar challenges) can block the computers' own connections, which aren't browsers.
+  If a computer shows "The relay answered HTTP 403", turn it off for this hostname or add a WAF rule that skips
+  challenges for `/api/relay/` and `/r/`.
+- Cloudflare's free plan limits a single upload to **100 MB**; larger files can't be sent to a computer through
+  the relay (direct connections have no limit).
 
 ## Settings
 
