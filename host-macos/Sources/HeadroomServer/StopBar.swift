@@ -56,7 +56,7 @@ final class StopBar {
 
         dot.wantsLayer = true
         // The on-air lamp (the same amber as the Server window and the website): someone is connected.
-        dot.layer?.backgroundColor = NSColor(srgbRed: 0.949, green: 0.663, blue: 0.231, alpha: 1).cgColor
+        dot.layer?.backgroundColor = NSColor(srgbRed: 0.980, green: 0.671, blue: 0.247, alpha: 1).cgColor
         dot.layer?.cornerRadius = 5
         label.font = .systemFont(ofSize: 13, weight: .medium)
         label.lineBreakMode = .byTruncatingTail

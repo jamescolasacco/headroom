@@ -184,7 +184,7 @@ public sealed class StopBar : Form
         protected override void OnPaint(PaintEventArgs e)
         {
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            using var brush = new SolidBrush(Color.FromArgb(242, 169, 59));
+            using var brush = new SolidBrush(Color.FromArgb(250, 171, 63));
             int d = Math.Min(Width, Height) - 1;
             e.Graphics.FillEllipse(brush, (Width - d) / 2f, (Height - d) / 2f, d, d);
         }

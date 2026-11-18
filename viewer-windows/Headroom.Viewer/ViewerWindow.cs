@@ -33,7 +33,7 @@ public sealed class ViewerWindow : Form
         ClientSize = new Size(1280, 800);
         MinimumSize = new Size(480, 360);
         StartPosition = FormStartPosition.CenterScreen;
-        BackColor = Color.FromArgb(11, 13, 17);
+        BackColor = Color.FromArgb(9, 11, 16);
         KeyPreview = false;
         _ = AttachWebViewAsync();
     }
@@ -48,7 +48,7 @@ public sealed class ViewerWindow : Form
 
     public async Task AttachWebViewAsync()
     {
-        var web = new WebView2 { Dock = DockStyle.Fill, DefaultBackgroundColor = Color.FromArgb(11, 13, 17) };
+        var web = new WebView2 { Dock = DockStyle.Fill, DefaultBackgroundColor = Color.FromArgb(9, 11, 16) };
         Controls.Add(web);
         _web = web;
         try

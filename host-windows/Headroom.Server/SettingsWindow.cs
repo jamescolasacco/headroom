@@ -13,7 +13,7 @@ namespace Headroom.Server;
 /// </summary>
 public sealed class SettingsWindow : Form
 {
-    private readonly WebView2 _web = new() { Dock = DockStyle.Fill, DefaultBackgroundColor = Color.FromArgb(11, 13, 17) };
+    private readonly WebView2 _web = new() { Dock = DockStyle.Fill, DefaultBackgroundColor = Color.FromArgb(9, 11, 16) };
     private readonly Func<Task<bool>> _startServer;
     private bool _ready;
     private bool _onAdminPage;
@@ -35,7 +35,7 @@ public sealed class SettingsWindow : Form
         ClientSize = new Size(960, 680);
         MinimumSize = new Size(560, 420);
         StartPosition = FormStartPosition.CenterScreen;
-        BackColor = Color.FromArgb(11, 13, 17);
+        BackColor = Color.FromArgb(9, 11, 16);
         Controls.Add(_web);
         _ = InitAsync();
     }
@@ -190,16 +190,17 @@ public sealed class SettingsWindow : Form
     private const string OfflineHtml = """
 <!doctype html><html><head><meta charset="utf-8"><meta name="color-scheme" content="dark light">
 <style>
-:root{--bg:#0b0d11;--fg:#e8ebf0;--muted:#8d97a5;--card:#13161c;--line:#262b35;--accent:#5b9dff;--bad:#ef5b5b}
-@media (prefers-color-scheme: light){:root{--bg:#f5f6f8;--fg:#141820;--muted:#5d6875;--card:#fff;--line:#dfe3e8;--accent:#1f6feb}}
-body{margin:0;height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--fg);font:15px/1.5 "Segoe UI",system-ui,sans-serif}
-.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:28px 32px;max-width:440px;text-align:center}
-h1{font-size:20px;margin:0 0 8px}p{color:var(--muted);margin:0 0 18px}
-button{background:var(--accent);color:#fff;border:0;border-radius:10px;padding:10px 18px;font:600 15px "Segoe UI",system-ui;cursor:pointer}
-</style></head><body><div class="card">
+:root{--room:#090b10;--ink:#eef1f6;--ink2:#aab2c0;--rim:rgba(255,255,255,.11);--off-a:#0f1218;--off-b:#171b24;--primary:#eef4ff;--on-primary:#0a0d14}
+@media (prefers-color-scheme: light){:root{--room:#eef1f5;--ink:#0c0f15;--ink2:#454c59;--rim:rgba(12,15,21,.09);--off-a:#cdd3dc;--off-b:#dce1e8;--primary:#0c0f15;--on-primary:#fff}}
+body{margin:0;height:100vh;display:grid;place-items:center;background:var(--room);color:var(--ink);font:15px/1.5 "Segoe UI",system-ui,sans-serif}
+main{max-width:420px;text-align:center;padding:24px}
+.screen{width:220px;aspect-ratio:16/10;margin:0 auto 24px;border-radius:12px;background:linear-gradient(118deg,var(--off-a) 0 44%,var(--off-b) 50%,var(--off-a) 57%);box-shadow:inset 0 0 0 1px var(--rim)}
+h1{font-size:21px;margin:0 0 6px;letter-spacing:-.01em}p{color:var(--ink2);margin:0 0 20px}
+button{background:var(--primary);color:var(--on-primary);border:0;border-radius:10px;padding:11px 20px;font:600 15px "Segoe UI",system-ui;cursor:pointer}
+</style></head><body><main><div class="screen"></div>
 <h1>The Headroom server isn't running</h1>
 <p>Other devices can't connect until it's started.</p>
 <button onclick="chrome.webview.postMessage({cmd:'startServer'})">Start server</button>
-</div></body></html>
+</main></body></html>
 """;
 }

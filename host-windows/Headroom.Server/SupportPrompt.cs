@@ -44,7 +44,7 @@ public sealed class SupportPrompt : Form
         layout.Controls.Add(Line("They entered your code. The name is what they typed — it isn't verified" +
                                  (from.Count > 0 ? $". From {string.Join(" · ", from)}." : "."), new Padding(0, 0, 0, 10)));
         layout.Controls.Add(Line("Only accept if you know this person and asked for their help. Scammers call pretending to be support and ask for codes.",
-            new Padding(0, 0, 0, 10), new Font("Segoe UI Semibold", 10f), Color.FromArgb(196, 92, 0)));
+            new Padding(0, 0, 0, 10), new Font("Segoe UI Semibold", 10f), Color.FromArgb(138, 82, 0)));
         layout.Controls.Add(Line("Accept lets them see and control your screen; View only lets them watch. Stop any time from the bar at the top of the screen. No answer in 2 minutes declines.", new Padding(0, 0, 0, 10)));
         var files = new CheckBox { Text = "Let them transfer files", AutoSize = true, Checked = false, Margin = new Padding(0, 0, 0, 4) };
         var clipboard = new CheckBox { Text = "Share clipboard", AutoSize = true, Checked = false, Margin = new Padding(0, 0, 0, 14) };

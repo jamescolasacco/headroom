@@ -19,7 +19,7 @@ final class ViewerWindow: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUI
         window.title = "Headroom Viewer"
         window.titlebarAppearsTransparent = true
         window.appearance = NSAppearance(named: .darkAqua) // the viewer frames a remote desktop: always dark
-        window.backgroundColor = NSColor(red: 0.043, green: 0.051, blue: 0.067, alpha: 1)
+        window.backgroundColor = NSColor(srgbRed: 0.035, green: 0.043, blue: 0.063, alpha: 1)
         window.minSize = NSSize(width: 480, height: 360)
         window.collectionBehavior = [.fullScreenPrimary]
         window.isReleasedWhenClosed = false
