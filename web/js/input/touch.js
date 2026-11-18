@@ -18,6 +18,10 @@ const HOLD_MS = 450;
 const DOUBLE_TAP_MS = 320;
 const DOUBLE_TAP_PX = 36;
 const SCROLL_K = 2.2;        // wheel units per CSS px of finger travel
+// Trackpad mode: how far the pointer moves for a finger movement on screen. Gentle acceleration: slow movements
+// already go 1.5× as far (fine aim shouldn't crawl), quick ones up to 2.6× (to cross the screen), ramping between
+// 0.2 and 1.4 px/ms of finger speed. (The "Pointer speed" setting multiplies both.)
+const ACCEL_MIN = 1.5, ACCEL_MAX = 2.6, ACCEL_FROM = 0.2, ACCEL_TO = 1.4;
 
 export class TouchInput {
   /** @param {object} ctx { conn, viewport, cursor, layer, mods, ripple(x,y,kind), toggleKeyboard(), prefs() } */
@@ -204,8 +208,11 @@ export class TouchInput {
       if (g.kind === 'pan') { v.panBy(dx, dy); return; }
       if (this.mode === 'trackpad') {
         const dt = Math.max(1, now - (g.lastMoveT || now - 16));
+        // Speed smoothed over the last few events: one jittery sample doesn't make the pointer surge or stall.
         const speed = Math.hypot(dx, dy) / dt;                 // px/ms
-        const accel = 1 + Math.min(2.4, Math.max(0, (speed - 0.25) * 1.6));
+        g.speed = g.speed == null ? speed : g.speed * 0.6 + speed * 0.4;
+        const ramp = Math.min(1, Math.max(0, (g.speed - ACCEL_FROM) / (ACCEL_TO - ACCEL_FROM)));
+        const accel = ACCEL_MIN + (ACCEL_MAX - ACCEL_MIN) * ramp;
         const k = (this.ctx.prefs().pointerSpeed || 1) * accel / (v.encW * v.scale);
         this._moveTo(this.cursor.nx + dx * k, this.cursor.ny + dy * k);
       } else {
