@@ -11,12 +11,12 @@ body { overflow: hidden; }
 }
 #nav { display: flex; flex-direction: column; gap: 2px; }
 .side .brand { padding: 0 var(--s2) var(--s5); align-items: center; }
-.side .brand h1 { font-size: 16px; margin: 0; letter-spacing: -0.005em; }
+.side .brand h1 { font-size: var(--t-body); margin: 0; letter-spacing: -0.005em; }
 .side .brand .sub { font-size: var(--t-meta); color: var(--ink-3); margin-top: 1px; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .side .logo { width: 28px; height: 28px; }
 .nav-item {
   justify-content: flex-start; gap: 10px; width: 100%; min-height: 40px; padding: 0 10px; border: 1px solid transparent; border-radius: var(--r-control);
-  background: transparent; color: var(--ink-2); font-size: 14.5px; font-weight: 500; text-align: left;
+  background: transparent; color: var(--ink-2); font-size: var(--t-label); font-weight: 500; text-align: left;
 }
 .nav-item svg { width: 18px; height: 18px; stroke-width: 2.1; }
 @media (hover: hover) and (pointer: fine) { .nav-item:hover { background: var(--wash); color: var(--ink); } }
@@ -24,7 +24,7 @@ body { overflow: hidden; }
 button.nav-item:not(:disabled):not([aria-disabled="true"]):active { transform: none; } /* used all the time: no press motion */
 .nav-item .count {
   margin-left: auto; min-width: 22px; height: 20px; padding: 0 6px; border-radius: 999px; display: inline-grid; place-items: center;
-  font-size: var(--t-meta); font-weight: 600; font-variant-numeric: tabular-nums; background: var(--wash); color: var(--ink);
+  font-size: var(--t-meta); font-weight: 650; font-variant-numeric: tabular-nums; background: var(--wash); color: var(--ink);
 }
 .nav-item .count.attention { background: var(--air); color: #151513; }
 .side .spacer { flex: 1; }
@@ -39,15 +39,15 @@ button.nav-item:not(:disabled):not([aria-disabled="true"]):active { transform: n
 .content h2 + .lead, .content h2 + * { margin-top: var(--s2); }
 .content .lead { color: var(--ink-2); margin: 0 0 var(--s5); max-width: 60ch; }
 .card { background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r-card); padding: var(--s4) var(--s5); margin: var(--s4) 0; }
-.card h3 { font-size: 15.5px; font-weight: 650; margin: 0 0 var(--s3); }
+.card h3 { font-size: var(--t-body); font-weight: 650; margin: 0 0 var(--s3); }
 .card p { margin: var(--s2) 0; }
 .row { display: flex; gap: var(--s2); align-items: center; flex-wrap: wrap; }
 .grow { flex: 1 1 200px; min-width: 0; }
-.mono { font-size: 13px; }
+.mono { font-size: var(--t-small); }
 .path { overflow-wrap: anywhere; word-break: break-all; }
 .link-text { overflow-wrap: anywhere; }
-button.sm { min-height: 36px; padding: 0 var(--s3); font-size: 14px; }
-select.inline { width: auto; min-width: 150px; min-height: 38px; padding: 6px 10px; font-size: 14px; }
+button.sm { min-height: 36px; padding: 0 var(--s3); font-size: var(--t-label); }
+select.inline { width: auto; min-width: 150px; min-height: 38px; padding: 6px 10px; font-size: var(--t-label); }
 
 /* ------------------------------------------------------------------ status */
 .hero { display: flex; gap: var(--s4); align-items: center; }
@@ -60,12 +60,15 @@ select.inline { width: auto; min-width: 150px; min-height: 38px; padding: 6px 10
 .hero.live .title::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--air); margin-right: 10px; vertical-align: 2px; box-shadow: 0 0 0 3px color-mix(in srgb, var(--air) 22%, transparent); }
 .badge {
   display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: 7px;
-  font-size: 12.5px; font-weight: 500; background: var(--wash); color: var(--ink-2); white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+  font-size: var(--t-meta); font-weight: 500; background: var(--wash); color: var(--ink-2); white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
 }
+/* a lamp and a word: ready (green), on air (amber: only ever a person), stop (red: a problem to fix) */
 .badge.ok { color: var(--ready-ink); }
-.badge.ok::before, .badge.warn::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--ready); flex: none; }
+.badge.ok::before, .badge.warn::before, .badge.bad::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--ready); flex: none; }
 .badge.warn { color: var(--air-ink); }
 .badge.warn::before { background: var(--air); }
+.badge.bad { color: var(--stop-ink); }
+.badge.bad::before { background: var(--stop); }
 
 .list { list-style: none; margin: 0; padding: 0; }
 .list .li { display: flex; gap: var(--s3); align-items: center; padding: var(--s3) 0; border-bottom: 1px solid var(--rule); flex-wrap: wrap; }
@@ -79,7 +82,7 @@ select.inline { width: auto; min-width: 150px; min-height: 38px; padding: 6px 10
 /* ------------------------------------------------------------------ someone wants to connect (the on-air moment) */
 .request-stack { display: grid; gap: var(--s3); margin: var(--s4) 0; }
 .card.request {
-  margin: 0; padding: var(--s5); background: var(--panel); border: 1px solid var(--air-rule);
+  margin: 0; padding: var(--s5); background: var(--panel); border: 1px solid var(--air);
   box-shadow: 0 0 0 4px var(--air-wash);
 }
 .request-head { display: flex; gap: var(--s3); align-items: flex-start; }
@@ -91,7 +94,7 @@ select.inline { width: auto; min-width: 150px; min-height: 38px; padding: 6px 10
   background: var(--air-wash); color: var(--air-ink); font-weight: 500; line-height: 1.45;
 }
 .row.checks { gap: var(--s5); margin: var(--s2) 0; }
-label.check { display: inline-flex; align-items: center; gap: 10px; min-height: 36px; font-size: 15px; cursor: pointer; }
+label.check { display: inline-flex; align-items: center; gap: 10px; min-height: 36px; font-size: var(--t-control); cursor: pointer; }
 label.check input { width: 20px; height: 20px; margin: 0; accent-color: var(--fader); flex: none; }
 .request-actions { margin-top: var(--s4); gap: var(--s2); }
 .request-actions button { min-width: 112px; }
@@ -100,7 +103,8 @@ label.check input { width: 20px; height: 20px; margin: 0; accent-color: var(--fa
 .card.request > p.muted { margin: var(--s3) 0 0; }
 
 /* guests' switches in "Connected now" */
-.mini-switch { display: inline-flex; align-items: center; gap: var(--s2); margin-right: var(--s4); cursor: pointer; }
+.mini-switch { display: inline-flex; align-items: center; gap: var(--s2); margin-right: var(--s4); }
+.mini-switch > label { cursor: pointer; }
 .row.checks .mini-switch { margin-right: 0; }
 
 /* ------------------------------------------------------------------ let someone connect */
@@ -114,6 +118,11 @@ label.check input { width: 20px; height: 20px; margin: 0; accent-color: var(--fa
 .share-qr figcaption { text-align: center; }
 .qr { background: #fff; border-radius: 12px; padding: 8px; width: 132px; }
 .qr svg { display: block; width: 100%; height: auto; }
+/* advice beside the code: worth reading, but nobody is here yet, so no on-air colour */
+.callout {
+  margin: var(--s4) 0; padding: var(--s3) var(--s4); border-radius: var(--r-control);
+  background: var(--wash); color: var(--ink); font-weight: 500; line-height: 1.45;
+}
 .steps { margin: var(--s3) 0 var(--s4); padding-left: 1.3em; color: var(--ink-2); }
 .steps li { margin: var(--s2) 0; padding-left: var(--s1); }
 .steps li::marker { color: var(--ink-3); font-variant-numeric: tabular-nums; }
@@ -141,14 +150,14 @@ label.check input { width: 20px; height: 20px; margin: 0; accent-color: var(--fa
 @media (prefers-reduced-motion: reduce) { .switch span, .switch span::after { transition: none; } }
 
 /* messages */
-.msg { font-size: 14px; margin: var(--s2) 0 0; min-height: 0; }
+.msg { font-size: var(--t-label); margin: var(--s2) 0 0; min-height: 0; }
 .msg:empty { margin: 0; }
 .msg.ok { color: var(--ready-ink); font-weight: 500; }
 .msg.err { color: var(--stop-ink); font-weight: 500; }
 
 /* key/value facts */
 .kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--s2) var(--s5); margin: 0; align-items: baseline; }
-.kv dt, .kv .k { color: var(--ink-3); font-size: 14px; }
+.kv dt, .kv .k { color: var(--ink-3); font-size: var(--t-label); }
 .kv dd { margin: 0; min-width: 0; }
 
 /* forms in the window */
@@ -172,5 +181,11 @@ form.signin input, form.name-form input { max-width: 420px; }
   .request-actions button { flex: 1 1 100px; min-width: 0; }
   .kv { grid-template-columns: 1fr; gap: 2px; }
   .kv dd { margin-bottom: var(--s2); }
-  .code-big { font-size: 30px; }
+  .code-big { font-size: var(--t-h1); }
+}
+
+/* ------------------------------------------------------------------ touch: 44px targets for fingers */
+@media (pointer: coarse) {
+  .nav-item, button.sm, select.inline, label.check { min-height: 44px; }
+  .switch::before { content: ""; position: absolute; inset: -9px -4px; } /* the switch answers a finger around it too */
 }
