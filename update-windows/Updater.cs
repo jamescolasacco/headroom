@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using System.Diagnostics;
-using System.IO.Compression;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -20,7 +19,8 @@ namespace Headroom.Update;
 ///    certificate (update-signing.cer next to it), SHA256SUMS.txt.sig must be that certificate's signature over
 ///    it, or nothing is installed;
 ///  - update.json (listed in SHA256SUMS.txt) says which version it is; only a newer one is installed;
-///  - the download holds this app at that version, and its own installer, which then does the rest.
+///  - the download is that version's installer (Headroom-Server-Setup.exe / Headroom-Viewer-Setup.exe, the same
+///    one people download), which installs it silently: Apps &amp; Features shows the new version too.
 /// </summary>
 public sealed class Updater : IDisposable
 {
@@ -45,8 +45,8 @@ public sealed class Updater : IDisposable
     private System.Threading.Timer? _timer;
     private int _busy;
     private readonly object _lock = new();
-    /// <summary>The verified download (its file name in the version's folder, and its SHA-256).</summary>
-    private string? ZipName, ZipSha;
+    /// <summary>The verified installer (its file name in the version's folder, and its SHA-256).</summary>
+    private string? _setupName, _setupSha;
 
     public string Current { get; }
     public State Now { get; private set; }
@@ -120,35 +120,35 @@ public sealed class Updater : IDisposable
     {
         error = null;
         if (Now.Phase != "ready" || Now.Version is not { } version) { error = "There's no downloaded update to install."; return false; }
-        var dir = Path.Combine(_cacheDir, version);
-        var stage = Path.Combine(dir, "x");
-        if (!Validate(stage, version)) { error = "The downloaded update is incomplete."; return false; }
+        var setup = Path.Combine(_cacheDir, version, _setupName ?? "");
+        if (_setupName == null || _setupSha == null || !File.Exists(setup) || Sha256File(setup) != _setupSha || !Validate(setup, version))
+        {
+            error = "The downloaded update is incomplete.";
+            return false;
+        }
+        const string silent = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS";
         ProcessStartInfo psi;
         if (_app == App.Viewer)
         {
-            // Same user, same rights: its own installer, straight from the download.
-            var script = Path.Combine(stage, Folder, "install-viewer.ps1");
-            psi = new ProcessStartInfo("powershell.exe", $"-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{script}\" -Update");
+            // Same user, same rights: the installer straight from the download (it opens the new Viewer at the end).
+            psi = new ProcessStartInfo(setup, silent);
         }
         else
         {
             // As administrator (it replaces Program Files and restarts the service). The download sits in this
-            // user's folder, so the elevated side doesn't run it from there: it copies the zip into a folder only
-            // administrators can change, checks the SHA-256 again (from the signed checksums), unpacks it there and
-            // runs that copy's installer.
-            var zip = Path.Combine(dir, ZipName ?? "");
-            if (ZipName == null || ZipSha == null || !File.Exists(zip)) { error = "The downloaded update is incomplete."; return false; }
+            // user's folder, so the elevated side doesn't run it from there: it copies it into a folder only
+            // administrators can change, checks its SHA-256 again (from the signed checksums) and runs that copy.
             var ps = string.Join("\n",
                 "$ErrorActionPreference = 'Stop'",
-                $"$zip = '{zip.Replace("'", "''")}'",
-                $"$sha = '{ZipSha}'",
+                $"$src = '{setup.Replace("'", "''")}'",
+                $"$sha = '{_setupSha}'",
                 "$dir = Join-Path $env:windir ('Temp\\HeadroomUpdate-' + [guid]::NewGuid())",
                 "New-Item -ItemType Directory -Path $dir | Out-Null",
                 "try {",
-                "  Copy-Item -LiteralPath $zip -Destination (Join-Path $dir 'update.zip')",
-                "  if ((Get-FileHash -Algorithm SHA256 (Join-Path $dir 'update.zip')).Hash -ne $sha) { throw 'The update changed after it was checked.' }",
-                "  Expand-Archive -LiteralPath (Join-Path $dir 'update.zip') -DestinationPath (Join-Path $dir 'x')",
-                "  & (Join-Path $dir 'x\\Headroom\\install.ps1') -Update",
+                "  $exe = Join-Path $dir 'Headroom-Server-Setup.exe'",
+                "  Copy-Item -LiteralPath $src -Destination $exe",
+                "  if ((Get-FileHash -Algorithm SHA256 $exe).Hash -ne $sha) { throw 'The update changed after it was checked.' }",
+                $"  Start-Process -FilePath $exe -ArgumentList '{silent}' -Wait",
                 "} finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }");
             var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(ps));
             psi = new ProcessStartInfo("powershell.exe", $"-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand {encoded}") { Verb = "runas" };
@@ -165,9 +165,6 @@ public sealed class Updater : IDisposable
     }
 
     // ------------------------------------------------------------------ the check
-
-    private string Folder => _app == App.Server ? "Headroom" : "HeadroomViewer";
-    private string Exe => _app == App.Server ? "HeadroomServer.exe" : "HeadroomViewer.exe";
 
     private async Task RunAsync()
     {
@@ -192,38 +189,34 @@ public sealed class Updater : IDisposable
         }
         var assetKey = _app == App.Server ? "windowsServer" : "windowsViewer";
         var asset = manifest.RootElement.TryGetProperty(assetKey, out var a) && a.GetString() is { Length: > 0 } n ? n
-            : _app == App.Server ? "Headroom-Server-Windows-x64.zip" : "Headroom-Viewer-Windows-x64.zip";
+            : _app == App.Server ? "Headroom-Server-Setup.exe" : "Headroom-Viewer-Setup.exe";
         if (!hashes.TryGetValue(asset, out var expected)) throw new UpdateException($"{asset} isn't in the release's checksums.");
 
         var dir = Path.Combine(_cacheDir, version);
-        var stage = Path.Combine(dir, "x");
-        if (File.Exists(Path.Combine(dir, "ready")) && Validate(stage, version) && File.Exists(Path.Combine(dir, asset)) && Sha256File(Path.Combine(dir, asset)) == expected)
+        var setup = Path.Combine(dir, asset);
+        if (File.Exists(setup) && Sha256File(setup) == expected && Validate(setup, version))
         {
-            (ZipName, ZipSha) = (asset, expected);
+            (_setupName, _setupSha) = (asset, expected);
             Set(Now with { Phase = "ready", Version = version, Progress = 1, CheckedAt = DateTime.Now });
             return;
         }
         if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
         Directory.CreateDirectory(dir);
         Set(Now with { Phase = "downloading", Version = version, Progress = 0 });
-        var zip = Path.Combine(dir, asset);
-        await DownloadAsync(asset, zip);
-        if (Sha256File(zip) != expected) throw new UpdateException($"{asset} didn't match its checksum, so it wasn't installed.");
-        ZipFile.ExtractToDirectory(zip, stage);
-        if (!Validate(stage, version)) throw new UpdateException("The download isn't a Headroom release for this PC.");
-        (ZipName, ZipSha) = (asset, expected);
-        File.WriteAllBytes(Path.Combine(dir, "ready"), Array.Empty<byte>());
+        await DownloadAsync(asset, setup);
+        if (Sha256File(setup) != expected) throw new UpdateException($"{asset} didn't match its checksum, so it wasn't installed.");
+        if (!Validate(setup, version)) throw new UpdateException("The download isn't a Headroom installer for that version.");
+        (_setupName, _setupSha) = (asset, expected);
         Set(Now with { Phase = "ready", Progress = 1, CheckedAt = DateTime.Now });
     }
 
-    /// <summary>The unzipped release holds this app, at that version, and its installer.</summary>
-    private bool Validate(string stage, string version)
+    /// <summary>The installer says it's that version (its file version, set from the release's version).</summary>
+    private static bool Validate(string setup, string version)
     {
-        var exe = Path.Combine(stage, Folder, Exe);
-        var script = Path.Combine(stage, Folder, _app == App.Server ? "install.ps1" : "install-viewer.ps1");
-        if (!File.Exists(exe) || !File.Exists(script)) return false;
-        var v = FileVersionInfo.GetVersionInfo(exe).ProductVersion ?? "";
-        return Strip(v) == version;
+        var v = FileVersionInfo.GetVersionInfo(setup);
+        var text = !string.IsNullOrEmpty(v.ProductVersion) ? v.ProductVersion! : v.FileVersion ?? "";
+        var found = Strip(text);
+        return found.Length > 0 && !IsNewer(found, version) && !IsNewer(version, found); // 1.2.3 is 1.2.3.0
     }
 
     private async Task<byte[]> FetchAsync(string name)

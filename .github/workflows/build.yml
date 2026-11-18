@@ -154,6 +154,18 @@ jobs:
           New-Item -ItemType Directory -Force dist/release | Out-Null
           Compress-Archive -Path dist/Headroom -DestinationPath dist/release/Headroom-Server-Windows-x64.zip
           Compress-Archive -Path dist/HeadroomViewer -DestinationPath dist/release/Headroom-Viewer-Windows-x64.zip
+      - name: Installers
+        # What people download (and what the apps' updaters run, silently): Inno Setup, from tools/windows-installer.
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y | Out-Null
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc)) { $iscc = (Get-Command iscc -ErrorAction Stop).Source }
+          $v = ((Get-Item dist\Headroom\HeadroomServer.exe).VersionInfo.ProductVersion -split '[+-]')[0]
+          foreach ($iss in 'HeadroomServer', 'HeadroomViewer') {
+            & $iscc /Q "/DVersion=$v" "tools\windows-installer\$iss.iss"
+            if ($LASTEXITCODE -ne 0) { throw "$iss.iss didn't build" }
+          }
           Get-ChildItem dist/release | Format-Table Name, Length
       - name: Accounts, relay and guest code checks
         # One step: on Windows runners, processes started in a step end with it.
@@ -186,6 +198,25 @@ jobs:
           Write-Host "`n--- account server log"; Get-Content "$t\accounts.log", "$t\accounts.err" -Tail 30 -ErrorAction SilentlyContinue
           Stop-Process -Id $hostProc.Id, $acct.Id -Force -ErrorAction SilentlyContinue
           exit $code
+      - name: The installers install (and uninstall)
+        shell: pwsh
+        run: |
+          $silent = '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+          Start-Process dist\release\Headroom-Viewer-Setup.exe -ArgumentList $silent -Wait
+          $viewer = Join-Path $env:LOCALAPPDATA 'Programs\Headroom Viewer'
+          if (-not (Test-Path "$viewer\HeadroomViewer.exe")) { throw "Headroom Viewer wasn't installed" }
+          if (-not (Test-Path "$viewer\update-signing.cer") -and (Test-Path assets\headroom-signing.cer)) { throw "Headroom Viewer has no update-signing.cer" }
+          Get-Process HeadroomViewer -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Process dist\release\Headroom-Server-Setup.exe -ArgumentList $silent -Wait
+          $dst = Join-Path $env:ProgramFiles 'Headroom'
+          if (-not (Test-Path "$dst\HeadroomServer.exe")) { throw "Headroom Server wasn't installed" }
+          $svc = Get-Service Headroom -ErrorAction Stop
+          Write-Host "Headroom service: $($svc.Status), start $($svc.StartType)"
+          Get-Process HeadroomServer -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Process "$dst\unins000.exe" -ArgumentList $silent -Wait
+          Start-Process "$viewer\unins000.exe" -ArgumentList $silent -Wait
+          Start-Sleep -Seconds 5
+          Write-Host "after uninstall: service $(if (Get-Service Headroom -ErrorAction SilentlyContinue) { 'still there' } else { 'removed' }), Program Files\Headroom $(if (Test-Path $dst) { 'still there' } else { 'removed' })"
       - uses: actions/upload-artifact@v4
         with:
           name: windows
@@ -213,7 +244,7 @@ jobs:
         run: |
           cd release
           # What the apps' updaters read first: the version, and which download is whose.
-          printf '{"version":"%s","mac":"Headroom-macOS.zip","windowsServer":"Headroom-Server-Windows-x64.zip","windowsViewer":"Headroom-Viewer-Windows-x64.zip","release":"https://github.com/%s/releases/tag/%s"}\n' \
+          printf '{"version":"%s","mac":"Headroom-macOS.zip","windowsServer":"Headroom-Server-Setup.exe","windowsViewer":"Headroom-Viewer-Setup.exe","release":"https://github.com/%s/releases/tag/%s"}\n' \
             "${GITHUB_REF_NAME#v}" "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" > update.json
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt

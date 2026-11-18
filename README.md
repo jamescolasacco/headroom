@@ -21,16 +21,18 @@ is in this repository for running your own.
 
 ## Install
 
-**Mac** (macOS 13+, Apple silicon or Intel): paste into Terminal:
-```bash
-curl -fsSL https://github.com/jamescolasacco/headroom/releases/latest/download/get-macos.sh | bash
-```
-It installs Headroom Server and Headroom Viewer into /Applications and starts Headroom Server; allow Screen
-Recording and Accessibility when asked.
+Everything is on the [latest release](https://github.com/jamescolasacco/headroom/releases/latest), and updates
+itself afterwards (see [Updates](#updates)).
 
-**Windows** (10/11, x64): download the Server and Viewer zips from the
-[latest release](https://github.com/jamescolasacco/headroom/releases/latest), extract, and run `install.ps1`
-(Server, as administrator) or `install-viewer.ps1` (Viewer).
+**Mac** (macOS 13+, Apple silicon or Intel): download **Headroom-macOS.dmg**, open it and drag both apps onto
+Applications, then open Headroom Server. Headroom isn't notarized by Apple, so the first time macOS says it can't
+check it: click Done, then **System Settings → Privacy & Security → Open Anyway** (once per app). Allow Screen
+Recording and Accessibility when Headroom Server asks. (Or in Terminal, without the Open Anyway step:
+`curl -fsSL https://github.com/jamescolasacco/headroom/releases/latest/download/get-macos.sh | bash`.)
+
+**Windows** (10/11, x64): download and run **Headroom-Server-Setup.exe** on the PC you want to reach, and
+**Headroom-Viewer-Setup.exe** where you connect from. They aren't code-signed, so Windows may say it protected
+your PC: More info → Run anyway.
 
 **iPhone / iPad, or any browser:** nothing to install. Open https://relay.colasac.co.
 
@@ -94,7 +96,8 @@ silicon). The first build fetches SwiftNIO, swift-nio-ssl and swift-certificates
 
 ## Headroom Server (Windows)
 
-- **Install** (recommended). Run as administrator:
+- **Install** (recommended): the release's **Headroom-Server-Setup.exe** (`tools/windows-installer`, built by the
+  release workflow with Inno Setup), or from a build, as administrator:
   ```bash
   powershell -ExecutionPolicy Bypass -File dist\Headroom\install.ps1
   ```

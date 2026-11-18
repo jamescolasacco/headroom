@@ -1,7 +1,9 @@
 #!/bin/bash
 # Packages the apps built by tools/build-macos.sh for a release:
-#   dist/release/Headroom-macOS.zip   Headroom/{Headroom Server.app, Headroom Viewer.app, install.sh, uninstall.sh}
-#   dist/release/get-macos.sh         the one-line installer that downloads it
+#   dist/release/Headroom-macOS.dmg   what people download: open it, drag both apps to Applications
+#   dist/release/Headroom-macOS.zip   Headroom/{Headroom Server.app, Headroom Viewer.app, install.sh, uninstall.sh}:
+#                                     what the apps' updaters download (and the Terminal install)
+#   dist/release/get-macos.sh         the one-line Terminal installer that downloads it
 #
 #   tools/build-macos.sh --universal && tools/package-macos.sh
 set -euo pipefail
@@ -34,4 +36,12 @@ TXT
 (cd "$OUT/stage" && ditto -c -k --sequesterRsrc --keepParent Headroom "$OUT/Headroom-macOS.zip")
 rm -rf "$OUT/stage"
 cp "$ROOT/tools/get-macos.sh" "$OUT/get-macos.sh"
+
+# The disk image: both apps and a shortcut to Applications to drag them onto.
+mkdir -p "$OUT/dmg"
+ditto "$DIST/Headroom Server.app" "$OUT/dmg/Headroom Server.app"
+ditto "$DIST/Headroom Viewer.app" "$OUT/dmg/Headroom Viewer.app"
+ln -s /Applications "$OUT/dmg/Applications"
+hdiutil create -quiet -volname "Headroom" -srcfolder "$OUT/dmg" -fs HFS+ -format UDZO -ov "$OUT/Headroom-macOS.dmg"
+rm -rf "$OUT/dmg"
 ls -lh "$OUT"
