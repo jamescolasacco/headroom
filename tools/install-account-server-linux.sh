@@ -68,9 +68,12 @@ run_as_service_user() { # the CLI, with the service's data directory
 
 accounts="$(run_as_service_user list-users | grep -c . || true)"
 if [ -n "$ADMIN" ] && [ "$accounts" = 0 ]; then
+  # The running server keeps the accounts in memory and would overwrite the new one when it stops: stop it first.
+  systemctl stop headroom-accounts 2>/dev/null || true
   echo "Creating the account '$ADMIN'."
   run_as_service_user add-user "$ADMIN"
-  accounts=1
+  accounts="$(run_as_service_user list-users | grep -c . || true)"
+  [ "$accounts" != 0 ] || { echo "The account wasn't created (see above)." >&2; exit 1; }
 fi
 
 cat > "$UNIT" <<EOF

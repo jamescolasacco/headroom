@@ -72,6 +72,7 @@ cat > "$PLIST" <<EOF
 EOF
 
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+sleep 1
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 sleep 1
 if curl -fs "http://127.0.0.1:$PORT/api/info" > /dev/null; then

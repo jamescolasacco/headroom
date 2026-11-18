@@ -27,8 +27,11 @@ jobs:
         run: for f in web/js/*.js web/js/*/*.js web/sw.js tools/*.mjs account-server/*.mjs; do node --check "$f"; done
       - name: Linux service install (tools/install-account-server-linux.sh)
         run: |
+          # Installed first without an account (the service is running), then the account added: it must survive.
+          sudo tools/install-account-server-linux.sh --port 8790
+          curl -fs http://127.0.0.1:8790/api/info | grep -q '"firstAccount":true'
           echo 'ci-password-123' | sudo tools/install-account-server-linux.sh --admin ci-admin --port 8790
-          curl -fs http://127.0.0.1:8790/api/info
+          curl -fs http://127.0.0.1:8790/api/info | grep -q '"firstAccount":false' 
           curl -fs -X POST -H 'Content-Type: application/json' -d '{"username":"ci-admin","password":"ci-password-123","deviceName":"ci"}' \
             http://127.0.0.1:8790/api/account/login | grep -q '"token"'
           status=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \

@@ -776,7 +776,25 @@ function ask(prompt, hidden) {
   return new Promise(resolve => rl.question(prompt, a => { rl.close(); if (hidden && process.stdin.isTTY) process.stdout.write('\n'); resolve(a); }));
 }
 
+/** The pid of a server running on this data directory, if any (it keeps the database in memory). */
+function runningServer() {
+  try {
+    const pid = Number(fs.readFileSync(path.join(DATA_DIR, 'server.pid'), 'utf8'));
+    if (!pid) return 0;
+    process.kill(pid, 0);
+    return pid;
+  } catch (e) {
+    return e.code === 'EPERM' ? -1 : 0; // EPERM: alive, but another user's
+  }
+}
+
 async function cli(cmd, args) {
+  // A running server would overwrite changes made here with its in-memory copy: refuse instead.
+  if (['add-user', 'reset-password', 'reset-2fa', 'delete-user'].includes(cmd) && runningServer()) {
+    console.log('The account server is running on this data directory. Stop it first (e.g. sudo systemctl stop headroom-accounts),');
+    console.log('run this again, then start it.');
+    return 1;
+  }
   const store = new Store(DATA_DIR);
   const name = normalizeName(args[0]);
   const account = name && store.accountByName(name);
@@ -847,7 +865,14 @@ async function main() {
     if (!tls) log('serving plain HTTP: put it behind HTTPS (a reverse proxy, or TLS_CERT/TLS_KEY) before using it beyond this machine');
     log(`relay: ${RELAY ? 'on — computers in an account are reachable at /r/<Headroom ID>/' : 'off'}`);
   });
-  const stop = () => { store.save(); server.close(() => process.exit(0)); setTimeout(() => process.exit(0), 2000).unref(); };
+  const pidFile = path.join(DATA_DIR, 'server.pid');
+  fs.writeFileSync(pidFile, String(process.pid));
+  const stop = () => {
+    store.save();
+    try { fs.unlinkSync(pidFile); } catch { }
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 2000).unref();
+  };
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
 }
