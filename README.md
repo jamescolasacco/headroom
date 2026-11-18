@@ -196,7 +196,10 @@ Pairing works computer by computer. With an account, each device signs in once a
    Viewer) → **Sign in to your account**.
 
 Tap your account name to remove devices, make one view-only, turn on two-factor sign-in or change the password.
-Pairing keeps working alongside. Details and the trust model: [docs/ACCOUNTS.md](docs/ACCOUNTS.md).
+The first account is the server's administrator: **Manage people** invites others with a single-use link, resets
+passwords and two-factor, and assigns roles; each person sees only their own computers. Pairing keeps working
+alongside. Details, security controls (NIST SP 800-63B / OWASP ASVS) and the trust model:
+[docs/ACCOUNTS.md](docs/ACCOUNTS.md).
 
 ## From anywhere, and remote support
 

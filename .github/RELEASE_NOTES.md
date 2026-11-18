@@ -1,5 +1,20 @@
 Self-hosted remote desktop for your own computers: **Headroom Server** on the computer you want to reach, **Headroom Viewer** (or the iPhone/iPad web app) on the device you use. Pair devices one by one, or run your own small account server and sign in once.
 
+## New in 0.3: people and a plain login
+
+- **Sign in like any other service.** The apps sign in to the built-in account server (set in `web/js/config.js`);
+  signed out, the home screen is just a login.
+- **People.** The first account is the administrator: invite others with a single-use link (they pick their own
+  password), send password-reset links, reset two-factor, assign roles, remove accounts. Each person sees only
+  their own computers.
+- **Security, aligned with NIST SP 800-63B and OWASP ASVS:** 12-character minimum with checks against common and
+  breached passwords, stronger password hashing (upgraded at your next sign-in), re-entering your password for
+  sensitive changes, other devices signed out when a password changes, idle sign-ins expiring after 90 days, a
+  strict Content-Security-Policy and HSTS, and an audit log. See
+  [docs/ACCOUNTS.md](https://github.com/jamescolasacco/headroom/blob/master/docs/ACCOUNTS.md#security-controls).
+- **Updating your account server:** `cd headroom && git pull && sudo tools/install-account-server-linux.sh`.
+  Existing accounts keep working; the oldest becomes the administrator.
+
 ## New in 0.2: from anywhere, and remote support
 
 - **Any browser, any network.** Your account server is now also a relay: computers keep an outbound connection

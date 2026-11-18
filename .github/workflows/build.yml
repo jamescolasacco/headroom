@@ -30,15 +30,15 @@ jobs:
           # Installed first without an account (the service is running), then the account added: it must survive.
           sudo tools/install-account-server-linux.sh --port 8790
           curl -fs http://127.0.0.1:8790/api/info | grep -q '"firstAccount":true'
-          echo 'ci-password-123' | sudo tools/install-account-server-linux.sh --admin ci-admin --port 8790
+          echo 'quartz-lantern-ferry-81' | sudo tools/install-account-server-linux.sh --admin ci-admin --port 8790
           curl -fs http://127.0.0.1:8790/api/info | grep -q '"firstAccount":false' 
-          curl -fs -X POST -H 'Content-Type: application/json' -d '{"username":"ci-admin","password":"ci-password-123","deviceName":"ci"}' \
+          curl -fs -X POST -H 'Content-Type: application/json' -d '{"username":"ci-admin","password":"quartz-lantern-ferry-81","deviceName":"ci"}' \
             http://127.0.0.1:8790/api/account/login | grep -q '"token"'
           status=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
             -d '{"username":"eve","password":"longenough1"}' http://127.0.0.1:8790/api/account/register)
           test "$status" = 403 || { echo "public sign-up should be closed, got $status"; exit 1; }
           sudo tools/install-account-server-linux.sh --port 8790   # updating keeps the account
-          curl -fs -X POST -H 'Content-Type: application/json' -d '{"username":"ci-admin","password":"ci-password-123","deviceName":"ci"}' \
+          curl -fs -X POST -H 'Content-Type: application/json' -d '{"username":"ci-admin","password":"quartz-lantern-ferry-81","deviceName":"ci"}' \
             http://127.0.0.1:8790/api/account/login | grep -q '"token"'
           sudo tools/install-account-server-linux.sh --uninstall
 
@@ -72,9 +72,9 @@ jobs:
           done
           echo "the host or the account server didn't start"; cat "$RUNNER_TEMP/host.log" "$RUNNER_TEMP/accounts.log"; exit 1
       - name: Accounts check
-        run: node tools/account-check.mjs --account=http://127.0.0.1:8780 --username=ci-test --password=ci-password-123 --register
+        run: node tools/account-check.mjs --account=http://127.0.0.1:8780 --username=ci-test --password=quartz-lantern-ferry-81 --register
       - name: Relay and remote support check
-        run: node tools/relay-check.mjs --account=http://127.0.0.1:8780 --username=ci-test --password=ci-password-123
+        run: node tools/relay-check.mjs --account=http://127.0.0.1:8780 --username=ci-test --password=quartz-lantern-ferry-81
       - name: Protocol check
         run: node tools/protocol-check.mjs --url=http://127.0.0.1:7080 --seconds=4 --out="$RUNNER_TEMP/check.h264"
       - name: Host log
@@ -124,11 +124,11 @@ jobs:
           }
           $code = 1
           if ($up) {
-            node tools/account-check.mjs --account=http://127.0.0.1:8780 --username=ci-test --password=ci-password-123 --register
+            node tools/account-check.mjs --account=http://127.0.0.1:8780 --username=ci-test --password=quartz-lantern-ferry-81 --register
             $code = $LASTEXITCODE
             # Video can't stream on a runner without a desktop, so the relay check's streaming step is informational
             # here; everything else in it must pass.
-            node tools/relay-check.mjs --account=http://127.0.0.1:8780 --username=ci-test --password=ci-password-123 --frames=0
+            node tools/relay-check.mjs --account=http://127.0.0.1:8780 --username=ci-test --password=quartz-lantern-ferry-81 --frames=0
             if ($LASTEXITCODE -ne 0) { $code = $LASTEXITCODE }
             # A hosted runner may have no desktop to capture: this shows how far the stream gets, without failing the build.
             node tools/protocol-check.mjs --url=http://127.0.0.1:7080 --seconds=4 --out="$t\check.h264"

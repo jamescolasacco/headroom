@@ -56,11 +56,47 @@ Tailscale machine, or a reverse proxy such as Caddy, gives it a real certificate
 
 Paired computers stay in the list next to the account's; a computer that is both shows once.
 
+## People
+
+The first account on a server is its **administrator**. Public sign-up is off after that (`SIGNUP=first`, the
+default; the Linux installer uses `SIGNUP=closed` and creates the administrator itself). Administrators tap their
+name → **Manage people**:
+
+- **Invite someone:** creates a link (`https://<server>/#invite=…`) that works once, for 7 days. The person
+  chooses their own username and password; the administrator never knows it. An invite can make an administrator
+  (that needs the administrator's password).
+- **Reset password:** a link that works once, for 24 hours. Using it sets a new password and signs out that
+  person's browsers and phones.
+- **Reset two-factor**, **make or remove administrator**, **delete** (with their devices and computers): each asks
+  for the administrator's password again, and the last administrator can't be removed.
+
+Each person has their own computers and devices; nobody sees anyone else's. On the server itself:
+`add-user <name> [--admin]`, `list-users`, `reset-password`, `reset-2fa`, `make-admin`, `make-user`, `delete-user`
+(stop the server first: they refuse to run beside it, since it would overwrite their changes).
+
+## Security controls
+
+Aligned with **NIST SP 800-63B** (Digital Identity Guidelines: authentication) and the **OWASP Application Security
+Verification Standard (ASVS)** for authentication, session management and HTTP security. This is a self-assessment,
+not a certification.
+
+| area | what the account server does |
+|---|---|
+| Password rules | At least 12 characters (`MIN_PASSWORD`), up to 256, any characters including spaces and Unicode (compared in NFKC form); no composition rules or forced expiry. Refused: the username inside it, repeated or keyboard/sequential runs, common passwords, and passwords found in breaches (Have I Been Pwned range API: only the first 5 hex digits of a SHA-1 leave the server; `BREACH_CHECK=off` disables it). A password set under an older rule still works; the app asks for a change. |
+| Password storage | scrypt, N=2¹⁵, r=8, p=3 (OWASP Password Storage Cheat Sheet equivalent), 16-byte random salt per password, parameters stored per record and upgraded at the next sign-in. |
+| Second factor | Optional TOTP (RFC 6238, SHA-1, 6 digits, 30 s, ±1 step), each code accepted once. |
+| Brute force | Failed sign-ins, codes and link lookups throttled per address and per username (5 free, then exponential up to 15 minutes) plus a global cap; unknown usernames and wrong passwords get the same answer and the same work. |
+| Sessions | Each sign-in is a 256-bit random token stored only as SHA-256; listed per account and revocable. Changing a password signs out the account's other browsers and phones; a reset link signs out all of them; browsers and phones unused for 90 days are signed out (`DEVICE_IDLE_DAYS`). |
+| Re-authentication | The current password is required to change the password or turn off two-factor, and an administrator's password to change roles, reset someone's two-factor, delete an account or invite an administrator. |
+| Links | Invite and reset tokens are 256-bit, single-use, short-lived, and stored only as SHA-256. They travel in the URL fragment, which browsers don't send to servers or in Referer headers. |
+| Transport and browser | Meant to run behind HTTPS; sends `Strict-Transport-Security` when it is. The web app gets a strict `Content-Security-Policy` (own scripts only, no framing), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy` and a restrictive `Permissions-Policy`. No cookies: the API uses bearer tokens, so CORS can't be abused for cross-site requests. |
+| Audit | Sign-ins (and failures), password and two-factor changes, invites, resets and every administrative action are logged as `audit:` lines (journalctl on Linux). Passwords and tokens are never logged. |
+| Data at rest | `db.json` and `secret.key` are created mode 600 in a 700 directory; no passwords or tokens are stored in recoverable form. |
+
 ## Trust model
 
-- **Passwords** are hashed with scrypt (N=2¹⁵, r=8) on the account server and are only sent to it, never to
-  computers. Two-factor sign-in is RFC 6238 TOTP with replay protection. Failed sign-ins are rate limited per
-  address and per username.
+- **Passwords** are hashed on the account server (see Security controls) and are only sent to it, never to
+  computers.
 - **Device credentials.** Signing in creates a device (`viewer`) or computer (`computer`) with a 256-bit bearer
   token; the server stores only its SHA-256.
 - **Per-computer keys.** For each device and computer the server derives
@@ -96,8 +132,16 @@ All bodies are JSON. `Authorization: Bearer <token>` where noted. Errors: `{"err
 | method | path | auth | |
 |---|---|---|---|
 | GET | `/api/info` | — | `{service: "headroom-account-server", name, version, signup, firstAccount}` |
-| POST | `/api/account/register` | — | `{username, password (8+), deviceName, platform}` → as login (only while sign-up is allowed) |
-| POST | `/api/account/login` | — | `{username, password, totp?, deviceName, platform, kind: "viewer"\|"computer"}` → `{token, device: {id, name}, account: {id, username}}` |
+| POST | `/api/account/register` | — | `{username, password, deviceName, platform, invite?}` → as login (with an invite, or while sign-up is allowed) |
+| GET | `/api/invite/:token`, `/api/reset/:token` | — | what an invite or reset link is for (rate limited) |
+| POST | `/api/account/reset` | — | `{token, password}`: sets the password from a reset link, signs out the account's devices |
+| GET | `/api/admin/users`, `/api/admin/invites` | admin | accounts (role, two-factor, device counts, last activity); open invites |
+| POST | `/api/admin/invites` | admin | `{role, note, password?}` → `{token, expires}` (the token is shown once) |
+| DELETE | `/api/admin/invites/:id` | admin | cancel an invite |
+| POST | `/api/admin/users/:id/reset-link` | admin | → `{token, expires}` |
+| POST | `/api/admin/users/:id/reset-2fa`, `/api/admin/users/:id` `{role}` | admin + password | |
+| DELETE | `/api/admin/users/:id` | admin + password | delete an account with its devices and computers |
+| POST | `/api/account/login` | — | `{username, password, totp?, deviceName, platform, kind: "viewer"\|"computer"}` → `{token, device: {id, name}, account: {id, username, role, totpEnabled}, passwordWeak}` |
 | POST | `/api/account/logout` | device | deletes this device |
 | GET | `/api/account/me` | device | `{account: {id, username, totpEnabled}, device}` |
 | GET | `/api/account/devices` | viewer | `{devices: [{id, kind, name, platform, created, lastSeen, lastAddress, viewOnly, current, online}]}` |
