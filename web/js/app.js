@@ -7,6 +7,7 @@ import { I } from './ui/icons.js';
 import { qrSvg } from './qr.js';
 import { deviceLabel, platformId, secure, hasWebCodecs, isStandalone, isIOS, isMac, nativeViewer, postNative, onNative } from './platform.js';
 import * as Account from './account.js';
+import { DEFAULT_ACCOUNT_SERVER } from './config.js';
 
 const $ = id => document.getElementById(id);
 let session = null;
@@ -53,9 +54,9 @@ async function main() {
   if (toConnect) { connect(toConnect); return; }
   // A remote-support link: https://<relay>/#id=<Headroom ID>[&code=<support code>]
   if (hash.get('id')) { supportFlow({ id: hash.get('id'), code: hash.get('code') || '' }); return; }
-  // Served by a computer with nothing saved yet: offer to pair with it. (On the relay's own address, the home
-  // screen offers both signing in and connecting with an ID, so nothing pops up.)
-  if (!hosts.length && !code && !Account.loadAccount() && servedByComputer()) addHostFlow({ url: location.origin, info: sameOriginInfo });
+  // Served by a computer, with nothing saved and no account server to sign in to: offer to pair with it. (With an
+  // account server, the home screen is the login; pairing stays one link away.)
+  if (!hosts.length && !code && !Account.loadAccount() && servedByComputer() && !defaultServer()) addHostFlow({ url: location.origin, info: sameOriginInfo });
 }
 
 /** Account computers first, then paired ones (a computer that's both shows once, as the account's). */
@@ -100,9 +101,14 @@ function renderHome() {
   const hosts = allHosts().sort((a, b) => (b.lastConnected || 0) - (a.lastConnected || 0));
   const list = $('host-list');
   list.replaceChildren(...hosts.map(hostCard));
-  $('home-empty').hidden = hosts.length > 0;
-  $('btn-sign-in').hidden = !!acct;
-  $('btn-add-host').classList.toggle('primary', !!acct);
+  // Signed out: the home screen is the login (kept across re-renders so typing isn't lost).
+  const slot = $('signin-slot');
+  const inlineLogin = !acct && !!defaultServer();
+  if (inlineLogin && !slot.firstChild) slot.append(signInForm({ inline: true }));
+  if (!inlineLogin) slot.replaceChildren();
+  slot.hidden = !inlineLogin;
+  $('home-empty').hidden = hosts.length > 0 || inlineLogin;
+  $('btn-sign-in').hidden = !!acct || inlineLogin;
   const chip = $('account-chip');
   chip.hidden = !acct;
   if (acct) {
@@ -396,7 +402,7 @@ const pref = (k, v) => { try { if (v === undefined) return localStorage.getItem(
 /** AnyDesk-style: reach someone's computer with its Headroom ID and the one-time code they read out to you. */
 function supportFlow({ id = '', code = '' } = {}) {
   const acct = Account.loadAccount();
-  const knownRelay = servedByAccount() ? location.origin : acct?.server || pref('headroom.lastRelay');
+  const knownRelay = servedByAccount() ? location.origin : acct?.server || defaultServer() || pref('headroom.lastRelay');
   return dialog((dlg, done) => {
     const err = h('div', { class: 'error', role: 'alert' });
     const idIn = h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'off', placeholder: '123 456 789', value: Account.prettyId(id), 'aria-label': 'Headroom ID' });
@@ -465,84 +471,101 @@ function supportFlow({ id = '', code = '' } = {}) {
 
 const lastServerKey = 'headroom.lastAccountServer';
 
-/** Sign in to (or create) a Headroom account; then every computer in it shows up here. */
-async function signInFlow() {
-  let server = servedByAccount() ? location.origin : (() => { try { return localStorage.getItem(lastServerKey) || ''; } catch { return ''; } })();
+/** The account server this app signs in to: the page's own when served by one, else the configured default. */
+function defaultServer() {
+  if (servedByAccount()) return location.origin;
+  return DEFAULT_ACCOUNT_SERVER || pref(lastServerKey);
+}
+
+/**
+ * The sign-in form: username and password (and a code when two-factor is on), for the default account server
+ * unless "Change server" is used. Inline on the home screen when signed out, or in a dialog.
+ */
+function signInForm({ inline = false, onDone, onCancel } = {}) {
+  let server = defaultServer();
   let info = null, register = false;
-  return dialog((dlg, done) => {
-    const err = h('div', { class: 'error', role: 'alert' });
-    const srv = h('input', { type: 'text', value: server, placeholder: 'accounts.example.com', autocomplete: 'url', autocapitalize: 'off', spellcheck: 'false', inputmode: 'url' });
-    const srvWrap = h('div', { hidden: servedByAccount() }, h('label', { class: 'field' }, 'Account server'), srv);
-    const user = h('input', { type: 'text', autocomplete: 'username', autocapitalize: 'off', spellcheck: 'false' });
-    const pass = h('input', { type: 'password', autocomplete: 'current-password' });
-    const totp = h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code', placeholder: '123456', maxlength: '6' });
-    const totpWrap = h('div', { hidden: true }, h('label', { class: 'field' }, 'Authenticator code'), totp);
-    const devName = h('input', { type: 'text', value: deviceLabel() });
-    const title = h('h2', {}, 'Sign in to Headroom');
-    const lead = h('p', { class: 'muted small' }, 'Sign in once and every computer in your account is here — no pairing each one.');
-    const switchLink = h('button', { type: 'button', class: 'link', hidden: true }, 'Create an account');
-    const submit = h('button', { type: 'submit', class: 'primary' }, 'Sign in');
-    const setMode = r => {
-      register = r;
-      title.textContent = r ? 'Create your Headroom account' : 'Sign in to Headroom';
-      switchLink.textContent = r ? 'I have an account' : 'Create an account';
-      submit.textContent = r ? 'Create account' : 'Sign in';
-      pass.autocomplete = r ? 'new-password' : 'current-password';
-      pass.placeholder = r ? 'At least 8 characters' : '';
-    };
-    switchLink.onclick = () => setMode(!register);
-    const checkServer = async () => {
+  const err = h('div', { class: 'error', role: 'alert' });
+  const srv = h('input', { type: 'text', value: server, placeholder: 'accounts.example.com', autocomplete: 'url', autocapitalize: 'off', spellcheck: 'false', inputmode: 'url', 'aria-label': 'Account server' });
+  const srvWrap = h('div', { hidden: !!server }, h('label', { class: 'field' }, 'Account server'), srv);
+  const where = h('span', {}, server ? server.replace(/^https?:\/\//, '') : '');
+  const change = h('button', { type: 'button', class: 'link', hidden: !server || servedByAccount() || null, onclick: () => { srvWrap.hidden = false; change.hidden = true; srv.focus(); } }, 'Change server');
+  const serverLine = h('p', { class: 'muted small', hidden: !server }, 'Your Headroom account on ', where, change.hidden ? null : ' · ', change);
+  const user = h('input', { type: 'text', autocomplete: 'username', autocapitalize: 'off', spellcheck: 'false', 'aria-label': 'Username' });
+  const pass = h('input', { type: 'password', autocomplete: 'current-password', 'aria-label': 'Password' });
+  const totp = h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code', placeholder: '123456', maxlength: '6', 'aria-label': 'Authenticator code' });
+  const totpWrap = h('div', { hidden: true }, h('label', { class: 'field' }, 'Authenticator code'), totp);
+  const title = h(inline ? 'h2' : 'h2', {}, 'Sign in');
+  const switchLink = h('button', { type: 'button', class: 'link', hidden: true }, 'Create an account');
+  const submit = h('button', { type: 'submit', class: inline ? 'primary wide' : 'primary' }, 'Sign in');
+  const setMode = r => {
+    register = r;
+    title.textContent = r ? 'Create your account' : 'Sign in';
+    switchLink.textContent = r ? 'I have an account' : 'Create an account';
+    submit.textContent = r ? 'Create account' : 'Sign in';
+    pass.autocomplete = r ? 'new-password' : 'current-password';
+    pass.placeholder = r ? 'At least 8 characters' : '';
+  };
+  switchLink.onclick = () => setMode(!register);
+  const checkServer = async () => {
+    err.textContent = '';
+    info = null;
+    try { server = Account.normalizeServer(srv.value); } catch (e) { err.textContent = e.message; srvWrap.hidden = false; return false; }
+    // An https:// page (any Headroom Server, Headroom Viewer) may not call plain-HTTP servers, except on loopback.
+    const u = new URL(server);
+    if (u.protocol === 'http:' && location.protocol !== 'http:' && !/^(localhost|127\.0\.0\.1|\[::1\])$/.test(u.hostname)) {
+      err.textContent = 'The account server needs HTTPS (https://…): the app can\'t reach plain-HTTP servers from here.';
+      return false;
+    }
+    info = await Account.serverInfo(server);
+    if (!info) { err.textContent = `Can't reach ${server.replace(/^https?:\/\//, '')} right now. Check your connection.`; return false; }
+    where.textContent = server.replace(/^https?:\/\//, '');
+    switchLink.hidden = !info.signup;
+    if (info.firstAccount && info.signup) setMode(true); // a brand-new server: the first account is the owner's
+    return true;
+  };
+  srv.addEventListener('change', checkServer);
+  const form = h('form', { class: inline ? 'signin-card' : null }, title, serverLine, srvWrap,
+    h('label', { class: 'field' }, 'Username'), user,
+    h('label', { class: 'field' }, 'Password'), pass, totpWrap, err,
+    inline
+      ? h('div', {}, submit, h('div', { class: 'row-center' }, switchLink))
+      : h('div', { class: 'actions' }, switchLink, h('span', { style: { flex: '1' } }),
+        h('button', { type: 'button', onclick: () => onCancel?.() }, 'Cancel'), submit));
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    submit.disabled = true;
+    try {
+      if (!info && !await checkServer()) return;
       err.textContent = '';
-      info = null;
-      try { server = Account.normalizeServer(srv.value); } catch (e) { err.textContent = e.message; return false; }
-      // An https:// page (any Headroom Server, Headroom Viewer) may not call plain-HTTP servers, except on loopback.
-      const u = new URL(server);
-      if (u.protocol === 'http:' && location.protocol !== 'http:' && !/^(localhost|127\.0\.0\.1|\[::1\])$/.test(u.hostname)) {
-        err.textContent = 'The account server needs HTTPS (https://…): the app can\'t reach plain-HTTP servers from here.';
-        return false;
-      }
-      info = await Account.serverInfo(server);
-      if (!info) { err.textContent = 'No Headroom account server answered at that address.'; return false; }
-      if (info.name && info.name !== 'Headroom') lead.textContent = `${info.name}: sign in once and every computer in your account is here — no pairing each one.`;
-      switchLink.hidden = !info.signup;
-      if (info.firstAccount) setMode(true); // a brand-new server: the first account is the owner's
-      return true;
-    };
-    srv.addEventListener('change', checkServer);
-    const form = h('form', {}, title, lead, srvWrap,
-      h('label', { class: 'field' }, 'Username'), user,
-      h('label', { class: 'field' }, 'Password'), pass, totpWrap,
-      h('label', { class: 'field' }, 'This device\'s name'), devName, err,
-      h('div', { class: 'actions' }, switchLink, h('span', { style: { flex: '1' } }),
-        h('button', { type: 'button', onclick: () => done() }, 'Cancel'), submit));
-    form.addEventListener('submit', async e => {
-      e.preventDefault();
-      submit.disabled = true;
-      try {
-        if (!info && !await checkServer()) return;
-        err.textContent = '';
-        await Account.signIn(server, {
-          username: user.value.trim(), password: pass.value, totp: totp.value.trim() || undefined,
-          deviceName: devName.value.trim() || deviceLabel(), platform: platformId(), register,
-        });
-        try { localStorage.setItem(lastServerKey, server); } catch { }
-        done(true);
-        await refreshAccount();
-        renderHome();
-        const n = Account.accountHosts().length;
-        toast(n ? `Signed in · ${n} computer${n === 1 ? '' : 's'} in your account` : 'Signed in. Now join your computers to the account in Headroom Server → Settings → Account.', 6000);
-      } catch (ex) {
-        const b = ex.body || {};
-        if (b.error === 'totp-required') { totpWrap.hidden = false; totp.focus(); err.textContent = 'Enter the 6-digit code from your authenticator app.'; }
-        else if (b.error === 'bad-totp') err.textContent = 'That code didn\'t work. Wait for the next one and try again.';
-        else if (b.error === 'bad-credentials') err.textContent = 'Wrong username or password.';
-        else if (b.error === 'rate-limited') err.textContent = `Too many attempts. Try again in ${b.retryAfter || 60} s.`;
-        else err.textContent = ex.message;
-      } finally { submit.disabled = false; }
-    });
+      await Account.signIn(server, {
+        username: user.value.trim(), password: pass.value, totp: totp.value.trim() || undefined,
+        deviceName: deviceLabel(), platform: platformId(), register,
+      });
+      pref(lastServerKey, server);
+      onDone?.();
+      await refreshAccount();
+      renderHome();
+      const n = Account.accountHosts().length;
+      toast(n ? `Signed in · ${n} computer${n === 1 ? '' : 's'}` : 'Signed in. Now add your computers: Headroom Server → Settings → Account on each one.', 6000);
+    } catch (ex) {
+      const b = ex.body || {};
+      if (b.error === 'totp-required') { totpWrap.hidden = false; totp.focus(); err.textContent = 'Enter the 6-digit code from your authenticator app.'; }
+      else if (b.error === 'bad-totp') err.textContent = 'That code didn\'t work. Wait for the next one and try again.';
+      else if (b.error === 'bad-credentials') err.textContent = 'Wrong username or password.';
+      else if (b.error === 'rate-limited') err.textContent = `Too many attempts. Try again in ${b.retryAfter || 60} s.`;
+      else err.textContent = ex.message;
+    } finally { submit.disabled = false; }
+  });
+  if (server) checkServer();
+  form.focusFirst = () => (server ? user : srv).focus();
+  return form;
+}
+
+async function signInFlow() {
+  return dialog((dlg, done) => {
+    const form = signInForm({ onDone: () => done(true), onCancel: () => done() });
     dlg.append(form);
-    if (server) checkServer();
-    setTimeout(() => (server ? user : srv).focus(), 50);
+    setTimeout(() => form.focusFirst(), 50);
   });
 }
 

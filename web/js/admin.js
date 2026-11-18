@@ -4,6 +4,7 @@
 import { h, svg } from './ui/dom.js';
 import { QrCode } from './qr.js';
 import { bridge } from './platform.js';
+import { DEFAULT_ACCOUNT_SERVER } from './config.js';
 
 const native = bridge;   // present when hosted by Headroom Server's own window
 const postNative = msg => native?.post(msg);
@@ -351,23 +352,27 @@ function viewAccount() {
             redraw();
           } }, 'Check in now'),
           h('button', { class: 'danger', type: 'button', onclick: async () => {
-            if (!confirm(`Leave ${a.username}'s account? Its devices can no longer connect to ${thisPc()} (devices paired directly keep working).`)) return;
+            if (!confirm(`Sign ${thisPc()} out of ${a.username}'s account? It leaves your list of computers (devices paired directly keep working).`)) return;
             await post('/account/leave').catch(() => { });
             accountNote = null;
             redraw();
-          } }, 'Leave account')), m),
+          } }, 'Sign out')), m),
       h('div', { class: 'card' }, h('h3', {}, 'Devices in the account'), h('div', { class: 'list' }, ...devs)));
   }
   const err = h('div', { class: 'msg' });
-  const server = h('input', { type: 'text', inputmode: 'url', class: 'grow', placeholder: 'accounts.example.com', autocapitalize: 'off', spellcheck: 'false' });
-  try { server.value = localStorage.getItem('headroom.admin.accountServer') || ''; } catch { }
+  const server = h('input', { type: 'text', inputmode: 'url', class: 'grow', placeholder: 'accounts.example.com', autocapitalize: 'off', spellcheck: 'false', 'aria-label': 'Account server' });
+  try { server.value = localStorage.getItem('headroom.admin.accountServer') || DEFAULT_ACCOUNT_SERVER; } catch { server.value = DEFAULT_ACCOUNT_SERVER; }
+  // The usual server is built in: show it as text, with the field one click away.
+  const serverRow = h('div', { class: 'row', hidden: !!server.value }, server);
+  const serverLine = h('p', { class: 'small muted', hidden: !server.value }, 'Account server: ', h('span', { class: 'mono' }, server.value.replace(/^https?:\/\//, '')), ' · ',
+    h('button', { type: 'button', class: 'link-btn', onclick: () => { serverLine.hidden = true; serverRow.hidden = false; server.focus(); } }, 'Change'));
   const user = h('input', { type: 'text', class: 'grow', placeholder: 'Username', autocomplete: 'username', autocapitalize: 'off', spellcheck: 'false' });
   const pass = h('input', { type: 'password', class: 'grow', placeholder: 'Password', autocomplete: 'current-password' });
   const totp = h('input', { type: 'text', inputmode: 'numeric', maxlength: '6', placeholder: '123456', autocomplete: 'one-time-code' });
   const totpRow = h('div', { class: 'row', hidden: true }, h('span', { class: 'small' }, 'Authenticator code'), totp);
-  const submit = h('button', { class: 'primary', type: 'submit' }, 'Join account');
+  const submit = h('button', { class: 'primary', type: 'submit' }, 'Sign in');
   const form = h('form', {},
-    h('div', { class: 'row' }, server), h('div', { class: 'row' }, user, pass), totpRow,
+    serverLine, serverRow, h('div', { class: 'row' }, user, pass), totpRow,
     h('div', { class: 'row' }, submit), err);
   form.onsubmit = async e => {
     e.preventDefault();
@@ -386,14 +391,15 @@ function viewAccount() {
         return;
       }
       try { localStorage.setItem('headroom.admin.accountServer', server.value); } catch { }
-      accountNote = { ok: true, text: `Joined ${b.username}'s account. Devices signed in to it can now connect.` };
+      accountNote = { ok: true, text: `Signed in as ${b.username}. ${thisPc()[0].toUpperCase() + thisPc().slice(1)} is now in your account.` };
       redraw();
     } catch (ex) { err.className = 'msg err'; err.textContent = ex.message; } finally { submit.disabled = false; }
   };
   return h('section', {}, h('h2', {}, 'Account'),
-    h('p', { class: 'lead' }, `Join ${thisPc()} to your Headroom account, and every phone, tablet and computer signed in to that account can connect — they all see it in one list, without pairing each one.`),
-    h('div', { class: 'card' }, h('h3', {}, 'Join an account'),
-      h('p', { class: 'small muted' }, `Your password goes only to the account server; ${thisPc()} gets its own sign-in there, which you can remove from any device. Don't have an account server? Run one with account-server/ (one small Node.js process or a Docker container), or keep pairing devices directly.`),
+    h('p', { class: 'lead' }, `Sign in with your Headroom account to add ${thisPc()} to it. Then it's in the list on every phone, tablet, browser and computer where you're signed in — click it to connect, from anywhere.`),
+    h('div', { class: 'card' }, h('h3', {}, 'Sign in to your account'),
+      h('p', { class: 'small muted' }, `Your password goes only to your account server; ${thisPc()} gets its own sign-in there, which you can remove from any device.`
+        + (DEFAULT_ACCOUNT_SERVER ? '' : ' Don\'t have an account server? Run one with account-server/ (one small Node.js process or a Docker container), or keep pairing devices directly.')),
       form),
     h('div', { class: 'card' }, h('h3', {}, 'How it works'),
       h('ul', { class: 'steps small' },

@@ -90,6 +90,15 @@ label.field { display: block; margin: 12px 0 4px; font-size: 14px; color: var(--
 .empty { text-align: center; padding: 28px 12px; border: 1px dashed var(--line); border-radius: var(--radius); margin-bottom: 16px; }
 .empty-title { font-weight: 600; margin: 0 0 6px; }
 #home > button.wide + button.wide { margin-top: 10px; }
+.signin-card {
+  background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; margin-bottom: 16px;
+}
+.signin-card h2 { margin: 0 0 4px; font-size: 22px; }
+.signin-card .error { color: var(--bad); font-size: 14px; min-height: 20px; margin: 8px 0; }
+.signin-card button.primary.wide { margin-top: 4px; }
+.row-center { display: flex; justify-content: center; margin-top: 8px; }
+.home-links { text-align: center; margin: 4px 0 10px; font-size: 14px; color: var(--muted); }
+.home-links button.link { font-size: 14px; }
 .home-head .spacer { flex: 1; }
 .account-chip {
   display: inline-flex; align-items: center; gap: 6px; max-width: 60%; margin-left: auto; margin-right: 8px;
