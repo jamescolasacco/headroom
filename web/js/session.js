@@ -120,6 +120,8 @@ export class Session {
       ripple: (x, y, kind) => this._ripple(x, y, kind),
       toggleKeyboard: () => this.toggleKeyboard(),
       prefs: () => this.prefs,
+      // The streamed screen's pixels per point (Retina 2, Windows at 150% 1.5).
+      screenScale: () => this.monitors.find(m => m.id === this.monitorId)?.scale || 1,
     });
     this.touch.setMode(this.inputMode);
     if (!isTouchPrimary) this.cursor.setMode('css');
