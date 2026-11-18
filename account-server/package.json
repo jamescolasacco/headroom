@@ -1,6 +1,6 @@
 {
   "name": "headroom-account-server",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Optional accounts for Headroom: sign in once, every computer in the account is there.",
   "type": "module",
   "private": true,
