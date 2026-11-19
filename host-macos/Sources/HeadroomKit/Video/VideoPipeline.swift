@@ -120,8 +120,10 @@ public final class VideoPipeline {
     /// A whole new picture only once the screen has held still this long: it's big, and the frames of a scroll that
     /// goes on after a short pause would wait behind it.
     private static let keyStillMs: Int64 = 150
-    /// The quantizer of the newest new picture (onEncoded, under `stateLock`).
-    private var lastFreshQp: Int?
+    /// New pictures lately, when and at what quantizer (onEncoded), and when the picture on screen was last whole and
+    /// sharp (a whole new picture sent, or sharpening done). Under `stateLock`.
+    private var recentFreshQp: [(ms: Int64, qp: Int)] = []
+    private var sharpAtMs: Int64 = 0
     /// From this quantizer up, text comes out smudged.
     private static let smudgedQp = 30
 
@@ -206,7 +208,7 @@ public final class VideoPipeline {
             if pending > 0 { targetKbps = pending; applyBitrate() }
             // A pass that comes out tiny: nothing left to sharpen, or the encoder had spent its budget for the moment
             // (right after a scroll or a whole new screen). Passes a while later tell which: three tiny, it's done.
-            if refinementLeft > 0 && tiny >= 3 { refinementLeft = 0; setBoost(1) }
+            if refinementLeft > 0 && tiny >= 3 { refinementLeft = 0; setBoost(1); markSharp() }
             else if refinementLeft > 0 && tiny > 0 { nextRefineAt = max(nextRefineAt, tinyAt + Self.recheckMs << Int64(tiny - 1)) }
 
             now = Clock.nowMs
@@ -219,7 +221,7 @@ public final class VideoPipeline {
 
             guard let sink else { break } // the session is gone: stop rather than spin
             let sharpening = refine && !key
-            let wholePicture = sharpening && refinementLeft == r.maxFrames && (r.keyFirst ?? stillSmudged())
+            let wholePicture = sharpening && refinementLeft == r.maxFrames && (r.keyFirst ?? stillSmudged(now))
             if wholePicture && now < stillSince + Self.keyStillMs {
                 nextRefineAt = stillSince + Self.keyStillMs
                 continue
@@ -249,6 +251,7 @@ public final class VideoPipeline {
                 if sent.refinement {
                     refinementLeft -= 1
                     if refinementLeft == 0 { setBoost(1) }
+                    if wholePicture { markSharp() }
                     nextRefineAt = now + passInterval
                 } else {
                     lastVersion = sent.version
@@ -263,14 +266,21 @@ public final class VideoPipeline {
         detachSource()
     }
 
-    /// Whether the picture left on the still screen came out smudged (coded at QP 30 or more: the encoder was short of
-    /// bits for what was changing, as in a fast scroll). Then the first sharpening pass is a whole new picture: it gets
-    /// a keyframe's budget and is sharp in one go (44.7 dB 0.63 s after a fast scroll stopped, on 10 Mb/s), where
-    /// corrections of the smudged one, each at a frame's budget, took 1-2 s to reach 38-41 dB. Typing, slow scrolls
-    /// and page jumps come out sharp already and don't need it.
-    private func stillSmudged() -> Bool {
+    /// Whether the picture left on the still screen came out smudged: a new picture in the second before, since it was
+    /// last sharp, was coded at QP 30 or more (the encoder was short of bits for what was changing, as in a fast
+    /// scroll). Any of them, not just the last: a caret blinking or a clock ticking right after the stop is a sharp
+    /// little update on a smudged screen. Then the first sharpening pass is a whole new picture: it gets a keyframe's
+    /// budget and is sharp in one go (44.7 dB 0.63 s after a fast scroll stopped, on 10 Mb/s), where corrections of
+    /// the smudged one, each at a frame's budget, took 1-2 s to reach 38-41 dB. Typing, slow scrolls and page jumps
+    /// come out sharp already and don't need it.
+    private func stillSmudged(_ now: Int64) -> Bool {
         stateLock.lock(); defer { stateLock.unlock() }
-        return (lastFreshQp ?? 0) >= Self.smudgedQp
+        return recentFreshQp.contains { $0.ms > sharpAtMs && now - $0.ms <= 1000 && $0.qp >= Self.smudgedQp }
+    }
+
+    /// The picture on screen is whole and sharp as of now.
+    private func markSharp() {
+        stateLock.lock(); sharpAtMs = Clock.nowMs; stateLock.unlock()
     }
 
     /// The encoder at the stream's bitrate, or above it while sharpening.
@@ -396,7 +406,11 @@ public final class VideoPipeline {
                                        fullRange: false)
         }
         guard configSentForEpoch == epoch else { stateLock.unlock(); return } // no decoder config yet: deltas are useless
-        if !p.refinement { lastFreshQp = processed.qp }
+        if !p.refinement, let qp = processed.qp {
+            let now = Clock.nowMs
+            recentFreshQp.removeAll { now - $0.ms > 2000 }
+            recentFreshQp.append((now, qp))
+        }
         Log.debug("pipeline", "frame \(frameId &+ 1): \(processed.data.count / 1024) KB, QP \(processed.qp.map(String.init) ?? "?")\(processed.keyFrame ? ", key" : "")\(p.refinement ? ", sharpening" : "")")
         if p.refinement, let seq = passSeq.removeValue(forKey: p.captureUs), seq == stillSeq,
            Self.refinement.convergedBytesPerPixel > 0, let enc = encoder {

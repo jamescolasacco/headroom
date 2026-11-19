@@ -93,7 +93,10 @@ public sealed class VideoPipeline : IDisposable
     /// <summary>A whole new picture only once the screen has held still this long: it's big, and the frames of a
     /// scroll that goes on after a short pause would wait behind it.</summary>
     private const int KeyStillMs = 150;
-    private volatile int _lastFreshQp = -1;   // the quantizer of the newest new picture (OnEncoded; -1: unknown)
+    // New pictures lately, when and at what quantizer (OnEncoded), and when the picture on screen was last whole and
+    // sharp (a whole new picture sent, or sharpening done). Under _captureTimes.
+    private readonly List<(long Ms, int Qp)> _recentFreshQp = new();
+    private long _sharpAtMs;
     /// <summary>From this quantizer up, text comes out smudged.</summary>
     private const int SmudgedQp = 30;
     private int _targetKbps;                // what the session asked for
@@ -199,7 +202,7 @@ public sealed class VideoPipeline : IDisposable
                 lock (_captureTimes) { tiny = _tinyPasses; tinyAt = _lastTinyAtMs; }
                 // A pass that comes out tiny: nothing left to sharpen, or the encoder had spent its budget for the
                 // moment (right after a scroll or a whole new screen). Passes a while later tell which: three tiny, done.
-                if (refinementLeft > 0 && tiny >= 3) { refinementLeft = 0; SetBoost(1); }
+                if (refinementLeft > 0 && tiny >= 3) { refinementLeft = 0; SetBoost(1); MarkSharp(); }
                 else if (refinementLeft > 0 && tiny > 0) nextRefineAt = Math.Max(nextRefineAt, tinyAt + ((long)RecheckMs << (tiny - 1)));
 
                 now = _clock.ElapsedMilliseconds;
@@ -211,7 +214,7 @@ public sealed class VideoPipeline : IDisposable
                 if (now < nextFrameAt) continue; // fps cap; the wait above wakes us in time
 
                 bool sharpening = refine && !key;
-                bool wholePicture = sharpening && refinementLeft == r.MaxFrames && (r.KeyFirst ?? _lastFreshQp >= SmudgedQp);
+                bool wholePicture = sharpening && refinementLeft == r.MaxFrames && (r.KeyFirst ?? StillSmudged(now));
                 if (wholePicture && now < stillSince + KeyStillMs)
                 {
                     nextRefineAt = stillSince + KeyStillMs;
@@ -244,6 +247,7 @@ public sealed class VideoPipeline : IDisposable
                         if (sentRefinement)
                         {
                             if (--refinementLeft == 0) SetBoost(1);
+                            if (wholePicture) MarkSharp();
                             nextRefineAt = now + passInterval;
                         }
                         else
@@ -276,6 +280,27 @@ public sealed class VideoPipeline : IDisposable
             Native.timeEndPeriod(1);
             if (mmcss != 0) Native.AvRevertMmThreadCharacteristics(mmcss);
         }
+    }
+
+    /// <summary>
+    /// Whether the picture left on the still screen came out smudged: a new picture in the second before, since it was
+    /// last sharp, was coded at QP 30 or more (the encoder was short of bits for what was changing, as in a fast
+    /// scroll). Any of them, not just the last: a caret blinking or a clock ticking right after the stop is a sharp
+    /// little update on a smudged screen. Then the first sharpening pass is a whole new picture: it gets a keyframe's
+    /// budget and is sharp in one go (measured on the Mac host: 44.7 dB 0.63 s after a fast scroll stopped, on
+    /// 10 Mb/s), where corrections of the smudged one, each at a frame's budget, took 1-2 s to reach 38-41 dB.
+    /// Typing, slow scrolls and page jumps come out sharp already and don't need it.
+    /// </summary>
+    private bool StillSmudged(long now)
+    {
+        lock (_captureTimes)
+            return _recentFreshQp.Any(f => f.Ms > _sharpAtMs && now - f.Ms <= 1000 && f.Qp >= SmudgedQp);
+    }
+
+    /// <summary>The picture on screen is whole and sharp as of now.</summary>
+    private void MarkSharp()
+    {
+        lock (_captureTimes) _sharpAtMs = _clock.ElapsedMilliseconds;
     }
 
     /// <summary>The encoder at the stream's bitrate, or above it while sharpening.</summary>
@@ -487,12 +512,14 @@ public sealed class VideoPipeline : IDisposable
                 enc.Name, enc.IsHardware, _settings.FullRange));
         }
         if (_configSentForEpoch != _epoch) return; // no decoder config yet: client can't use delta frames
-        // The picture left on a still screen came out smudged (QP 30 or more: the encoder was short of bits for what
-        // was changing, as in a fast scroll): the first sharpening pass is then a whole new picture. It gets a
-        // keyframe's budget and is sharp in one go (measured on the Mac host: 44.7 dB 0.63 s after a fast scroll
-        // stopped, on 10 Mb/s), where corrections of the smudged one, each at a frame's budget, took 1-2 s to reach
-        // 38-41 dB. Typing, slow scrolls and page jumps come out sharp already and don't need it.
-        if (!refinement) _lastFreshQp = processed.Qp ?? -1;
+        // Each new picture's quantizer, for StillSmudged.
+        if (!refinement && processed.Qp is int qp)
+            lock (_captureTimes)
+            {
+                long nowMs = _clock.ElapsedMilliseconds;
+                _recentFreshQp.RemoveAll(f => nowMs - f.Ms > 2000);
+                _recentFreshQp.Add((nowMs, qp));
+            }
         if (Log.MinLevel <= Log.Level.Debug) Log.Debug("pipeline", $"frame {_frameId + 1}: {processed.Data.Length / 1024} KB, QP {(processed.Qp?.ToString() ?? "?")}{(processed.KeyFrame ? ", key" : "")}{(refinement ? ", sharpening" : "")}");
         var rc = Refinement.Current;
         if (refinement && rc.ConvergedBytesPerPixel > 0)
