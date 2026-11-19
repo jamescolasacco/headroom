@@ -195,13 +195,37 @@ function morph(update, { from = null, to = () => null, leaving = false } = {}) {
 }
 const tileOf = id => id && $('host-list').querySelector(`.host[data-id="${CSS.escape(id)}"] .face`);
 
+/**
+ * A computer that's asleep (or off) isn't refused: the session waits for it. A sleeping Mac wakes for a moment every
+ * few minutes and reaches Headroom's relay then: the session starts at that moment, and starting it wakes the Mac up.
+ * Resolves with where to reach it once it's there (`host` is brought up to date), `{ gone }` if it left your
+ * account, `{ signedOut }` if this device did, `{}` if it isn't back within 10 minutes or you left.
+ */
+async function waitForComputer(host, left) {
+  const until = Date.now() + 10 * 60_000;
+  while (!left() && Date.now() < until) {
+    await new Promise(r => setTimeout(r, 3000));
+    if (left()) return {};
+    const a = await Account.refreshComputers();
+    if (!a) return { signedOut: true };
+    const now = Account.accountHosts(a).find(x => x.id === host.id);
+    if (!now) { if (!a.error) return { gone: true }; continue; } // (a.error: no list this time, the phone is offline)
+    if (!now.online && !now.relayOnline) continue;
+    Object.assign(host, now);
+    const url = await Account.reachableUrl(host);
+    if (url) return { url };
+  }
+  return {};
+}
+
+const ASLEEP = {
+  macos: 'It\'s asleep or offline. A sleeping Mac checks in every few minutes: Headroom connects then and wakes it up.',
+  other: 'It\'s asleep or off. Headroom connects as soon as it\'s back on.',
+};
+
 function connect(host, face = null) {
   if (session) return;
   if (cantShow()) { toast(cantShow()); return; }
-  if (!host.online && !host.support) {
-    toast(`${host.name} is offline. Start Headroom Server on it, then try again.`);
-    return;
-  }
   const s = session = new Session(host, {
     // Leaving: the session shrinks back into its tile (the code box has no tile: it just cuts).
     leaveWith: finish => morph(finish, { to: () => (host.computerId ? tileOf(host.id) : null), leaving: true }),
@@ -223,12 +247,20 @@ function connect(host, face = null) {
     await shown;
     if (session !== s) return;
     if (host.account) {
-      const url = await Account.reachableUrl(host);
+      // Not reachable now (asleep, off, or it just dozed off and the list doesn't know yet): wait for it.
+      let url = host.online || host.relayOnline ? await Account.reachableUrl(host) : null;
       if (session !== s) return;
       if (!url) {
-        s.stop();
-        toast(`Can't reach ${host.name} right now. It may have just gone offline; try again in a moment.`);
-        return;
+        s.waitingFor(ASLEEP[host.os === 'macos' ? 'macos' : 'other']);
+        const back = await waitForComputer(host, () => session !== s);
+        if (session !== s) return;
+        if (!back.url) {
+          s.stop();
+          if (back.gone) toast(`${host.name} isn't in your account anymore.`);
+          else if (!back.signedOut) toast(`${host.name} didn't come online in 10 minutes. Try again when it's on.`);
+          return;
+        }
+        url = back.url;
       }
       host.url = url;
       Account.noteConnected(host.computerId, url);

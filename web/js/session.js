@@ -62,6 +62,12 @@ export class Session {
     if (!this.conn) this._overlay('Connecting…', this.host.support ? '' : this.host.name, true, [{ label: 'Cancel', onClick: () => this.stop() }]);
   }
 
+  /** The computer is asleep or off: the session screen waits for it (app.js waitForComputer), with Cancel. */
+  waitingFor(detail) {
+    if (this.disposed) return;
+    this._overlay(`Waiting for ${this.host.name}…`, detail, true, [{ label: 'Cancel', onClick: () => this.stop() }]);
+  }
+
   async start() {
     if (!secure || !hasWebCodecs) {
       this._overlay('This browser can\'t decode the stream', !secure
@@ -335,9 +341,15 @@ export class Session {
       if (state === 'reconnecting') {
         this.keyboard?.releaseAll();
         this.typing?.reset();
+        if (!this._opened && this.host.account) {
+          // It was listed as there, but it doesn't answer: it just fell asleep. It's tried again until it's back.
+          if (attempt > 2) this.waitingFor('It isn\'t answering: it may have just gone to sleep. Headroom keeps trying, and connects when it\'s back.');
+          return;
+        }
         this._overlay('Reconnecting…', attempt > 2 ? `Can't reach ${this.host.name}. Still trying (${reason || 'network'}).` : '', true,
           [{ label: 'Disconnect', onClick: () => this.stop() }]);
       } else if (state === 'open') {
+        this._opened = true;
         if (!this.videoConfig) this._overlay('Starting stream…', '', true);
       }
     });
