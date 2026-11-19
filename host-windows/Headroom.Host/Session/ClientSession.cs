@@ -745,9 +745,13 @@ public sealed class ClientSession : IVideoSink
                 if (kv.Key == frameId)
                 {
                     double rtt = (now - kv.Value.SentUs) / 1000.0;
-                    // Remove the frame's own transmission time (bits / delivery rate) so a big keyframe on a
-                    // modest link doesn't look like queueing; what's left approximates path RTT + queueing.
-                    double kbps = DeliveryRateKbps();
+                    // Remove the frame's own transmission time so a big keyframe on a modest link doesn't look
+                    // like queueing; what's left approximates path RTT + queueing. At the rate we may send (the
+                    // target) when that's higher than the delivery rate: delivery is only what the screen needed
+                    // lately (when little changes, little is sent), and dividing by it made frames "take" longer
+                    // than the whole round trip, so the min RTT fell to ~0, every RTT looked like queueing, and on
+                    // any path over ~60 ms the bitrate kept dropping to its floor.
+                    double kbps = Math.Max(DeliveryRateKbps(), _targetKbps);
                     double serializationMs = kbps > 0 ? kv.Value.Bytes * 8.0 / kbps : 0;
                     double sample = Math.Max(0.1, rtt - serializationMs);
                     if (sample < _minRttMs) _minRttMs = sample;
@@ -870,9 +874,10 @@ public sealed class ClientSession : IVideoSink
         if (_pipeline == null) return;
         bool congested;
         double delivery;
+        long blocked;
         lock (_flowGate)
         {
-            long blocked = _blockedUsSinceTick + (_blockedSinceUs != 0 ? now - _blockedSinceUs : 0);
+            blocked = _blockedUsSinceTick + (_blockedSinceUs != 0 ? now - _blockedSinceUs : 0);
             _blockedUsSinceTick = 0;
             if (_blockedSinceUs != 0) _blockedSinceUs = now;
             delivery = DeliveryRateKbps();
@@ -889,8 +894,12 @@ public sealed class ClientSession : IVideoSink
             _lastCongestionUs = now;
             if (now - _lastRateChangeUs > 400_000)
             {
-                // Multiplicative decrease, but never below what we've proven we can deliver.
-                target = (int)Math.Max(_minKbps, Math.Min(target * 0.8, Math.Max(delivery * 0.85, _minKbps)));
+                // Multiplicative decrease. Only when frames waited for the network is the delivery rate the
+                // link's, so aim just under it then; otherwise it's what the screen needed (often far less than
+                // the link can carry), and dropping to it cut a fast link to the floor at one hiccup.
+                double next = target * 0.8;
+                if (blocked > 50_000) next = Math.Min(next, delivery * 0.9);
+                target = (int)Math.Max(_minKbps, next);
             }
         }
         else if (now - _lastCongestionUs > 2_000_000 && now - _lastRateChangeUs > 1_000_000)

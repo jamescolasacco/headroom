@@ -509,9 +509,13 @@ public final class ClientSession: WebSocketPeer, VideoSink {
             ackWindowBytes += v.bytes
             if fid == frameId {
                 let rtt = Double(now - v.sentUs) / 1000.0
-                // Remove the frame's own transmission time (bits / delivery rate) so a big keyframe on a modest
-                // link doesn't look like queueing; what's left approximates path RTT + queueing.
-                let kbps = deliveryRateKbps()
+                // Remove the frame's own transmission time so a big keyframe on a modest link doesn't look like
+                // queueing; what's left approximates path RTT + queueing. At the rate we may send (the target)
+                // when that's higher than the delivery rate: delivery is only what the screen needed lately (when
+                // little changes, little is sent), and dividing by it made frames "take" longer than the whole
+                // round trip, so the min RTT fell to ~0, every RTT looked like queueing, and on any path over
+                // ~60 ms the bitrate kept dropping to its floor.
+                let kbps = max(deliveryRateKbps(), Double(targetKbps))
                 let serializationMs = kbps > 0 ? Double(v.bytes) * 8.0 / kbps : 0
                 let sample = max(0.1, rtt - serializationMs)
                 if sample < minRttMs { minRttMs = sample }
@@ -577,8 +581,12 @@ public final class ClientSession: WebSocketPeer, VideoSink {
         if congested {
             lastCongestionUs = now
             if now - lastRateChangeUs > 400_000 {
-                // Multiplicative decrease, but never below what we've proven we can deliver.
-                target = Int(max(Double(minKbps), min(Double(target) * 0.8, max(delivery * 0.85, Double(minKbps)))))
+                // Multiplicative decrease. Only when frames waited for the network is the delivery rate the
+                // link's, so aim just under it then; otherwise it's what the screen needed (often far less than
+                // the link can carry), and dropping to it cut a fast link to the floor at one hiccup.
+                var next = Double(target) * 0.8
+                if blocked > 50_000 { next = min(next, delivery * 0.9) }
+                target = Int(max(Double(minKbps), next))
             }
         } else if now - lastCongestionUs > 2_000_000 && now - lastRateChangeUs > 1_000_000 {
             target = min(maxKbps, Int(Double(target) * 1.12) + 200)
