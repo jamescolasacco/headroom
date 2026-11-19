@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
 import IOKit
@@ -39,6 +40,8 @@ public final class InputInjector {
     private var clickPos = CGPoint.zero
     private var wheelAccX = 0.0, wheelAccY = 0.0
     private var warnedAccessibility = false
+    private var secureInputShown: Bool?
+    private var secureInputCheckedAt = Date.distantPast
 
     private init() {
         source = CGEventSource(stateID: .hidSystemState)
@@ -194,15 +197,21 @@ public final class InputInjector {
             post(e)
             return
         }
+        if down { noteSecureInput() }
         let e = CGEvent(keyboardEventSource: source, virtualKey: k.code, keyDown: down)
         e?.flags = modifierFlags.union(k.flags)
         post(e)
     }
 
-    /// Types text independent of the Mac's keyboard layout (soft keyboards, dictation, IME, paste-as-keys).
+    /// Types text (phones' and tablets' keyboards, dictation, paste-as-keys). A character this Mac's keyboard layout
+    /// has a key for goes as that key, with Shift if it takes it, exactly as a keyboard would type it: password fields
+    /// and the lock screen can ignore key events that only carry a string. The rest (emoji, accents reached through a
+    /// dead key or Option, other scripts) goes as a string, whatever the layout. (With Caps Lock on, a key can't type a
+    /// small letter: those go as a string too.)
     public func text(_ s: String) {
         guard !s.isEmpty else { return }
         queue.async { [self] in
+            noteSecureInput()
             var chunk = [UniChar]()
             func flush() {
                 guard !chunk.isEmpty else { return }
@@ -220,13 +229,60 @@ public final class InputInjector {
                 case "\t": flush(); tap("Tab")
                 case "\u{8}": flush(); tap("Backspace")
                 default:
-                    let units = Array(String(ch).utf16)
-                    if chunk.count + units.count > 20 { flush() }
-                    chunk.append(contentsOf: units)
+                    if let stroke = KeyboardLayout.shared.stroke(for: ch), !(Self.capsLockOn && ch.isLowercase) {
+                        flush()
+                        typeStroke(stroke)
+                    } else {
+                        let units = Array(String(ch).utf16)
+                        if chunk.count + units.count > 20 { flush() }
+                        chunk.append(contentsOf: units)
+                    }
                 }
             }
             flush()
         }
+    }
+
+    /// One character's key, pressed and let go, with Shift held around it when it needs it (as its own key, the way
+    /// a keyboard sends it). Keys held from the viewer don't count: the character is what was typed.
+    private func typeStroke(_ stroke: KeyboardLayout.Stroke) {
+        guard let shift = KeyMap.get("ShiftLeft"), let shiftFlags = shift.modifier else { return }
+        let flags: CGEventFlags = stroke.shift ? shiftFlags : []
+        func shiftKey(_ down: Bool) {
+            let e = CGEvent(keyboardEventSource: source, virtualKey: shift.code, keyDown: down)
+            e?.type = .flagsChanged
+            e?.flags = down ? shiftFlags : []
+            post(e)
+        }
+        if stroke.shift { shiftKey(true) }
+        for down in [true, false] {
+            let e = CGEvent(keyboardEventSource: source, virtualKey: stroke.code, keyDown: down)
+            e?.flags = flags
+            post(e)
+        }
+        if stroke.shift { shiftKey(false) }
+    }
+
+    /// While an app has "secure input" on (a password field has the keyboard, or Terminal's Secure Keyboard Entry), macOS
+    /// can keep typed keys from reaching anything but it. Says so in the log when it turns on or off, and who has it:
+    /// what to look at when typing from a viewer stops working.
+    private func noteSecureInput() {
+        let now = Date()
+        guard now.timeIntervalSince(secureInputCheckedAt) > 2 else { return }
+        secureInputCheckedAt = now
+        let on = IsSecureEventInputEnabled()
+        guard on != secureInputShown else { return }
+        secureInputShown = on
+        guard on else {
+            Log.info("input", "secure input is off")
+            return
+        }
+        var who = "an app"
+        if let session = CGSessionCopyCurrentDictionary() as? [String: Any],
+           let pid = (session["kCGSSessionSecureInputPID"] as? NSNumber)?.int32Value, pid > 0 {
+            who = "\(NSRunningApplication(processIdentifier: pid)?.localizedName ?? "process") (pid \(pid))"
+        }
+        Log.info("input", "secure input is on, by \(who): a password field or Secure Keyboard Entry has the keyboard")
     }
 
     private func tap(_ code: String) {
