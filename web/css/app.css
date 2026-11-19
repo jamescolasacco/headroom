@@ -650,7 +650,7 @@ button.task-row:not(:disabled):not([aria-disabled="true"]):active { transform: n
 }
 .xk-keys { flex: 1 1 auto; min-width: 0; display: flex; gap: 5px; overflow-x: auto; scrollbar-width: none; touch-action: pan-x; overscroll-behavior-x: contain; }
 .xk-keys::-webkit-scrollbar { display: none; }
-.xk-end { flex: none; display: flex; gap: 5px; margin-left: 6px; padding-left: 6px; box-shadow: inset 1px 0 0 var(--rim-strong); }
+.xk-end { flex: none; display: flex; gap: 10px; margin-left: 6px; padding-left: 6px; box-shadow: inset 1px 0 0 var(--rim-strong); } /* apart: a tap meant for the eye doesn't close the keyboard */
 .xk-end[hidden] { display: none; }
 #extra-keys .xk-icon { display: grid; place-items: center; padding: 0; color: var(--ink-2); } /* (beats the icon-and-label button's start padding) */
 .xk-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }

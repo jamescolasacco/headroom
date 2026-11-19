@@ -116,6 +116,8 @@ export class Session {
       onKey: code => this.typing.key(code),
       onHideText: on => this._hideTypedText(on),
       onHideKeyboard: () => this.softkbd.hide(),
+      keyboardUp: () => this.softkbd.open && document.activeElement === sink,
+      reopenKeyboard: () => this.softkbd.show(),
     });
     this.extraKeys.setHost(this.hostOs);
     this.extraKeys.setTextHidden(this.typing.hidden);

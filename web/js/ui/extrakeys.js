@@ -93,9 +93,10 @@ const KEYS = [
 export class ExtraKeysBar {
   /**
    * @param {object} o { keyboard, mods, conn, onLayout(px), onKey(code) (a key went to the computer),
-   *   onHideText(on) (the eye), onHideKeyboard() }
+   *   onHideText(on) (the eye), onHideKeyboard(), keyboardUp() (the on-screen keyboard's input has focus),
+   *   reopenKeyboard() (focus it again, from inside a tap) }
    */
-  constructor(el, { keyboard, mods, conn, onLayout, onKey, onHideText, onHideKeyboard }) {
+  constructor(el, { keyboard, mods, conn, onLayout, onKey, onHideText, onHideKeyboard, keyboardUp, reopenKeyboard }) {
     this.el = el;
     this.keyboard = keyboard;
     this.mods = mods;
@@ -108,18 +109,39 @@ export class ExtraKeysBar {
     this.keys = h('div', { class: 'xk-keys', role: 'group', 'aria-label': 'Extra keys' });
     this.eyeBtn = this._endButton('Hide typed text', () => onHideText?.(!this.textHidden));
     this.end = h('div', { class: 'xk-end', hidden: true },
-      this.eyeBtn, this._endButton('Hide keyboard', () => onHideKeyboard?.(), HIDE_KEYBOARD));
+      this.eyeBtn, this._endButton('Hide keyboard', () => { this.hideAsked = true; onHideKeyboard?.(); }, HIDE_KEYBOARD));
     el.replaceChildren(this.keys, this.end);
     this.setTextHidden(false);
     this._render();
     mods.addEventListener('change', () => this._sync());
+    // Tapping the bar must never take the keyboard away. Browsers follow a tap with a mouse press and a click, and some
+    // (Firefox on iPhone) move focus off the keyboard's hidden input for them, which closes the keyboard: the bar
+    // cancels both (a tap here is handled on its own: keys on the lift, the end buttons on touchend). If the keyboard
+    // went anyway, it's brought back while the tap still counts as one (iOS opens a keyboard only then).
+    el.addEventListener('mousedown', e => e.preventDefault());
+    el.addEventListener('touchstart', () => { this.upAtTouch = !!keyboardUp?.(); this.hideAsked = false; }, { passive: true });
+    el.addEventListener('touchend', e => {
+      if (e.cancelable) e.preventDefault();
+      if (this.upAtTouch && !this.hideAsked && !keyboardUp?.()) reopenKeyboard?.();
+    });
   }
 
-  /** A button at the end of the bar. Pressing it never takes focus from the keyboard's input (that would close it). */
+  /**
+   * A button at the end of the bar. A tap acts when the finger lifts on it (its click is cancelled: see the
+   * constructor); a mouse, Enter or Space click it.
+   */
   _endButton(label, onClick, icon) {
     const b = h('button', { type: 'button', class: 'xk xk-icon', 'aria-label': label, title: label }, icon ? svg(icon) : null);
+    let tappedAt = -1e9;
     b.addEventListener('pointerdown', e => e.preventDefault());
-    b.addEventListener('click', onClick);
+    b.addEventListener('touchend', e => {
+      const t = e.changedTouches[0], r = b.getBoundingClientRect();
+      if (!t || t.clientX < r.left || t.clientX > r.right || t.clientY < r.top || t.clientY > r.bottom) return; // slid off it
+      tappedAt = performance.now();
+      onClick();
+    });
+    // (A click right after a tap is that tap's own, should a browser send it anyway: the eye mustn't flip back.)
+    b.addEventListener('click', () => { if (performance.now() - tappedAt > 700) onClick(); });
     return b;
   }
 

@@ -25,8 +25,10 @@ export class TypingPreview {
     this.active = false;     // the on-screen keyboard is up
     this.mac = false;
     this.timer = 0;
-    // A tap on it puts it away until you type again (it never takes focus: the keyboard stays up).
+    // A tap on it puts it away until you type again. It never takes focus, and the tap brings no click (some browsers
+    // move focus off the keyboard's input for one): the keyboard stays up.
     el.addEventListener('pointerdown', e => { e.preventDefault(); e.stopPropagation(); this.reset(); });
+    el.addEventListener('touchstart', e => e.preventDefault(), { passive: false });
   }
 
   setHost(os) { this.mac = os === 'macos'; }
