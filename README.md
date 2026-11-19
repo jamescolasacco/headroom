@@ -147,8 +147,9 @@ computer's key as vouched for by your account), otherwise through the relay. "Go
 ## Updates
 
 Headroom Server and Headroom Viewer check for a new release every few hours and download it in the background.
-When it's ready they say so (a notification, the menu-bar or tray menu, and the window): **Restart to update**
-quits, swaps in the new version and opens it again in a few seconds. Nothing restarts by itself, so a computer
+Their windows have a small download button in the top right corner: press it to check now, and it shows the
+download as it comes. When the update is ready the button lights up as **Restart to update** (a notification and
+the menu-bar or tray menu say so too): it quits, swaps in the new version and opens it again in a few seconds. Nothing restarts by itself, so a computer
 you're reaching from far away never drops out from under you. On Windows, Headroom Server's update asks for
 administrator permission once (it replaces Program Files and restarts the service).
 

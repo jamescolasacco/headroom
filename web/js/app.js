@@ -8,6 +8,7 @@ import { qrSvg } from './qr.js';
 import { deviceLabel, platformId, secure, hasWebCodecs, isStandalone, isIOS, isMac, nativeViewer, postNative, onNative } from './platform.js';
 import * as Account from './account.js';
 import { DEFAULT_ACCOUNT_SERVER, DOWNLOAD_URL } from './config.js';
+import { UpdateCorner } from './ui/updates.js';
 
 const $ = id => document.getElementById(id);
 let session = null;
@@ -74,17 +75,15 @@ const snapshot = () => JSON.stringify([Account.loadAccount()?.error, Account.acc
 
 // ---------------------------------------------------------------------------------------------- updates
 
-/** Headroom Viewer downloads updates by itself; when one is ready, the home screen offers the restart. */
+/**
+ * Headroom Viewer checks for updates and downloads them by itself; the download button in the home screen's corner
+ * checks now, shows a download, and becomes Restart to update once one is ready (ui/updates.js).
+ */
 function watchForUpdates() {
-  $('btn-update').addEventListener('click', () => postNative({ cmd: 'installUpdate' })); // it asks first mid-session
-  onNative(m => {
-    if (m?.cmd !== 'update') return;
-    const ready = m.phase === 'ready';
-    const banner = $('update-banner');
-    if (ready && banner.hidden) announce(`Headroom Viewer ${m.version} is ready. Restart to update.`);
-    $('update-title').textContent = ready ? `Headroom Viewer ${m.version} is ready` : '';
-    banner.hidden = !ready;
-  });
+  const slot = $('update-corner');
+  const corner = new UpdateCorner(slot, { app: 'Headroom Viewer', post: postNative }); // installing asks first mid-session
+  slot.hidden = false;
+  onNative(m => { if (m?.cmd === 'update') corner.set(m); });
   postNative({ cmd: 'getUpdate' });
 }
 

@@ -9,6 +9,7 @@ import { QrCode } from './qr.js';
 import { bridge } from './platform.js';
 import { lightOf } from './ui/light.js';
 import { I } from './ui/icons.js';
+import { UpdateCorner } from './ui/updates.js';
 
 const native = bridge;   // present when hosted by Headroom Server's own window
 const postNative = msg => native?.post(msg);
@@ -87,7 +88,7 @@ function viewKey() {
   const requests = (s.support?.requests || []).map(r => [r.id, r.name, r.address, r.country]);
   const perms = s.permissions ? [s.permissions.screenRecording, s.permissions.accessibility] : null;
   switch (current) {
-    case 'home': return stable(['home', !!s.stopped, sessions, requests, s.account?.email, s.relay?.state, perms, s.testPattern, s.host.name, notes.request, update?.phase === 'ready' && update.version]);
+    case 'home': return stable(['home', !!s.stopped, sessions, requests, s.account?.email, s.relay?.state, perms, s.testPattern, s.host.name, notes.request]);
     case 'connect': return stable(['connect', !!s.stopped, s.relay?.state, s.relay?.error, s.support?.code?.code, requests, codeError, notes.request]);
     case 'account': return stable(['account', s.account?.email, s.account?.error, s.settings.displayName, s.host.machine, notes.account, notes.rename]);
     default: return stable(['settings', s.settings, perms, loginItem, s.dataDir, s.logDir, s.host.version, update && [update.phase, update.version, update.message]]);
@@ -388,7 +389,6 @@ function viewHome() {
   return h('section', {}, h('h2', { tabindex: '-1' }, 'Home'),
     note('request'),
     requestsCard(),
-    updateBanner(),
     hero,
     n ? h('div', { class: 'card' }, h('h3', {}, 'Connected now'), h('ul', { class: 'list' }, ...st.sessions.map(sessionRow))) : null,
     missing ? permissionsCard() : null,
@@ -425,16 +425,10 @@ function startServerButton(key = 'home:start-server') {
 
 const installUpdate = () => postNative({ cmd: 'installUpdate' }); // the app asks first if someone is connected
 
-/** A downloaded update, waiting for a restart. Not warm (nobody is here) and not red (nothing is wrong): lit. */
-function updateBanner() {
-  if (update?.phase !== 'ready') return null;
-  return h('div', { class: 'update-banner' },
-    h('span', { class: 'dot online', 'aria-hidden': 'true' }),
-    h('div', { class: 'grow' },
-      h('p', { class: 't' }, `Headroom ${update.version} is ready`),
-      h('p', { class: 's' }, 'Restart Headroom Server to finish updating. It\'s back in a few seconds, with your settings and permissions.')),
-    h('button', { class: 'sm primary', type: 'button', 'data-key': 'update:install', onclick: installUpdate }, 'Restart to update'));
-}
+// The download button in the window's corner (ui/updates.js): it checks, shows a download, and becomes Restart to
+// update once one is ready. Settings → About says the same in words.
+const corner = native ? new UpdateCorner(document.getElementById('update-corner'), { app: 'Headroom Server', post: postNative }) : null;
+if (corner) document.getElementById('update-corner').hidden = false;
 
 /** Settings → About: where updates are, and the one thing to do about it. */
 function updateRow() {
@@ -662,8 +656,7 @@ native?.on(m => {
   if (m?.cmd === 'update') {
     const was = update;
     update = m;
-    if (m.phase === 'ready' && was?.phase !== 'ready') announce(`Headroom ${m.version} is ready. Restart Headroom Server to update.`);
-    if (m.phase === 'failed' && was?.phase === 'checking') announce(m.message || 'Couldn\'t check for updates.');
+    corner?.set(m); // (it says when one is ready, or how a check you asked for went)
     if (!st) return;
     // Only the download moved on: change the number, don't redraw.
     if (was && was.phase === m.phase && was.version === m.version && was.message === m.message && m.phase === 'downloading') {

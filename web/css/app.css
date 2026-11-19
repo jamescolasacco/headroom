@@ -310,17 +310,28 @@ label.field { display: block; margin: var(--s4) 0 6px; font-size: var(--t-label)
 .code-row > input { flex: 1; min-width: 0; min-height: 56px; }
 .code-row button { flex: none; min-height: 56px; padding: 0 22px; }
 
-/* a downloaded update, waiting for a restart (Headroom Viewer, Headroom Server's Home): lit, because it's "on" —
-   not warm (nobody is here) and not red (nothing is wrong) */
-.update-banner {
-  display: flex; align-items: center; gap: var(--s3); margin: 0 0 var(--s5); padding: 12px 12px 12px 16px;
-  border-radius: var(--r-panel); background: var(--panel); box-shadow: inset 0 0 0 1px var(--rim);
+/* updates, in a corner of Headroom Server's and Headroom Viewer's own windows (ui/updates.js): a quiet download button
+   that says what it's doing while it works, and lights up as Restart to update once an update is ready (lit: it's "on";
+   not warm, nobody is here; not red, nothing is wrong) */
+.upd {
+  min-height: 34px; height: 34px; min-width: 34px; padding: 0 7px; gap: 7px; border-radius: 17px; border-color: transparent;
+  color: var(--ink-2); font-size: var(--t-small); font-weight: 600; white-space: nowrap;
 }
-.update-banner .grow { flex: 1; min-width: 0; }
-.update-banner .t { margin: 0; font-weight: 600; }
-.update-banner .s { margin: 2px 0 0; font-size: var(--t-small); color: var(--ink-2); }
-.update-banner .dot { width: 9px; height: 9px; }
-.update-banner button { flex: none; }
+.upd .upd-icon { display: grid; place-items: center; width: 20px; height: 20px; flex: none; position: relative; }
+.upd .upd-icon svg { width: 20px; height: 20px; stroke-width: 1.9; }
+.upd .upd-label:empty { display: none; }
+.upd.open { padding: 0 13px 0 8px; box-shadow: inset 0 0 0 1px var(--rim); }
+.upd.busy { cursor: default; }
+.upd.busy:active { transform: none; }
+.upd.ready { background: var(--primary); color: var(--on-primary); box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary-glow) 45%, transparent); }
+@media (hover: hover) and (pointer: fine) { .upd.ready:hover { background: var(--primary-hover); } }
+.upd.failed:not(.open) .upd-icon::after { content: ""; position: absolute; top: 0; right: -1px; width: 7px; height: 7px; border-radius: 50%; background: var(--stop); }
+.upd.failed.open { color: var(--stop-ink); }
+.upd-track { opacity: .28; }
+.upd-bar { transition: stroke-dashoffset .3s linear; }
+.upd-spin { transform-origin: 12px 12px; animation: spin .9s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .upd-spin { animation-duration: 1.8s; } }
+.head-end { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
 
 /* signing in: the one panel on the page */
 .signin-card {

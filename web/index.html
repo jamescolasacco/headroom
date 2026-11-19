@@ -29,14 +29,12 @@
         <svg class="mark" viewBox="0 0 28 20" aria-hidden="true"><rect x="1.25" y="1.25" width="25.5" height="17.5" rx="4.75" fill="none" stroke="currentColor" stroke-width="2.5"/><rect class="mark-light" x="5.5" y="5.5" width="17" height="3.5" rx="1.75"/></svg>
         <h1>Headroom</h1>
       </div>
-      <button class="account-chip" id="account-chip" type="button" hidden></button>
+      <div class="head-end">
+        <!-- Headroom Viewer only: updates (ui/updates.js) -->
+        <div id="update-corner" hidden></div>
+        <button class="account-chip" id="account-chip" type="button" hidden></button>
+      </div>
     </header>
-    <!-- Headroom Viewer only: a downloaded update waiting for a restart -->
-    <div id="update-banner" class="update-banner" hidden>
-      <span class="dot online" aria-hidden="true"></span>
-      <div class="grow"><p class="t" id="update-title"></p><p class="s">It closes and opens again in a few seconds.</p></div>
-      <button type="button" class="small-btn primary" id="btn-update">Restart to update</button>
-    </div>
     <!-- signed out: a guest code, or your account -->
     <div id="signed-out" class="welcome" hidden>
       <div>
