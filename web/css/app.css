@@ -436,8 +436,12 @@ button.host-main:not(:disabled):not([aria-disabled="true"]):active { transform: 
 }
 
 /* ------------------------------------------------------------------ dialogs */
+/* The page draws under a phone's status bar and home indicator (viewport-fit=cover): a dialog keeps clear of them
+   (--sat, --sab), so a tall one (your account) never has its title and close button under the clock. */
 .dlg {
-  border: 1px solid transparent; padding: 0; border-radius: var(--r-float); width: min(480px, calc(100vw - 24px)); max-height: calc(100dvh - 32px);
+  inset: calc(16px + var(--sat)) calc(12px + var(--sar)) calc(16px + var(--sab)) calc(12px + var(--sal));
+  border: 1px solid transparent; padding: 0; border-radius: var(--r-float);
+  width: min(480px, calc(100vw - 24px - var(--sal) - var(--sar))); max-height: calc(100dvh - 32px - var(--sat) - var(--sab));
   background: var(--glass-solid); color: var(--ink); box-shadow: var(--float-shadow); overscroll-behavior: contain;
   opacity: 0;
   transition: opacity .15s var(--ease-out), transform .15s var(--ease-out), overlay .15s allow-discrete, display .15s allow-discrete;
