@@ -4,6 +4,7 @@ Remote desktop for your own computers, and quick help with a code: **Headroom Se
 
 - **Clicks on a phone or touchscreen are instant.** A tap's click goes out the moment your finger lifts, instead of a quarter of a second later in case a drag followed.
 - **Every Microsoft Remote Desktop gesture, plus double- and triple-click drags.** Tap, then touch and drag: a click-drag (text by the character). Tap tap, then touch and drag: a double-click drag (by the word). Tap tap tap, then touch and drag: a triple-click drag (by the paragraph). The same with two fingers is a right-click drag. Taps count as double and triple clicks just as your computer counts them.
+- **The extra-keys bar presses only on a tap.** Swiping along it scrolls it, without pressing the key you started on. Modifiers: tap for the next key or click (tap again to cancel), double-tap to lock until you tap them off.
 
 ## New in 0.4.3: download, install, and it keeps itself up to date
 

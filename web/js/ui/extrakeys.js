@@ -1,6 +1,11 @@
 // Extra-keys bar (Esc, Tab, Ctrl, Alt, Win/⌘, arrows, F-keys...) with sticky modifiers:
-//   tap = one-shot (applies to the next key or click), tap again = lock, tap a locked one = release.
-// Labels follow the host: a Mac host gets control/option/⌘ and Force Quit instead of Ctrl+Alt+Del.
+//   tap = held for the next key or click (tap again: off), double-tap = locked until tapped off.
+// A key goes on a tap: a swipe along the bar scrolls it and presses nothing (holding an arrow, del, pgup or pgdn
+// still repeats it). Labels follow the host: a Mac host gets control/option/⌘ and Force Quit instead of Ctrl+Alt+Del.
+
+const LOCK_TAP_MS = 500;        // two taps on a modifier this close lock it (a double-click's time on the computer)
+const TAP_SLOP = 10;            // px a tap may wander; further is a swipe along the bar
+const REPEAT_DELAY = 380, REPEAT_EVERY = 55;
 
 export class StickyModifiers extends EventTarget {
   constructor(keyboard) {
@@ -8,13 +13,19 @@ export class StickyModifiers extends EventTarget {
     this.keyboard = keyboard;
     this.state = new Map();     // code -> 'once' | 'locked'
     this.pressed = new Set();   // codes we pressed on the host for the current key/click
+    this.lastTap = null;        // { code, t }: the last tap on a modifier, for a double tap
   }
 
-  toggle(code) {
-    const s = this.state.get(code);
-    if (!s) this.state.set(code, 'once');
-    else if (s === 'once') this.state.set(code, 'locked');
-    else { this.state.delete(code); if (this.pressed.has(code)) { this.keyboard.send(code, false); this.pressed.delete(code); } }
+  /** A tap on a modifier: on for the next key or click, or off again. Two taps in a row lock it until the next tap. */
+  tap(code) {
+    const now = performance.now(), l = this.lastTap;
+    const double = !!l && l.code === code && now - l.t < LOCK_TAP_MS;
+    this.lastTap = double ? null : { code, t: now };
+    if (double) this.state.set(code, 'locked');
+    else if (this.state.has(code)) {
+      this.state.delete(code);
+      if (this.pressed.has(code)) { this.keyboard.send(code, false); this.pressed.delete(code); }
+    } else this.state.set(code, 'once');
     this.dispatchEvent(new Event('change'));
   }
 
@@ -111,31 +122,65 @@ export class ExtraKeysBar {
       const title = this.macHost && k.macTitle ? k.macTitle : k.title;
       if (title) b.title = title;
       if (k.code) b.dataset.code = k.code;
-      // Keep focus on the hidden input so the iOS keyboard stays up while tapping bar keys.
-      b.addEventListener('pointerdown', e => { e.preventDefault(); this._press(k, b); });
-      b.addEventListener('pointerup', () => this._stopRepeat());
-      b.addEventListener('pointercancel', () => this._stopRepeat());
-      b.addEventListener('pointerleave', () => this._stopRepeat());
+      // A key goes when the finger lifts without having moved: a swipe scrolls the bar (the browser then cancels
+      // the touch) and presses nothing. (pointerdown's default is prevented to keep focus on the hidden input, so
+      // the iOS keyboard stays up while tapping bar keys.)
+      b.addEventListener('pointerdown', e => { e.preventDefault(); this._down(k, e); });
+      b.addEventListener('pointermove', e => this._move(e));
+      b.addEventListener('pointerup', e => this._up(k, e));
+      b.addEventListener('pointercancel', () => this._cancel());
+      b.addEventListener('pointerleave', () => this._cancel());
       // From a keyboard (Enter or Space: a click with no pointer), press it once.
-      b.addEventListener('click', e => { if (e.detail === 0) { this._press(k, b); this._stopRepeat(); } });
+      b.addEventListener('click', e => { if (e.detail === 0) this._press(k); });
       this.el.append(b);
     }
   }
 
-  _press(k, btn) {
-    if (k.mod) { this.mods.toggle(k.code); return; }
-    if (k.action === 'cad') { this.conn.sendJson({ t: 'special', action: 'cad' }); return; }
-    const fire = () => { this.mods.pressForKey(); this.keyboard.tap(k.code); this.mods.consume(k.code); };
-    fire();
+  _down(k, e) {
+    this._cancel();
+    const p = { id: e.pointerId, x: e.clientX, y: e.clientY, repeating: false, wait: 0, every: 0 };
+    // Held still, an arrow (or del, pgup, pgdn) repeats.
     if (k.repeat) {
-      this._stopRepeat();
-      this._repeatT = setTimeout(() => { this._repeatI = setInterval(fire, 55); }, 380);
+      p.wait = setTimeout(() => {
+        p.repeating = true;
+        this._fire(k);
+        p.every = setInterval(() => this._fire(k), REPEAT_EVERY);
+      }, REPEAT_DELAY);
     }
+    this.touch = p;
   }
 
-  _stopRepeat() {
-    clearTimeout(this._repeatT); clearInterval(this._repeatI);
-    this._repeatT = this._repeatI = 0;
+  _move(e) {
+    const p = this.touch;
+    if (p && e.pointerId === p.id && Math.hypot(e.clientX - p.x, e.clientY - p.y) > TAP_SLOP) this._cancel();
+  }
+
+  _up(k, e) {
+    const p = this.touch;
+    if (!p || e.pointerId !== p.id) return;
+    this._cancel();
+    if (!p.repeating && Math.hypot(e.clientX - p.x, e.clientY - p.y) <= TAP_SLOP) this._press(k);
+  }
+
+  /** The touch on a key is over without a tap (a swipe, or the finger left it): nothing more happens. */
+  _cancel() {
+    const p = this.touch;
+    if (!p) return;
+    clearTimeout(p.wait);
+    clearInterval(p.every);
+    this.touch = null;
+  }
+
+  _press(k) {
+    if (k.mod) { this.mods.tap(k.code); return; }
+    if (k.action === 'cad') { this.conn.sendJson({ t: 'special', action: 'cad' }); return; }
+    this._fire(k);
+  }
+
+  _fire(k) {
+    this.mods.pressForKey();
+    this.keyboard.tap(k.code);
+    this.mods.consume(k.code);
   }
 
   _sync() {
