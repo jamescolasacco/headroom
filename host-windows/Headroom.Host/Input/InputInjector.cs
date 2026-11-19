@@ -120,6 +120,23 @@ public sealed unsafe class InputInjector
         });
     }
 
+    /// <summary>
+    /// Wakes a display that power saving turned off, the way nudging the mouse does. Keeping the display on
+    /// (ES_DISPLAY_REQUIRED, see SessionManager) doesn't turn it back on once it's off, and while it's off Windows draws
+    /// nothing for the capture to see. A move of zero, so the pointer stays where it is. This thread follows the input
+    /// desktop, so it also works on the lock screen in service mode.
+    /// </summary>
+    public void WakeDisplay()
+    {
+        Post(() =>
+        {
+            Span<Native.INPUT> input = stackalloc Native.INPUT[1];
+            input[0].type = Native.INPUT_MOUSE;
+            input[0].mi = new Native.MOUSEINPUT { dwFlags = Native.MOUSEEVENTF_MOVE, dwExtraInfo = Native.InjectedTag };
+            Send(input);
+        });
+    }
+
     /// <summary>0 left, 1 middle, 2 right, 3 back (X1), 4 forward (X2) — same numbering as MouseEvent.button.</summary>
     public void Button(InputContext ctx, int button, bool down)
     {

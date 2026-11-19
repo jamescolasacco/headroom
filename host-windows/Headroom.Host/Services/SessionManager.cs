@@ -30,6 +30,9 @@ public static class SessionManager
             EnsurePowerThread();
         }
         PowerSignal.Set();
+        // Wake the display if it was asleep (like moving the mouse): the power thread only keeps it on. Asleep, it
+        // shows Windows nothing to capture, and the viewer would have no picture to start the stream with.
+        Input.InputInjector.Instance.WakeDisplay();
         Changed?.Invoke();
     }
 
@@ -80,7 +83,8 @@ public static class SessionManager
                 lock (Gate) want = Sessions.Count > 0;
                 if (want)
                 {
-                    // Re-assert periodically; also wakes the display if it was off.
+                    // Re-assert periodically. This keeps the display on, but doesn't turn one back on that's already
+                    // off (Register wakes it with input).
                     Native.SetThreadExecutionState(Native.ES_CONTINUOUS | Native.ES_SYSTEM_REQUIRED | Native.ES_DISPLAY_REQUIRED);
                     if (!awake) Log.Debug("power", "keeping system and display awake while viewers are connected");
                     awake = true;

@@ -55,6 +55,12 @@ public sealed class ClientSession : IVideoSink
     private string? _lastClipboardSent;
     private bool _clipboardSubscribed;
     private volatile bool _closed;
+    /// <summary>Serialises starting the stream: the viewer's `start`, and <see cref="FollowDisplays"/> on the tick loop.</summary>
+    private readonly object _streamGate = new();
+    /// <summary>The viewer's last `start` (JSON), to start the stream again as displays come and go; null once it ends.</summary>
+    private volatile string? _startJson;
+    private long _lastDisplayCheckUs;
+    private int _displayGoneChecks;
     /// <summary>A read started while a guest waited for approval; the receive loop picks it up.</summary>
     private Task<(WebSocketMessageType Type, byte[] Data)?>? _carriedReceive;
 
@@ -433,7 +439,7 @@ public sealed class ClientSession : IVideoSink
                 Enqueue(new { t = "pong", id = Int(root, "id"), ts = root.TryGetProperty("ts", out var ts) ? ts.GetDouble() : 0, host = NowUs });
                 break;
             case "start":
-                StartStream(root);
+                lock (_streamGate) StartStream(root);
                 break;
             case "keyframe":
                 _pipeline?.RequestKeyframe();
@@ -506,13 +512,22 @@ public sealed class ClientSession : IVideoSink
         }
     }
 
-    private void StartStream(JsonElement root)
+    /// <summary>
+    /// Starts or changes the stream; callers hold _streamGate. <paramref name="retry"/>: <see cref="FollowDisplays"/>
+    /// starting it again from the viewer's last request, whose audio setting may be out of date by then.
+    /// </summary>
+    private void StartStream(JsonElement root, bool retry = false)
     {
+        _startJson = root.GetRawText();
+        // Sound needs no display, so it follows the request even while there's no picture to show.
+        if (!retry && root.TryGetProperty("audio", out var a)) SetAudio(a.GetBoolean());
         var cfg = ConfigStore.Current;
         var monitors = Displays.Enumerate();
         if (monitors.Count == 0)
         {
-            Enqueue(new { t = "status", capture = "unavailable", detail = "no displays" });
+            // The only monitor is off or unplugged: say so, and FollowDisplays starts the stream once one is back.
+            Log.Info("session", $"{Id}: no display to stream; waiting for one");
+            OnCaptureStatus(CaptureStatus.Unavailable, Displays.NoneConnected);
             return;
         }
         var wanted = Str(root, "monitor");
@@ -545,7 +560,6 @@ public sealed class ClientSession : IVideoSink
             _pipeline.UpdateSettings(settings);
         }
         AttachCursor();
-        if (root.TryGetProperty("audio", out var a)) SetAudio(a.GetBoolean());
         SyncClipboard();
         Log.Info("session", $"{Id}: stream {monitor.Id} ({monitor.Name}) max {maxFps} fps, {_maxKbps} kbps cap, view-only={_viewOnly}");
     }
@@ -860,12 +874,58 @@ public sealed class ClientSession : IVideoSink
                 break;
             }
             AttachCursor();
+            try { FollowDisplays(now); }
+            catch (Exception ex) { Log.Warn("session", $"{Id}: display check failed: {ex.Message}"); }
             AdaptBitrate(now);
             if (now - lastStats >= 1_000_000)
             {
                 lastStats = now;
                 SendStats(now);
             }
+        }
+    }
+
+    /// <summary>
+    /// Keeps the stream the viewer asked for on a display that exists. A monitor switched off at its button can leave
+    /// Windows' display list (over DisplayPort it's as good as unplugged): with no display at all there's nothing to
+    /// stream, and the stream starts here once one is back. A streamed display that stays gone while others remain
+    /// (or that came back under another name) is swapped for the one asked for, or the main display. Checked once a
+    /// second, and only while there's no stream or its capture is unavailable.
+    /// </summary>
+    private void FollowDisplays(long now)
+    {
+        var request = _startJson;
+        if (request == null || now - _lastDisplayCheckUs < 1_000_000) return;
+        _lastDisplayCheckUs = now;
+        var pipeline = _pipeline;
+        if (pipeline != null && pipeline.Source?.Status != CaptureStatus.Unavailable)
+        {
+            _displayGoneChecks = 0;
+            return;
+        }
+        var monitors = Displays.Enumerate();
+        if (monitors.Count == 0) return; // still none: the viewer was told, and a running capture keeps trying too
+        if (pipeline != null)
+        {
+            // Its display is listed (again): the capture picks it up by itself. Otherwise give it 3 checks, as a display
+            // can drop out of the list for a moment while Windows changes modes.
+            var streamed = pipeline.Monitor.Id;
+            if (monitors.Any(m => m.Id.Equals(streamed, StringComparison.OrdinalIgnoreCase)))
+            {
+                _displayGoneChecks = 0;
+                return;
+            }
+            if (++_displayGoneChecks < 3) return;
+        }
+        _displayGoneChecks = 0;
+        lock (_streamGate)
+        {
+            // Look again next time if a start got in meanwhile (this saw it half done), or the session is ending.
+            if (!ReferenceEquals(_startJson, request) || !ReferenceEquals(_pipeline, pipeline)) return;
+            Log.Info("session", $"{Id}: displays changed; starting the stream again");
+            Enqueue(new { t = "monitors", monitors = monitors.Select(MonitorJson).ToArray() });
+            using var doc = JsonDocument.Parse(request);
+            StartStream(doc.RootElement, retry: true);
         }
     }
 
@@ -978,6 +1038,9 @@ public sealed class ClientSession : IVideoSink
 
     private void Cleanup()
     {
+        // No more (re)starts: the tick loop can outlive the receive loop (a dropped socket) and would otherwise be able to
+        // start a pipeline (and audio) after this has torn them down.
+        lock (_streamGate) _startJson = null;
         InputInjector.Instance.ReleaseAll(_input);
         DetachCursor();
         if (_audioEnabled) AudioService.Instance.Unsubscribe(OnAudioPacket);

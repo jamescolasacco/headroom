@@ -25,6 +25,17 @@ public sealed record MonitorInfo
 
 public static class Displays
 {
+    /// <summary>
+    /// What the viewer is told while Windows lists no display at all: the only monitor is unplugged, or switched off
+    /// at its button in a way that removes it (usual over DisplayPort; over HDMI it often stays listed). Then there's
+    /// nothing to capture.
+    /// </summary>
+    public const string NoneConnected =
+        "No display is connected to the computer: turn its monitor on, or use an HDMI dummy plug or a virtual display driver. Retrying…";
+
+    /// <summary>What the viewer is told while the display being streamed is gone but others remain.</summary>
+    public const string Disconnected = "This display was turned off or disconnected. Retrying…";
+
     public static List<MonitorInfo> Enumerate()
     {
         var result = new List<MonitorInfo>();

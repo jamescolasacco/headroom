@@ -43,6 +43,13 @@ public sealed class CaptureSource : IDisposable
     private const int E_ACCESSDENIED = unchecked((int)0x80070005);
     private const int WAIT_TIMEOUT = 0x102;
 
+    /// <summary>
+    /// How long a new duplication may go without a picture before the stream starts on a black one. Windows draws
+    /// nothing while the display is off (power saving), so no frame comes until it's back on; a working display
+    /// delivers its first frame at once.
+    /// </summary>
+    private const int FirstImageTimeoutMs = 2000;
+
     private readonly Thread _thread;
     private volatile bool _stop;
     private readonly object _subGate = new();
@@ -56,6 +63,8 @@ public sealed class CaptureSource : IDisposable
     private IDXGIOutputDuplication? _dup;
     private ID3D11Texture2D? _capShared;
     private IDXGIKeyedMutex? _capMutex;
+    private long _duplicatingSince;
+    private uint _modeWidth, _modeHeight;
 
     // work-side (shared GpuDevice)
     private ID3D11Texture2D? _workShared;
@@ -74,6 +83,8 @@ public sealed class CaptureSource : IDisposable
     public int TextureHeight => _texHeight;
     public int Rotation { get; private set; }
     public CaptureStatus Status { get; private set; } = CaptureStatus.Starting;
+    /// <summary>Why the capture is unavailable, in words for the viewer (null when there's nothing to add).</summary>
+    public string? StatusDetail { get; private set; }
     public bool HasImage => _workShared != null && FrameVersion > 0;
 
     // Cursor state (desktop coordinates relative to the monitor's top-left).
@@ -128,11 +139,12 @@ public sealed class CaptureSource : IDisposable
         }
     }
 
-    private void SetStatus(CaptureStatus s)
+    private void SetStatus(CaptureStatus s, string? detail = null)
     {
-        if (Status == s) return;
+        if (Status == s && StatusDetail == detail) return;
+        StatusDetail = detail;
         Status = s;
-        Log.Info("capture", $"{Monitor.Id}: {s}");
+        Log.Info("capture", $"{Monitor.Id}: {s}{(detail != null ? $" ({detail})" : "")}");
         StatusChanged?.Invoke(this, s);
         SignalFrame();
     }
@@ -153,17 +165,19 @@ public sealed class CaptureSource : IDisposable
                 if (_dup == null)
                 {
                     desktop.Sync();
-                    if (!TryCreateDuplication(out int hr))
+                    if (!TryCreateDuplication(out int hr, out string? missing))
                     {
                         // E_ACCESSDENIED while the secure desktop (UAC / lock screen) is up and we're not SYSTEM.
-                        bool secure = hr == E_ACCESSDENIED || desktop.Blocked ||
-                                      (InputDesktopFollower.QueryInputDesktopName() is { } n && !n.Equals("Default", StringComparison.OrdinalIgnoreCase));
-                        SetStatus(secure ? CaptureStatus.SecureDesktop : CaptureStatus.Unavailable);
+                        // A display that isn't there at all says so, whichever desktop is showing.
+                        bool secure = missing == null && (hr == E_ACCESSDENIED || desktop.Blocked ||
+                                      (InputDesktopFollower.QueryInputDesktopName() is { } n && !n.Equals("Default", StringComparison.OrdinalIgnoreCase)));
+                        SetStatus(secure ? CaptureStatus.SecureDesktop : CaptureStatus.Unavailable, secure ? null : missing);
                         failures++;
                         Thread.Sleep(Math.Min(1000, 100 * failures));
                         continue;
                     }
                     failures = 0;
+                    _duplicatingSince = Environment.TickCount64;
                     SetStatus(CaptureStatus.Ok);
                 }
 
@@ -175,7 +189,11 @@ public sealed class CaptureSource : IDisposable
                 }
 
                 var result = _dup!.AcquireNextFrame(100, out var info, out var resource);
-                if (result.Code == DXGI_ERROR_WAIT_TIMEOUT) continue;
+                if (result.Code == DXGI_ERROR_WAIT_TIMEOUT)
+                {
+                    BlankIfNoImageYet();
+                    continue;
+                }
                 if (result.Code == DXGI_ERROR_ACCESS_LOST || result.Code == DXGI_ERROR_INVALID_CALL)
                 {
                     ResetDuplication();
@@ -212,6 +230,7 @@ public sealed class CaptureSource : IDisposable
                     Interlocked.Increment(ref _frameVersion);
                     SignalFrame();
                 }
+                else BlankIfNoImageYet(); // e.g. only the pointer moved
             }
             catch (SharpGenException ex) when (ex.ResultCode.Code == DXGI_ERROR_DEVICE_REMOVED || ex.ResultCode.Code == DXGI_ERROR_DEVICE_RESET)
             {
@@ -235,14 +254,20 @@ public sealed class CaptureSource : IDisposable
         if (mmcss != 0) Native.AvRevertMmThreadCharacteristics(mmcss);
     }
 
-    private bool TryCreateDuplication(out int hr)
+    /// <summary><paramref name="missing"/> says why when the display isn't in Windows' list at all.</summary>
+    private bool TryCreateDuplication(out int hr, out string? missing)
     {
         hr = 0;
+        missing = null;
         // Re-resolve the monitor every time: resolution, rotation or adapter may have changed.
-        var current = Displays.Enumerate().FirstOrDefault(m => m.Id.Equals(Monitor.Id, StringComparison.OrdinalIgnoreCase));
+        var displays = Displays.Enumerate();
+        var current = displays.FirstOrDefault(m => m.Id.Equals(Monitor.Id, StringComparison.OrdinalIgnoreCase));
         if (current == null)
         {
+            // Turned off or unplugged. A monitor switched off at its button often leaves the list (over DisplayPort
+            // it's as good as unplugged); keep trying, as it normally comes back under the same name.
             hr = DXGI_ERROR_UNSUPPORTED;
+            missing = displays.Count == 0 ? Displays.NoneConnected : Displays.Disconnected;
             return false;
         }
         Monitor = current;
@@ -289,6 +314,9 @@ public sealed class CaptureSource : IDisposable
             catch (SharpGenException ex)
             {
                 hr = ex.ResultCode.Code;
+                // A reset or removed GPU (driver update, TDR) fails every duplication made on the old device. The capture
+                // loop's handler recreates the devices; returning false here would retry on the dead one forever.
+                if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) throw;
                 if (hr == DXGI_ERROR_UNSUPPORTED)
                 {
                     using var output1 = output.QueryInterface<IDXGIOutput1>();
@@ -303,6 +331,9 @@ public sealed class CaptureSource : IDisposable
             }
 
             var desc = _dup.Description;
+            // Desktop images come in the mode's (scan-out) size: the size of a black stand-in, if one is needed.
+            _modeWidth = (uint)desc.ModeDescription.Width;
+            _modeHeight = (uint)desc.ModeDescription.Height;
             Rotation = desc.Rotation switch
             {
                 ModeRotation.Rotate90 => 90,
@@ -347,51 +378,77 @@ public sealed class CaptureSource : IDisposable
         _capLuid = 0;
     }
 
+    /// <summary>(Re)creates the shared texture for images of this size, bumping <see cref="Generation"/> when it does.</summary>
+    private void EnsureShared(uint width, uint height)
+    {
+        if (_capShared != null && _texWidth == (int)width && _texHeight == (int)height) return;
+        ReleaseShared();
+        _capShared = _capDevice!.CreateTexture2D(new Texture2DDescription
+        {
+            Width = width,
+            Height = height,
+            MipLevels = 1,
+            ArraySize = 1,
+            Format = Format.B8G8R8A8_UNorm,
+            SampleDescription = new SampleDescription(1, 0),
+            Usage = ResourceUsage.Default,
+            BindFlags = BindFlags.ShaderResource | BindFlags.RenderTarget,
+            CPUAccessFlags = CpuAccessFlags.None,
+            MiscFlags = ResourceOptionFlags.SharedKeyedMutex,
+        });
+        _capMutex = _capShared.QueryInterface<IDXGIKeyedMutex>();
+        using (var res = _capShared.QueryInterface<IDXGIResource>())
+        {
+            var handle = res.SharedHandle;
+            var gpu = Gpu!;
+            gpu.Lock();
+            try
+            {
+                var opened = gpu.Device.OpenSharedResource<ID3D11Texture2D>(handle);
+                lock (_latestGate)
+                {
+                    _workShared = opened;
+                    _workMutex = opened.QueryInterface<IDXGIKeyedMutex>();
+                }
+            }
+            finally { gpu.Unlock(); }
+        }
+        _texWidth = (int)width;
+        _texHeight = (int)height;
+        Interlocked.Increment(ref _generation);
+    }
+
     private bool CopyToShared(ID3D11Texture2D src)
     {
         var d = src.Description;
-        if (_capShared == null || _texWidth != (int)d.Width || _texHeight != (int)d.Height)
-        {
-            ReleaseShared();
-            _capShared = _capDevice!.CreateTexture2D(new Texture2DDescription
-            {
-                Width = d.Width,
-                Height = d.Height,
-                MipLevels = 1,
-                ArraySize = 1,
-                Format = Format.B8G8R8A8_UNorm,
-                SampleDescription = new SampleDescription(1, 0),
-                Usage = ResourceUsage.Default,
-                BindFlags = BindFlags.ShaderResource | BindFlags.RenderTarget,
-                CPUAccessFlags = CpuAccessFlags.None,
-                MiscFlags = ResourceOptionFlags.SharedKeyedMutex,
-            });
-            _capMutex = _capShared.QueryInterface<IDXGIKeyedMutex>();
-            using (var res = _capShared.QueryInterface<IDXGIResource>())
-            {
-                var handle = res.SharedHandle;
-                var gpu = Gpu!;
-                gpu.Lock();
-                try
-                {
-                    var opened = gpu.Device.OpenSharedResource<ID3D11Texture2D>(handle);
-                    lock (_latestGate)
-                    {
-                        _workShared = opened;
-                        _workMutex = opened.QueryInterface<IDXGIKeyedMutex>();
-                    }
-                }
-                finally { gpu.Unlock(); }
-            }
-            _texWidth = (int)d.Width;
-            _texHeight = (int)d.Height;
-            Interlocked.Increment(ref _generation);
-        }
-
+        EnsureShared(d.Width, d.Height);
         if (KeyedMutex.Acquire(_capMutex!, 0, 100) != 0) return false; // a consumer is stuck; drop this frame
         try { _capContext!.CopyResource(_capShared, src); }
         finally { _capMutex!.ReleaseSync(0); }
         return true;
+    }
+
+    /// <summary>
+    /// Starts the stream on a black picture when the display has shown nothing since duplication began (see
+    /// <see cref="FirstImageTimeoutMs"/>). Without an image there's no keyframe or decoder config, so the viewer would
+    /// wait on "Starting stream…" for as long as the display sleeps. With one the stream starts, the first input the
+    /// viewer sends wakes the display, and real frames replace the black as soon as there are any.
+    /// </summary>
+    private void BlankIfNoImageYet()
+    {
+        if (HasImage || _modeWidth == 0 || _modeHeight == 0) return;
+        if (Environment.TickCount64 - _duplicatingSince < FirstImageTimeoutMs) return;
+        EnsureShared(_modeWidth, _modeHeight);
+        if (KeyedMutex.Acquire(_capMutex!, 0, 100) != 0) return; // try again on the next pass
+        try
+        {
+            using var view = _capDevice!.CreateRenderTargetView(_capShared!);
+            _capContext!.ClearRenderTargetView(view, new Vortice.Mathematics.Color4(0f, 0f, 0f, 1f));
+        }
+        finally { _capMutex!.ReleaseSync(0); }
+        Log.Info("capture", $"{Monitor.Id}: no picture from the display in {FirstImageTimeoutMs} ms (off or asleep?); starting on a black one");
+        Interlocked.Increment(ref _frameVersion);
+        SignalFrame();
     }
 
     private void UpdateCursorPosition(bool visibleOnThisOutput)

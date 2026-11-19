@@ -69,6 +69,7 @@ public sealed class VideoPipeline : IDisposable
     private uint _frameId;
     private readonly Dictionary<long, long> _captureTimes = new();
     private CaptureStatus _lastStatus = CaptureStatus.Starting;
+    private string? _lastDetail;
 
     public int Epoch => _epoch;
     public string? EncoderName => _encoder?.Name;
@@ -125,10 +126,13 @@ public sealed class VideoPipeline : IDisposable
 
                 ApplyPendingSettings();
                 var src = _source!;
-                if (src.Status != _lastStatus)
+                // The detail can change on its own too (the display went, then every display went).
+                var detail = src.StatusDetail;
+                if (src.Status != _lastStatus || detail != _lastDetail)
                 {
                     _lastStatus = src.Status;
-                    _sink.OnCaptureStatus(src.Status, src.Status == CaptureStatus.SecureDesktop ? "secure-desktop" : null);
+                    _lastDetail = detail;
+                    _sink.OnCaptureStatus(src.Status, src.Status == CaptureStatus.SecureDesktop ? "secure-desktop" : detail);
                     if (src.Status == CaptureStatus.Ok) _keyframeRequested = true;
                 }
                 if (src.Status != CaptureStatus.Ok || !src.HasImage || src.Gpu == null) continue;
@@ -220,6 +224,7 @@ public sealed class VideoPipeline : IDisposable
         _source = CaptureHub.Acquire(monitor);
         _signal = _source.Subscribe();
         _lastStatus = CaptureStatus.Starting;
+        _lastDetail = null;
     }
 
     private void DetachSource()
