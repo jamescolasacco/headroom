@@ -2,6 +2,7 @@ import CoreGraphics
 import CoreText
 import CoreVideo
 import Foundation
+import ImageIO
 
 /// A synthetic display (HEADROOM_TEST_PATTERN=1): animated bars, a moving block, fine text and a frame
 /// counter, drawn into IOSurface-backed BGRA buffers at 60 fps. Every few seconds it holds still so the
@@ -42,13 +43,22 @@ final class TestPatternSource: CaptureSource {
     /// then holds still for 2 s, beside a photo. Far harder to encode than the bars, so stream quality and bitrate
     /// can be measured on something like a real desktop.
     private static let desktopStyle = ProcessInfo.processInfo.environment["HEADROOM_TEST_PATTERN_STYLE"] == "desktop"
+    /// HEADROOM_TEST_PATTERN_SCROLL: how far the desktop page scrolls each frame (6 px), or "jump": once every 4 s it
+    /// jumps most of a screen at once (Page Down, a link to another page) and holds still: new content everywhere.
+    private static let scroll = ProcessInfo.processInfo.environment["HEADROOM_TEST_PATTERN_SCROLL"] ?? "6"
+    private static let jump = scroll == "jump"
+    private static let scrollPx = CGFloat(Double(scroll) ?? 6)
+    /// HEADROOM_TEST_PATTERN_DUMP=<dir>: the desktop style also writes each picture it then holds still there
+    /// (still-<n>.png), so tools/stream-check.mjs --source=<dir> can score the stream against what the screen showed.
+    private static let dumpDir = ProcessInfo.processInfo.environment["HEADROOM_TEST_PATTERN_DUMP"]
+    private let dumpQueue = DispatchQueue(label: "headroom.testpattern.dump", qos: .utility)
     private var page: CGImage?
     private var photo: CGImage?
 
     private func tick() {
         frame += 1
         // Bars: 4 s of motion, then 2 s still. Desktop: 2 s of scrolling, then 2 s still.
-        if Self.desktopStyle ? frame > 1 && frame % 240 >= 120 : frame > 1 && frame % 360 >= 240 { return }
+        if Self.desktopStyle ? frame > 1 && (Self.jump ? frame % 240 != 0 : frame % 240 >= 120) : frame > 1 && frame % 360 >= 240 { return }
         guard let pool else { return }
         var pbOut: CVPixelBuffer?
         guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pbOut) == kCVReturnSuccess, let pb = pbOut else { return }
@@ -60,6 +70,16 @@ final class TestPatternSource: CaptureSource {
            let ctx = CGContext(data: base, width: w, height: h, bitsPerComponent: 8, bytesPerRow: CVPixelBufferGetBytesPerRow(pb), space: cs,
                                bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) {
             if Self.desktopStyle { drawDesktop(ctx, w, h) } else { draw(ctx, w, h) }
+            // The last picture before a still spell (a jump's only one): what the stream should end up showing.
+            if Self.desktopStyle, let dir = Self.dumpDir, Self.jump || frame % 240 == 119, let image = ctx.makeImage() {
+                let url = URL(fileURLWithPath: dir).appendingPathComponent("still-\(frame / 240).png")
+                dumpQueue.async {
+                    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+                    guard let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else { return }
+                    CGImageDestinationAddImage(dest, image, nil)
+                    CGImageDestinationFinalize(dest)
+                }
+            }
         }
         CVPixelBufferUnlockBaseAddress(pb, [])
         publish(pb)
@@ -109,7 +129,7 @@ final class TestPatternSource: CaptureSource {
         c.setFillColor(CGColor(gray: 0.93, alpha: 1))
         c.fill(CGRect(x: 0, y: 0, width: W, height: H))
         // Scrolled further each cycle (the still half holds the last position); wraps at the end of the page.
-        let scrolled = CGFloat((frame / 240) * 120 + min(frame % 240, 120)) * 6
+        let scrolled = Self.jump ? CGFloat(frame / 240) * H * 0.9 : CGFloat((frame / 240) * 120 + min(frame % 240, 120)) * Self.scrollPx
         let offset = scrolled.truncatingRemainder(dividingBy: CGFloat(page.height) - H)
         // Bottom-left origin: the page's top row at the top of the screen, then `offset` rows further down.
         c.draw(page, in: CGRect(x: 0, y: H - CGFloat(page.height) + offset, width: CGFloat(page.width), height: CGFloat(page.height)))
