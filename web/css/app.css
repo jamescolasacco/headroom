@@ -391,6 +391,15 @@ button.host-main:not(:disabled):not([aria-disabled="true"]):active { transform: 
 .empty-actions { margin-top: var(--s5); display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s4); }
 .empty-actions p { margin: 0; }
 #home-hint { margin-top: var(--s6); color: var(--ink-3); max-width: 70ch; }
+/* "Install app" / "Add to Home Screen", under your devices */
+.install-slot { display: flex; justify-content: center; margin-top: var(--s6); }
+.install-slot:not([hidden]) + #home-hint { margin-top: var(--s3); }
+/* steps that point at the phone's own buttons, drawn like them */
+.steps { margin: var(--s4) 0 0; padding-left: 1.3em; display: grid; gap: var(--s3); line-height: 1.55; }
+.steps li { padding-left: 4px; }
+.steps li::marker { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.glyph { display: inline-flex; vertical-align: -3px; margin-inline: 1px; color: var(--light); }
+.glyph svg { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
 @media (max-width: 400px) {
   input.code-input { font-size: 22px; letter-spacing: .08em; }

@@ -109,13 +109,61 @@ function renderHome() {
     if (!$('code-slot').firstChild) $('code-slot').append(codeForm({ inline: true }));
     if (!$('signin-slot').firstChild) $('signin-slot').append(authCard());
   }
+  renderInstall(acct);
   const hint = [];
   if (cantShow()) hint.push(cantShow());
-  if (acct && isIOS && !isStandalone) hint.push('Tip: Share → Add to Home Screen for a full-screen app (sign in again inside it).');
   if (acct && nativeViewer) hint.push(isMac
     ? 'Tip: ⌘Tab, ⌘Space and other system shortcuts go to the remote computer while its window is focused.'
     : 'Tip: Win, Alt+Tab and PrtScn go to the remote computer while its window is focused. Ctrl+Alt+End sends Ctrl+Alt+Del.');
   $('home-hint').textContent = hint.join(' ');
+}
+
+// ---------------------------------------------------------------------------------------- the app on your phone
+
+// Chrome and Edge (Android, Windows, Mac) offer to install the website as an app: the install button here asks them.
+let installPrompt = null;
+addEventListener('beforeinstallprompt', e => { e.preventDefault(); installPrompt = e; renderInstall(); });
+addEventListener('appinstalled', () => { installPrompt = null; renderInstall(); });
+
+/**
+ * "Install app" under your devices, while this is a website in a browser tab: Chrome's and Edge's own install dialog,
+ * or on an iPhone or iPad, the steps for Add to Home Screen (a website can't open that for you there; the share sheet a
+ * page can open doesn't even list it).
+ */
+function renderInstall(acct = Account.loadAccount()) {
+  const slot = $('install-slot');
+  const ios = isIOS && !nativeViewer;
+  const show = !!acct && !isStandalone && (!!installPrompt || ios);
+  slot.hidden = !show;
+  if (!show) { slot.replaceChildren(); return; }
+  const btn = h('button', { type: 'button', class: 'small-btn' }, svg(I.addHome, 18), installPrompt ? 'Install app' : 'Add to Home Screen');
+  btn.onclick = async () => {
+    if (!installPrompt) { homeScreenSteps(); return; }
+    const p = installPrompt;
+    installPrompt = null; // each offer can be shown once; the browser makes a new one if you say no
+    await p.prompt().catch(() => { });
+    renderInstall();
+  };
+  slot.replaceChildren(btn);
+}
+
+/** iPhone and iPad: Add to Home Screen, in the browser you're in. */
+function homeScreenSteps() {
+  const ua = navigator.userAgent;
+  const glyph = path => h('span', { class: 'glyph', 'aria-hidden': 'true' }, svg(path, 17));
+  const first = /CriOS/.test(ua) ? ['Tap Share ', glyph(I.share), ' in the address bar.']
+    : /FxiOS/.test(ua) ? ['Tap the menu ', glyph(I.menu), ', then Share.']
+    : /EdgiOS/.test(ua) ? ['Tap the menu ', glyph(I.more), ', then Share.']
+    : ['Tap Share ', glyph(I.share), '. In the newest Safari it\'s in the ', glyph(I.more), ' menu.'];
+  dialog(dlg => {
+    dlg.append(h('div', { class: 'body' },
+      h('h2', {}, 'Add Headroom to your Home Screen'),
+      h('p', { class: 'muted' }, 'It opens full screen, like an app. Add it in three taps:'),
+      h('ol', { class: 'steps' },
+        h('li', {}, ...first),
+        h('li', {}, 'Tap Add to Home Screen ', glyph(I.addHome), '. Not in the list? Tap View More first.'),
+        h('li', {}, 'Tap Add. Then open Headroom from your Home Screen and sign in once more there.'))));
+  });
 }
 
 /** Starts the sign-in card over (it's kept between renders so typing isn't lost). */
