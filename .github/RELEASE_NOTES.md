@@ -1,11 +1,17 @@
 Remote desktop for your own computers, and quick help with a code: **Headroom Server** on the computer you want to reach; **Headroom Viewer**, any browser, or an iPhone/iPad on the device you use.
 
+## New in 0.4.7: phones type where you can see it
+
+- **The toolbar is at the bottom on phones and tablets**, in reach of your thumb. Its menus open upward, and ⌄ folds it to a small tab. While the on-screen keyboard is up, the keys bar takes its place. With a mouse it stays at the top edge, since the bottom edge is your computer's own taskbar or Dock.
+- **What you type shows just above the keys** while you type, so you can read it when the field you're typing into is under the keyboard or too small to see. Backspace takes characters off, and shortcuts sent with a held Ctrl or ⌘ show as keys (⌃C), so a modifier left on is easy to spot. It fades a few seconds after you stop, and starts over when you tap the screen, press Return, Esc, Tab or an arrow key, or close the keyboard. The eye at the end of the keys bar turns it off; Hide keyboard is beside it.
+- **Windows: connecting works with the PC's monitor off.** A monitor asleep from power saving is woken when you connect, and if it shows nothing the stream starts on a black picture that your first click or keypress replaces; before, you waited on "Starting stream…" for as long as it slept. A monitor switched off at its button can disappear from Windows (usual over DisplayPort): then Headroom says no display is connected, and the picture comes back by itself when the monitor does. With no display at all there's nothing to show: keep one on, or use an HDMI dummy plug or a virtual display driver.
+
+**Updating:** 0.4.3 and later update themselves (**Restart to update**; **Check for updates** in the tray or menu-bar menu looks right away). From 0.4.2 or older, install this once from below: 0.4.2 can't update itself, and on a Mac, macOS asks for Screen Recording and Accessibility one last time, because the signature changes to Headroom's certificate; after that, updates keep them. On your own Headroom server, `git pull` and run `tools/install-account-server-linux.sh` again for the website's part (the phone toolbar and what-you-type here, Auto resolution in 0.4.6).
+
 ## New in 0.4.6: a sharper, smoother picture
 
 - **Sharp over the internet, not just at home.** Headroom Server mistook ordinary internet delay for a congested network: whenever a viewer was more than about 60 ms away (through Headroom's relay, most of the time) it dropped the picture to its lowest quality and kept it there. Now it only slows down when the network is actually full, and then a little at a time. Measured through a relay: 12–40 Mb/s instead of 0.8–3, and a picture as sharp as with no network in between.
 - **Auto resolution: the picture is sent as big as you see it.** A phone showing a Retina Mac at a third of its size gets a lighter stream: less delay, smooth scrolling at 60 frames a second, and a sharper picture at the size it's shown. It grows to full resolution as you zoom in, and a big window gets every pixel. **Picture and network → Resolution** still has Native and fixed sizes.
-
-**Updating:** 0.4.3 and later update themselves (**Restart to update**). From 0.4.2 or older, install this once from below: 0.4.2 can't update itself, and on a Mac, macOS asks for Screen Recording and Accessibility one last time, because the signature changes to Headroom's certificate; after that, updates keep them. On your own Headroom server, `git pull` and run `tools/install-account-server-linux.sh` again for the website's part (Auto resolution, and the phone changes in 0.4.4).
 
 ## New in 0.4.5: Stop server keeps the window working
 
