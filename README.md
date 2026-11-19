@@ -113,7 +113,9 @@ silicon). The first build fetches SwiftNIO, swift-nio-ssl and swift-certificates
 tools/install-macos.sh          # add --cli to also put `headroom` on your PATH
 ```
 - **Install:** copies both apps to `/Applications` (or `~/Applications`) and starts Headroom Server. It lives in
-  the **menu bar**; turn on **Start at login** in its Settings.
+  the **menu bar**; turn on **Start at login** in its Settings. When the menu bar is too full to show its icon
+  (macOS hides icons that don't fit beside a MacBook's notch), it keeps a **Dock** icon instead while it runs:
+  click it for the window, or right-click it for the same quick actions.
 - **Permissions:** macOS asks for two, and the window shows both with buttons to fix them:
   - **Screen Recording** (Privacy & Security → Screen & System Audio Recording): video and sound. macOS restarts
     the app after you turn it on.

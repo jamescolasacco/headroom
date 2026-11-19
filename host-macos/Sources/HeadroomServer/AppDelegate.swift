@@ -24,6 +24,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     /// Updates: the version we've told the user about (once), and whether we're quitting to install one.
     private var announcedUpdate: String?
     private var updating = false
+    /// Set once the menu bar has had a moment to place the icon (see updateDockIcon).
+    private var menuBarSettled = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         // Launched as a login item: stay in the menu bar unless something needs the user.
@@ -40,6 +42,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
+        // Whether macOS shows the icon can change (another menu-bar app quits, the icon is dragged elsewhere).
+        if let w = statusItem.button?.window {
+            NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification, object: w, queue: .main) { [weak self] _ in
+                self?.updateDockIcon()
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            self?.menuBarSettled = true
+            self?.updateDockIcon()
+        }
 
         UNUserNotificationCenter.current().delegate = self
 
@@ -88,6 +100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     private func apply(_ st: ServerStatus?) {
+        updateDockIcon()
         guard let st else {
             status = nil
             offlinePolls += 1
@@ -254,9 +267,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         NSApp.terminate(nil)
     }
 
-    // ------------------------------------------------------------------ menu
+    // ------------------------------------------------------------------ menu bar and Dock
 
-    func menuNeedsUpdate(_ menu: NSMenu) {
+    /// macOS drops menu-bar icons that don't fit: beside a MacBook's notch a full menu bar hides the newest ones,
+    /// and menu-bar managers hide others on purpose. So Headroom Server has a Dock icon while its window is open, and
+    /// also while macOS isn't showing its menu-bar icon: with the window closed it's still in reach, with the same
+    /// quick actions on a right-click (applicationDockMenu).
+    private func updateDockIcon(windowOpen: Bool? = nil) {
+        guard menuBarSettled else { return } // a moment after launch, the menu bar has placed (or hidden) the icon
+        let open = windowOpen ?? (settings?.window.isVisible == true)
+        let iconShown = statusItem.button?.window?.occlusionState.contains(.visible) ?? false
+        let policy: NSApplication.ActivationPolicy = open || !iconShown ? .regular : .accessory
+        if NSApp.activationPolicy() != policy { NSApp.setActivationPolicy(policy) }
+    }
+
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        let menu = NSMenu()
+        fillMenu(menu, dock: true)
+        return menu
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) { fillMenu(menu) }
+
+    /// The quick actions, for the menu-bar icon's menu and the Dock icon's (which has its own Quit).
+    private func fillMenu(_ menu: NSMenu, dock: Bool = false) {
         menu.removeAllItems()
         let st = status
         let header: String
@@ -300,8 +334,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         case .ready: break
         default: menu.addItem(item("Check for Updates…", #selector(checkForUpdates)))
         }
-        menu.addItem(.separator())
-        menu.addItem(item("Quit Headroom Server", #selector(quit), key: "q"))
+        if !dock {
+            menu.addItem(.separator())
+            menu.addItem(item("Quit Headroom Server", #selector(quit), key: "q"))
+        }
     }
 
     private func item(_ title: String, _ action: Selector, enabled: Bool = true, key: String = "") -> NSMenuItem {
@@ -374,6 +410,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         if settings == nil {
             settings = SettingsWindow { [weak self] done in self?.startServer(done) }
             settings?.installUpdate = { [weak self] in self?.restartToUpdate() }
+            settings?.onClose = { [weak self] in self?.updateDockIcon(windowOpen: false) }
         }
         settings?.show(section)
     }

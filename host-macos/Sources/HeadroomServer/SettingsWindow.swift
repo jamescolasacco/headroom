@@ -156,8 +156,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate, WKNavigationDelegate, WK
     // ------------------------------------------------------------------ window
 
     func windowWillClose(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)
-        onClose?()
+        onClose?() // the app decides whether the Dock icon stays (it does if the menu-bar icon is hidden)
     }
 
     private static let offlineHtml = """
