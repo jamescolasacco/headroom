@@ -26,8 +26,9 @@ namespace Headroom.Host.Session;
 ///
 /// Latency control on TCP: frames are never queued. The pipeline asks <see cref="CanSendVideo"/> before
 /// encoding; it's false while a frame is waiting for the socket or while unacknowledged bytes exceed
-/// ~1.5x the bandwidth-delay product. The client acks each frame on arrival, which gives us delivery rate
-/// and queueing delay (RTT above the observed minimum) — the inputs to the bitrate controller.
+/// ~1.5x the bandwidth-delay product. Sharpening passes of a still screen ask <see cref="CanSendRefinement"/>
+/// instead: only into an idle path. The client acks each frame on arrival, which gives us delivery rate and
+/// queueing delay (RTT above the observed minimum) — the inputs to the bitrate controller.
 /// </summary>
 public sealed class ClientSession : IVideoSink
 {
@@ -66,7 +67,8 @@ public sealed class ClientSession : IVideoSink
 
     // flow control / congestion state
     private readonly object _flowGate = new();
-    private readonly Dictionary<uint, (long SentUs, int Bytes)> _inflight = new();
+    /// <summary>Frames sent and not acked yet. Behind: sent while a sharpening pass was still on its way.</summary>
+    private readonly Dictionary<uint, (long SentUs, int Bytes, bool Refinement, bool Behind)> _inflight = new();
     private long _inflightBytes;
     private double _minRttMs = double.MaxValue;
     private long _minRttResetUs;
@@ -546,6 +548,7 @@ public sealed class ClientSession : IVideoSink
             Monitor = monitor,
             MaxFps = maxFps,
             BitrateKbps = _targetKbps,
+            MaxBitrateKbps = _maxKbps,
             MaxWidth = Int(root, "maxWidth") ?? 0,
             MaxHeight = Int(root, "maxHeight") ?? 0,
             EncoderPreference = cfg.Video.Encoder,
@@ -687,6 +690,15 @@ public sealed class ClientSession : IVideoSink
         Enqueue(new { t = "status", capture = s, detail, elevated = InputInjector.IsSystem });
     }
 
+    public bool CanSendRefinement
+    {
+        get
+        {
+            if (Volatile.Read(ref _videoQueued) > 0) return false;
+            lock (_flowGate) return _inflight.Count == 0;
+        }
+    }
+
     public bool CanSendVideo
     {
         get
@@ -721,6 +733,7 @@ public sealed class ClientSession : IVideoSink
 
     private long _blockedSinceUs;
     private long _blockedUsSinceTick;
+    private int _congestedTicks;              // ticks in a row that looked congested (AdaptBitrate)
 
     private long InflightBudgetBytes()
     {
@@ -767,9 +780,16 @@ public sealed class ClientSession : IVideoSink
                     // any path over ~60 ms the bitrate kept dropping to its floor.
                     double kbps = Math.Max(DeliveryRateKbps(), _targetKbps);
                     double serializationMs = kbps > 0 ? kv.Value.Bytes * 8.0 / kbps : 0;
-                    double sample = Math.Max(0.1, rtt - serializationMs);
-                    if (sample < _minRttMs) _minRttMs = sample;
-                    _srttMs = _srttMs == 0 ? sample : _srttMs * 0.875 + sample * 0.125;
+                    // Only a frame whose transmission is a small part of its round trip says what the path's delay
+                    // is: a big one (a whole new screen, a sharpening pass) is mostly its own transmission, which the
+                    // estimate above can overshoot, and the min RTT fell to ~0 again. And a frame that waited behind
+                    // a sharpening pass measures our own extra traffic, not the path.
+                    if (!kv.Value.Behind && serializationMs < rtt / 2)
+                    {
+                        double sample = Math.Max(0.1, rtt - serializationMs);
+                        if (sample < _minRttMs) _minRttMs = sample;
+                        _srttMs = _srttMs == 0 ? sample : _srttMs * 0.875 + sample * 0.125;
+                    }
                 }
             }
             if (_inflightBytes < 0) _inflightBytes = 0;
@@ -828,6 +848,7 @@ public sealed class ClientSession : IVideoSink
                     var data = current.Data;
                     int len = Math.Min(Wire.MaxFragmentPayload, data.Length - offset);
                     var flags = (current.KeyFrame ? Wire.VideoFlags.Key : 0)
+                                | (current.Refinement ? Wire.VideoFlags.Refine : 0)
                                 | (offset == 0 ? Wire.VideoFlags.First : 0)
                                 | (offset + len >= data.Length ? Wire.VideoFlags.Last : 0);
                     Wire.WriteVideoHeader(header, flags, current.Epoch, current.FrameId, data.Length, offset, current.CaptureTimeUs, current.EncodeMs);
@@ -838,7 +859,8 @@ public sealed class ClientSession : IVideoSink
                         // Register before sending: on a fast link the client's ack can beat SendAsync's return.
                         lock (_flowGate)
                         {
-                            _inflight[current.FrameId] = (NowUs, data.Length);
+                            bool behind = _inflight.Values.Any(v => v.Refinement);
+                            _inflight[current.FrameId] = (NowUs, data.Length, current.Refinement, behind);
                             _inflightBytes += data.Length;
                         }
                     }
@@ -933,20 +955,24 @@ public sealed class ClientSession : IVideoSink
     {
         if (_pipeline == null) return;
         bool congested;
-        double delivery;
         long blocked;
+        double usedKbps;
         lock (_flowGate)
         {
             blocked = _blockedUsSinceTick + (_blockedSinceUs != 0 ? now - _blockedSinceUs : 0);
             _blockedUsSinceTick = 0;
             if (_blockedSinceUs != 0) _blockedSinceUs = now;
-            delivery = DeliveryRateKbps();
+            DeliveryRateKbps(); // drops acks older than a second
+            usedKbps = _ackWindowBytes * 8.0 / 1000.0; // what arrived in the last second
             // Re-learn min RTT every 30 s in case the path changed (e.g. Wi-Fi -> LAN).
             if (now - _minRttResetUs > 30_000_000) { _minRttResetUs = now; if (_inflight.Count == 0) _minRttMs = double.MaxValue; }
             double queueDelay = _minRttMs == double.MaxValue ? 0 : _srttMs - _minRttMs;
-            // Congested = a ready frame spent >40% of this tick waiting for the network, or the path
-            // shows sustained queueing delay (bufferbloat) beyond what serialization explains.
-            congested = blocked > 100_000 || queueDelay > 60;
+            // Congested = a ready frame spent >40% of a tick waiting for the network, or the path shows queueing
+            // delay (bufferbloat) beyond what serialization explains, two ticks running. One big frame (a whole new
+            // screen) holds the next back for a tick: that's the picture, not the link. Sharpening passes wait for an
+            // idle path (CanSendRefinement), so they never count.
+            _congestedTicks = blocked > 100_000 || queueDelay > 60 ? _congestedTicks + 1 : 0;
+            congested = _congestedTicks >= 2;
         }
         int target = _targetKbps;
         if (congested)
@@ -954,16 +980,17 @@ public sealed class ClientSession : IVideoSink
             _lastCongestionUs = now;
             if (now - _lastRateChangeUs > 400_000)
             {
-                // Multiplicative decrease. Only when frames waited for the network is the delivery rate the
-                // link's, so aim just under it then; otherwise it's what the screen needed (often far less than
-                // the link can carry), and dropping to it cut a fast link to the floor at one hiccup.
-                double next = target * 0.8;
-                if (blocked > 50_000) next = Math.Min(next, delivery * 0.9);
+                // Multiplicative decrease, deeper when frames waited for the network nearly the whole tick. Never
+                // down to what was delivered lately: that's what the screen needed (right after it was still,
+                // next to nothing), not what the link carries, and dropping to it took a 10 Mb/s link under 2.
+                double next = target * (blocked > 200_000 ? 0.7 : 0.8);
                 target = (int)Math.Max(_minKbps, next);
             }
         }
-        else if (now - _lastCongestionUs > 2_000_000 && now - _lastRateChangeUs > 1_000_000)
+        else if (now - _lastCongestionUs > 2_000_000 && now - _lastRateChangeUs > 1_000_000 && usedKbps > target * 0.5)
         {
+            // Up only while the stream uses at least half of it: a screen that's mostly still says nothing about
+            // what the link can carry (between page jumps the target climbed to 33 Mb/s on a 10 Mb/s link).
             target = Math.Min(_maxKbps, (int)(target * 1.12) + 200);
         }
         if (target != _targetKbps && Math.Abs(target - _targetKbps) > _targetKbps * 0.04)

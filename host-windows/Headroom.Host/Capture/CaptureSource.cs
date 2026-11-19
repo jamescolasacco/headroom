@@ -225,11 +225,7 @@ public sealed class CaptureSource : IDisposable
                     resource?.Dispose();
                     _dup.ReleaseFrame();
                 }
-                if (newImage)
-                {
-                    Interlocked.Increment(ref _frameVersion);
-                    SignalFrame();
-                }
+                if (newImage) SignalFrame(); // (CopyToShared bumped the version)
                 else BlankIfNoImageYet(); // e.g. only the pointer moved
             }
             catch (SharpGenException ex) when (ex.ResultCode.Code == DXGI_ERROR_DEVICE_REMOVED || ex.ResultCode.Code == DXGI_ERROR_DEVICE_RESET)
@@ -423,7 +419,12 @@ public sealed class CaptureSource : IDisposable
         var d = src.Description;
         EnsureShared(d.Width, d.Height);
         if (KeyedMutex.Acquire(_capMutex!, 0, 100) != 0) return false; // a consumer is stuck; drop this frame
-        try { _capContext!.CopyResource(_capShared, src); }
+        try
+        {
+            _capContext!.CopyResource(_capShared, src);
+            // In the same hold as the picture, so a consumer (WithLatest) reads the version of what it converts.
+            Interlocked.Increment(ref _frameVersion);
+        }
         finally { _capMutex!.ReleaseSync(0); }
         return true;
     }
@@ -444,10 +445,10 @@ public sealed class CaptureSource : IDisposable
         {
             using var view = _capDevice!.CreateRenderTargetView(_capShared!);
             _capContext!.ClearRenderTargetView(view, new Vortice.Mathematics.Color4(0f, 0f, 0f, 1f));
+            Interlocked.Increment(ref _frameVersion);
         }
         finally { _capMutex!.ReleaseSync(0); }
         Log.Info("capture", $"{Monitor.Id}: no picture from the display in {FirstImageTimeoutMs} ms (off or asleep?); starting on a black one");
-        Interlocked.Increment(ref _frameVersion);
         SignalFrame();
     }
 

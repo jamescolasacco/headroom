@@ -6,9 +6,10 @@ import NIOWebSocket
 ///
 /// Latency control on TCP (same design as the Windows host): frames are never queued. The pipeline asks
 /// `canSendVideo` before encoding; it's false while a frame is waiting for the socket or while
-/// unacknowledged bytes exceed ~1.5x the bandwidth-delay product. The client acks each frame on arrival,
-/// which gives delivery rate and queueing delay (RTT above the observed minimum) — the inputs to the
-/// bitrate controller (AIMD between the min and max limits).
+/// unacknowledged bytes exceed ~1.5x the bandwidth-delay product. Sharpening passes of a still screen ask
+/// `canSendRefinement` instead: only into an idle path. The client acks each frame on arrival, which gives
+/// delivery rate and queueing delay (RTT above the observed minimum) — the inputs to the bitrate controller
+/// (AIMD between the min and max limits).
 public final class ClientSession: WebSocketPeer, VideoSink {
     public let id = Bytes.base64Url(Bytes.random(6))
     public let connectedAt = Date()
@@ -50,7 +51,8 @@ public final class ClientSession: WebSocketPeer, VideoSink {
 
     // Flow control / congestion state, under `flowLock` (touched by the pipeline and the event loop too).
     private let flowLock = NSLock()
-    private var inflight: [UInt32: (sentUs: Int64, bytes: Int)] = [:]
+    /// Frames sent and not acked yet. `behind`: sent while a sharpening pass was still on its way.
+    private var inflight: [UInt32: (sentUs: Int64, bytes: Int, refinement: Bool, behind: Bool)] = [:]
     private var inflightBytes = 0
     private var minRttMs = Double.greatestFiniteMagnitude
     private var minRttResetUs: Int64 = 0
@@ -64,6 +66,7 @@ public final class ClientSession: WebSocketPeer, VideoSink {
     private var lastCongestionUs: Int64 = 0
     private var blockedSinceUs: Int64 = 0
     private var blockedUsSinceTick: Int64 = 0
+    private var congestedTicks = 0          // ticks in a row that looked congested (adaptBitrate)
 
     // Stats (atomic-ish counters under statsLock).
     private let statsLock = NSLock()
@@ -355,9 +358,9 @@ public final class ClientSession: WebSocketPeer, VideoSink {
         flowLock.lock()
         maxKbps = min(max(clientMax, cfg.video.minBitrateKbps), cfg.video.maxBitrateKbps)
         targetKbps = min(max(targetKbps, minKbps), maxKbps)
-        let bitrate = targetKbps
+        let bitrate = targetKbps, ceiling = maxKbps
         flowLock.unlock()
-        let settings = PipelineSettings(monitor: monitor, maxFps: maxFps, bitrateKbps: bitrate,
+        let settings = PipelineSettings(monitor: monitor, maxFps: maxFps, bitrateKbps: bitrate, maxBitrateKbps: ceiling,
                                         maxWidth: root.int("maxWidth") ?? 0, maxHeight: root.int("maxHeight") ?? 0,
                                         encoderPreference: cfg.video.encoder)
         if let p = pipeline { p.updateSettings(settings) } else { pipeline = VideoPipeline(settings: settings, sink: self, initialEpoch: epochBase) }
@@ -508,6 +511,12 @@ public final class ClientSession: WebSocketPeer, VideoSink {
         return ok
     }
 
+    public var canSendRefinement: Bool {
+        let queued = transport?.videoQueued ?? 1
+        flowLock.lock(); defer { flowLock.unlock() }
+        return queued == 0 && inflight.isEmpty
+    }
+
     /// ~1.5x bandwidth-delay product using delivery rate, with sane floors/caps. Caller holds flowLock.
     private func inflightBudgetBytes() -> Int {
         let rateBytesPerMs = deliveryRateKbps() / 8.0
@@ -515,6 +524,12 @@ public final class ClientSession: WebSocketPeer, VideoSink {
         let bdp = Int(rateBytesPerMs * (rtt + 40) * 1.5)
         let floor = max(256 * 1024, targetKbps * 1000 / 8 / 10) // at least 100 ms of target bitrate
         return min(max(bdp, floor), 6 * 1024 * 1024)
+    }
+
+    /// What arrived in the last second, in kbps (none: 0). Caller holds flowLock.
+    private func sentLastSecondKbps() -> Double {
+        _ = deliveryRateKbps() // drops acks older than a second
+        return Double(ackWindowBytes) * 8.0 / 1000.0
     }
 
     /// Caller holds flowLock.
@@ -531,7 +546,8 @@ public final class ClientSession: WebSocketPeer, VideoSink {
 
     public func videoFrameWillComplete(_ frame: EncodedVideoFrame) {
         flowLock.lock()
-        inflight[frame.frameId] = (Clock.nowUs, frame.data.count)
+        let behind = inflight.values.contains { $0.refinement }
+        inflight[frame.frameId] = (Clock.nowUs, frame.data.count, frame.refinement, behind)
         inflightBytes += frame.data.count
         flowLock.unlock()
     }
@@ -555,9 +571,15 @@ public final class ClientSession: WebSocketPeer, VideoSink {
                 // ~60 ms the bitrate kept dropping to its floor.
                 let kbps = max(deliveryRateKbps(), Double(targetKbps))
                 let serializationMs = kbps > 0 ? Double(v.bytes) * 8.0 / kbps : 0
-                let sample = max(0.1, rtt - serializationMs)
-                if sample < minRttMs { minRttMs = sample }
-                srttMs = srttMs == 0 ? sample : srttMs * 0.875 + sample * 0.125
+                // Only a frame whose transmission is a small part of its round trip says what the path's delay is:
+                // a big one (a whole new screen, a sharpening pass) is mostly its own transmission, which the
+                // estimate above can overshoot, and the min RTT fell to ~0 again. And a frame that waited behind a
+                // sharpening pass measures our own extra traffic, not the path.
+                if !v.behind && serializationMs < rtt / 2 {
+                    let sample = max(0.1, rtt - serializationMs)
+                    if sample < minRttMs { minRttMs = sample }
+                    srttMs = srttMs == 0 ? sample : srttMs * 0.875 + sample * 0.125
+                }
             }
         }
         if inflightBytes < 0 { inflightBytes = 0 }
@@ -606,28 +628,31 @@ public final class ClientSession: WebSocketPeer, VideoSink {
         let blocked = blockedUsSinceTick + (blockedSinceUs != 0 ? now - blockedSinceUs : 0)
         blockedUsSinceTick = 0
         if blockedSinceUs != 0 { blockedSinceUs = now }
-        let delivery = deliveryRateKbps()
         // Re-learn min RTT every 30 s in case the path changed (e.g. Wi-Fi -> Ethernet).
         if now - minRttResetUs > 30_000_000 {
             minRttResetUs = now
             if inflight.isEmpty { minRttMs = .greatestFiniteMagnitude }
         }
         let queueDelay = minRttMs == .greatestFiniteMagnitude ? 0 : srttMs - minRttMs
-        // Congested = a ready frame spent >40% of this tick waiting for the network, or the path shows
-        // sustained queueing delay (bufferbloat) beyond what serialization explains.
-        let congested = blocked > 100_000 || queueDelay > 60
+        // Congested = a ready frame spent >40% of a tick waiting for the network, or the path shows queueing delay
+        // (bufferbloat) beyond what serialization explains, two ticks running. One big frame (a whole new screen)
+        // holds the next back for a tick: that's the picture, not the link. Sharpening passes wait for an idle path
+        // (canSendRefinement), so they never count.
+        congestedTicks = blocked > 100_000 || queueDelay > 60 ? congestedTicks + 1 : 0
+        let congested = congestedTicks >= 2
         var target = targetKbps
         if congested {
             lastCongestionUs = now
             if now - lastRateChangeUs > 400_000 {
-                // Multiplicative decrease. Only when frames waited for the network is the delivery rate the
-                // link's, so aim just under it then; otherwise it's what the screen needed (often far less than
-                // the link can carry), and dropping to it cut a fast link to the floor at one hiccup.
-                var next = Double(target) * 0.8
-                if blocked > 50_000 { next = min(next, delivery * 0.9) }
+                // Multiplicative decrease, deeper when frames waited for the network nearly the whole tick. Never
+                // down to what was delivered lately: that's what the screen needed (right after it was still,
+                // next to nothing), not what the link carries, and dropping to it took a 10 Mb/s link under 2.
+                let next = Double(target) * (blocked > 200_000 ? 0.7 : 0.8)
                 target = Int(max(Double(minKbps), next))
             }
-        } else if now - lastCongestionUs > 2_000_000 && now - lastRateChangeUs > 1_000_000 {
+        } else if now - lastCongestionUs > 2_000_000 && now - lastRateChangeUs > 1_000_000 && sentLastSecondKbps() > Double(target) * 0.5 {
+            // Up only while the stream uses at least half of it: a screen that's mostly still says nothing about
+            // what the link can carry (between page jumps the target climbed to 33 Mb/s on a 10 Mb/s link).
             target = min(maxKbps, Int(Double(target) * 1.12) + 200)
         }
         var apply = false

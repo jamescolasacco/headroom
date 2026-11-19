@@ -15,6 +15,7 @@ public enum SelfTest {
         let lock = NSLock()
 
         var canSendVideo: Bool { true }
+        var canSendRefinement: Bool { true }
 
         func onVideoConfig(_ c: VideoStreamConfig) {
             lock.lock(); defer { lock.unlock() }

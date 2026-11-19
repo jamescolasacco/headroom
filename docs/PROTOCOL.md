@@ -68,7 +68,7 @@ messages can interleave.
 | offset | size | field |
 |---|---|---|
 | 0 | 1 | type = 0x01 |
-| 1 | 1 | flags: 1 key, 2 first fragment, 4 last fragment |
+| 1 | 1 | flags: 1 key, 2 first fragment, 4 last fragment, 8 sharpening (the still screen encoded again, sharper) |
 | 2 | 2 | epoch (u16) |
 | 4 | 4 | frameId (u32, increasing) |
 | 8 | 4 | total frame length |

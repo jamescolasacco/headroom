@@ -9,14 +9,16 @@ public final class EncodedVideoFrame {
     public let keyFrame: Bool
     public let captureTimeUs: Int64
     public let encodeMs: Double
+    public let refinement: Bool
 
-    init(epoch: Int, frameId: UInt32, data: [UInt8], keyFrame: Bool, captureTimeUs: Int64, encodeMs: Double) {
+    init(epoch: Int, frameId: UInt32, data: [UInt8], keyFrame: Bool, captureTimeUs: Int64, encodeMs: Double, refinement: Bool = false) {
         self.epoch = epoch
         self.frameId = frameId
         self.data = data
         self.keyFrame = keyFrame
         self.captureTimeUs = captureTimeUs
         self.encodeMs = encodeMs
+        self.refinement = refinement
     }
 }
 
@@ -264,6 +266,7 @@ public final class WebSocketTransport: ChannelInboundHandler {
             let last = fragOffset + len >= data.count
             var flags: Wire.VideoFlags = []
             if frame.keyFrame { flags.insert(.key) }
+            if frame.refinement { flags.insert(.refine) }
             if fragOffset == 0 { flags.insert(.first) }
             if last { flags.insert(.last) }
             let header = Wire.videoHeader(flags: flags, epoch: frame.epoch, frameId: frame.frameId, total: data.count,

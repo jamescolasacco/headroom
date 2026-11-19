@@ -13,16 +13,19 @@ public sealed class H264Bitstream
     public bool SpsRewritten { get; private set; }
     private byte[]? _pps;
     private bool _configDirty = true;
+    private readonly H264SliceQp _sliceQp = new();
 
     public byte[]? Sps => _sps;
     public byte[]? Pps => _pps;
 
-    public sealed record Output(byte[] Data, bool KeyFrame, bool ConfigChanged);
+    /// <param name="Qp">The quantizer it was coded at (0 finest, 51 coarsest), when the slice header could be read.</param>
+    public sealed record Output(byte[] Data, bool KeyFrame, bool ConfigChanged, int? Qp = null);
 
     public Output? Process(ReadOnlySpan<byte> annexB)
     {
         var nals = SplitAnnexB(annexB);
         bool key = false;
+        int? qp = null;
         int total = 0;
         foreach (var (off, len) in nals)
         {
@@ -34,6 +37,7 @@ public sealed class H264Bitstream
                     if (_rawSps == null || !sps.AsSpan().SequenceEqual(_rawSps))
                     {
                         _rawSps = sps;
+                        _sliceQp.ParameterSet(sps);
                         // Declare "no reordering" so browser decoders output each frame immediately.
                         _sps = H264SpsRewriter.Rewrite(sps, out bool rewritten);
                         SpsRewritten = rewritten;
@@ -42,13 +46,15 @@ public sealed class H264Bitstream
                     break;
                 case 8:
                     var pps = annexB.Slice(off, len).ToArray();
-                    if (_pps == null || !pps.AsSpan().SequenceEqual(_pps)) { _pps = pps; _configDirty = true; }
+                    if (_pps == null || !pps.AsSpan().SequenceEqual(_pps)) { _pps = pps; _sliceQp.ParameterSet(pps); _configDirty = true; }
                     break;
                 case 5:
                     key = true;
+                    qp ??= _sliceQp.Qp(annexB.Slice(off, len));
                     total += 4 + len;
                     break;
                 case 1: case 2: case 3: case 4:
+                    if (type == 1) qp ??= _sliceQp.Qp(annexB.Slice(off, len));
                     total += 4 + len;
                     break;
                 // 6 SEI, 9 AUD, 12 filler, others: dropped
@@ -71,7 +77,7 @@ public sealed class H264Bitstream
         }
         bool changed = key && _configDirty && _sps != null && _pps != null;
         if (changed) _configDirty = false;
-        return new Output(outBuf, key, changed);
+        return new Output(outBuf, key, changed, qp);
     }
 
     /// <summary>Returns (offset, length) of each NAL payload (start codes stripped).</summary>

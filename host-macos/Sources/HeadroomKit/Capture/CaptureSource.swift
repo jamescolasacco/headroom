@@ -57,6 +57,8 @@ public class CaptureSource: NSObject {
 
     /// The newest frame (retained by the caller for as long as it needs it).
     public var latest: CVPixelBuffer? { lock.lock(); defer { lock.unlock() }; return latestBuffer }
+    /// The newest frame with its version, read together: a picture is never taken for the one before it.
+    public var latestAndVersion: (CVPixelBuffer, Int64)? { lock.lock(); defer { lock.unlock() }; return latestBuffer.map { ($0, version) } }
 
     public func subscribe() -> AutoResetEvent {
         let ev = AutoResetEvent(true)

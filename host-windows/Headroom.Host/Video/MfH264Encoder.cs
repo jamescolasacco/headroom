@@ -24,7 +24,8 @@ public sealed record EncodedPacket(byte[] AnnexB, bool KeyFrame, long TimeHns, d
 /// H.264 encoding through a Media Foundation transform. Prefers the GPU vendor's hardware MFT
 /// (NVENC / Quick Sync / AMF) fed directly with D3D11 NV12 textures; falls back to Microsoft's
 /// software encoder with system-memory input. Configured for one-in/one-out ultra-low latency:
-/// low-latency mode, no B-frames, CBR with a small VBV, on-demand IDR frames, effectively infinite GOP.
+/// low-latency mode, no B-frames, CBR whose VBV lets one frame take half a second's worth (a whole new screen
+/// comes out readable), on-demand IDR frames, effectively infinite GOP.
 /// </summary>
 public sealed unsafe class MfH264Encoder : IDisposable
 {
@@ -267,7 +268,8 @@ public sealed unsafe class MfH264Encoder : IDisposable
                 _eventThread.Start();
             }
 
-            Log.Info("encoder", $"using '{Name}' ({(hardware ? "hardware" : "software")}, {(IsAsync ? "async" : "sync")}) {Width}x{Height}@{_fps} {opts.BitrateKbps} kbps");
+            Log.Info("encoder", $"using '{Name}' ({(hardware ? "hardware" : "software")}, {(IsAsync ? "async" : "sync")}) {Width}x{Height}@{_fps} {opts.BitrateKbps} kbps, " +
+                $"frames up to {VbvBits(opts.BitrateKbps) / 8 / 1024} KB{(hardware ? $", quality {QualityVsSpeed}" : "")}");
         }
         catch
         {
@@ -296,12 +298,17 @@ public sealed unsafe class MfH264Encoder : IDisposable
     }
 
     // Measured on RTX 3070 @1080p: QVS 0 = 2.0 ms, 40 = 3.4 ms, 60+ = 5 ms per frame with ~3% smaller frames.
-    // 40 is the knee; frames above 1440p use 20 so 4K stays well under a 60 Hz frame budget.
+    // 40 is the knee at 60 fps; frames above 1440p use 20 so 4K stays well under a 60 Hz frame budget. At 30 fps or
+    // less (15 is the default) a frame has 33+ ms, so it takes the sharper setting.
     private static readonly uint? QualityVsSpeedOverride = uint.TryParse(Environment.GetEnvironmentVariable("HEADROOM_QVS"), out var q) ? q : null;
-    private uint QualityVsSpeed => QualityVsSpeedOverride ?? (Width * Height > 2560 * 1440 ? 20u : 40u);
+    private uint QualityVsSpeed => QualityVsSpeedOverride ?? (_fps <= 30 ? 60u : Width * Height > 2560 * 1440 ? 20u : 40u);
     private static readonly uint GopSize = uint.TryParse(Environment.GetEnvironmentVariable("HEADROOM_GOP"), out var g) ? g : 0xFFFF;
 
-    private uint VbvBits(int kbps) => (uint)Math.Max(kbps * 1000L * 3 / _fps, 400_000);
+    // How big one frame may get. A screen that changes all at once (a new page, a jump down one) needs many times
+    // an average frame to come out readable; 3 frames' worth (as it was) left it smudged for seconds. Half a
+    // second's worth (HEADROOM_VBV_MS), and never under 3 frames.
+    private static readonly int VbvMs = int.TryParse(Environment.GetEnvironmentVariable("HEADROOM_VBV_MS"), out var vbv) && vbv > 0 ? vbv : 500;
+    private uint VbvBits(int kbps) => (uint)Math.Min(uint.MaxValue, Math.Max(Math.Max(kbps * (long)VbvMs, kbps * 1000L * 3 / _fps), 400_000));
 
     private void TrySet(string what, int hr)
     {

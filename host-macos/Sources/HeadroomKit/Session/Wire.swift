@@ -26,6 +26,8 @@ public enum Wire {
         public static let key = VideoFlags(rawValue: 1)
         public static let first = VideoFlags(rawValue: 2)
         public static let last = VideoFlags(rawValue: 4)
+        /// The still screen encoded again to sharpen it (refinement), not a new picture. Viewers needn't care.
+        public static let refine = VideoFlags(rawValue: 8)
     }
 
     /// [0] type, [1] flags, [2..3] epoch, [4..7] frameId, [8..11] total length, [12..15] offset,

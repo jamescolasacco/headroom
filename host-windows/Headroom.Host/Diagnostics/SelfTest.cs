@@ -22,6 +22,7 @@ public static class SelfTest
         public FileSink(string path) => _file = File.Create(path);
 
         public bool CanSendVideo => true;
+        public bool CanSendRefinement => true;
 
         public void OnVideoConfig(VideoStreamConfig config)
         {

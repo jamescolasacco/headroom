@@ -12,11 +12,14 @@ public final class H264Bitstream {
     private(set) var pps: [UInt8]?
     private var configDirty = true
     public private(set) var spsRewritten = false
+    private var sliceQp = H264SliceQp()
 
     public struct Output {
         public let data: [UInt8]
         public let keyFrame: Bool
         public let configChanged: Bool
+        /// The quantizer it was coded at (0 finest, 51 coarsest), when the slice header could be read.
+        public let qp: Int?
     }
 
     public init() {}
@@ -27,6 +30,7 @@ public final class H264Bitstream {
         var count = 0
         if let s = parameterSet(fmt, 0, &count, &headerLen), s != rawSps {
             rawSps = s
+            sliceQp.parameterSet(s)
             // Declare "no reordering" so browser decoders output each frame immediately.
             let r = H264SpsRewriter.rewrite(s)
             sps = r.sps
@@ -35,6 +39,7 @@ public final class H264Bitstream {
         }
         if count > 1, let p = parameterSet(fmt, 1, &count, &headerLen), p != pps {
             pps = p
+            sliceQp.parameterSet(p)
             configDirty = true
         }
 
@@ -48,6 +53,7 @@ public final class H264Bitstream {
         var out = [UInt8]()
         out.reserveCapacity(length)
         var key = false
+        var qp: Int?
         var pos = 0
         while pos + lenSize <= raw.count {
             var n = 0
@@ -58,16 +64,17 @@ public final class H264Bitstream {
             switch type {
             case 1...5:
                 if type == 5 { key = true }
+                if qp == nil { qp = sliceQp.qp(raw[pos..<(pos + n)]) }
                 out.append(UInt8((n >> 24) & 0xFF)); out.append(UInt8((n >> 16) & 0xFF))
                 out.append(UInt8((n >> 8) & 0xFF)); out.append(UInt8(n & 0xFF))
                 out.append(contentsOf: raw[pos..<(pos + n)])
             case 7:
                 // In-band SPS (not expected in AVCC output, but handle it like the Annex-B path does).
                 let s = Array(raw[pos..<(pos + n)])
-                if s != rawSps { rawSps = s; let r = H264SpsRewriter.rewrite(s); sps = r.sps; spsRewritten = r.changed; configDirty = true }
+                if s != rawSps { rawSps = s; sliceQp.parameterSet(s); let r = H264SpsRewriter.rewrite(s); sps = r.sps; spsRewritten = r.changed; configDirty = true }
             case 8:
                 let p = Array(raw[pos..<(pos + n)])
-                if p != pps { pps = p; configDirty = true }
+                if p != pps { pps = p; sliceQp.parameterSet(p); configDirty = true }
             default:
                 break // 6 SEI, 9 AUD, 12 filler, others: dropped
             }
@@ -81,7 +88,7 @@ public final class H264Bitstream {
         }
         let changed = key && configDirty && sps != nil && pps != nil
         if changed { configDirty = false }
-        return Output(data: out, keyFrame: key, configChanged: changed)
+        return Output(data: out, keyFrame: key, configChanged: changed, qp: qp)
     }
 
     private func parameterSet(_ fmt: CMFormatDescription, _ index: Int, _ count: inout Int, _ headerLen: inout Int32) -> [UInt8]? {

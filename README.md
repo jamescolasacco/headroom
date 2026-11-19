@@ -61,7 +61,7 @@ signed in* with Sign out for each, password reset by email code, change email, d
 
 | | |
 |---|---|
-| **Video** | GPU capture (Windows: DXGI Desktop Duplication; Mac: ScreenCaptureKit) → GPU colour conversion → **hardware H.264** (Windows: NVENC / Quick Sync / AMF via Media Foundation; Mac: VideoToolbox in Apple's low-latency mode; software fallback on both) → **hardware decode in the browser** (WebCodecs). Measured at 1080p on an RTX 3070: about 3 ms encode, under 1 ms decode, 60 fps; on an M3 MacBook Air at 720p: 3–5 ms encode, 1 ms decode. Frames are sent only when the screen changes, with a few refinement frames so text goes sharp once things stop moving. |
+| **Video** | GPU capture (Windows: DXGI Desktop Duplication; Mac: ScreenCaptureKit) → GPU colour conversion → **hardware H.264** (Windows: NVENC / Quick Sync / AMF via Media Foundation; Mac: VideoToolbox in Apple's low-latency mode; software fallback on both) → **hardware decode in the browser** (WebCodecs). Measured at 1080p on an RTX 3070: about 3 ms encode, under 1 ms decode, 60 fps; on an M3 MacBook Air at 720p: 3–5 ms encode, 1 ms decode. Frames are sent only when the screen changes; once it holds still, the same picture is encoded again until text is sharp (after a fast scroll, as one whole new picture first), using only time the connection would otherwise sit idle. 15 frames a second unless you pick more. |
 | **Latency control** | No frame queues. The client acks each frame, and the host encodes only while the link has room. Bitrate adapts to measured delivery rate and queueing delay. The SPS declares zero frame reordering, so Safari and Chrome display each frame immediately. |
 | **Cursor** | Drawn locally, so it moves with zero lag, using the host's real cursor shape (I-beam, resize arrows…). |
 | **Keyboard** | Positional key codes, so every shortcut works with the host's layout. Profiles adapt to both ends: from a Mac or iPad to a **Windows** host, **Mac-style shortcuts** by default (⌘C/V/X/Z/A/S/F/T/W… act as Ctrl, ⌘Q → Alt+F4, ⌘ alone opens Start, ⌥←/→ jumps by word); to a **Mac** host, keys go as pressed (⌘ is ⌘), and from a PC, Ctrl acts as ⌘. Other profiles: "PC" and "⌘ = Ctrl". In Chrome/Edge full screen, **Alt+Tab, Win and Esc** go to the remote (Keyboard Lock). Caps Lock and Num Lock stay in sync, and keys never get stuck after a disconnect. |
@@ -280,9 +280,11 @@ itself, streams video, checks keyframes, epochs, acks, pings, stats, permission 
 validates the received H.264 with ffprobe. `node tools/account-check.mjs` signs the host in to an account and
 connects through the relay as one of your devices. `node tools/stream-check.mjs` measures what a viewer gets:
 frame rate, bitrate and the host's target, delay, resolution and the encoder's QP (with ffmpeg), optionally on
-a simulated longer path (`--ack-delay`, `--link-kbps`); the Mac host started with `--test-pattern` and
-`HEADROOM_TEST_PATTERN_STYLE=desktop` shows a scrolling page of text instead of colour bars. All three work against
-either host.
+a simulated slower, longer path (`--link-kbps`, `--ack-delay`); the Mac host started with `--test-pattern` and
+`HEADROOM_TEST_PATTERN_STYLE=desktop` shows a page of text that scrolls for 2 s and holds still for 2 s
+(`HEADROOM_TEST_PATTERN_SCROLL=<px per 1/60 s>` or `jump`). With `HEADROOM_TEST_PATTERN_DUMP=<dir>` on the host and
+`--source=<dir>`, stream-check scores what the viewer showed 0.25, 0.5, 1 and 2 s after each stop against what the
+screen showed (PSNR of the text) and says how long it took to look sharp. All three work against either host.
 
 ## Roadmap
 

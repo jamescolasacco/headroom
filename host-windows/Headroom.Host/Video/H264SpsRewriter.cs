@@ -198,7 +198,7 @@ public static class H264SpsRewriter
         return o.ToArray();
     }
 
-    private sealed class BitReader
+    internal sealed class BitReader
     {
         private readonly byte[] _d;
         private int _pos;

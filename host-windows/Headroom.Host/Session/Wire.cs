@@ -26,7 +26,7 @@ public static class Wire
     public const int MaxFragmentPayload = 64 * 1024;
 
     [Flags]
-    public enum VideoFlags : byte { Key = 1, First = 2, Last = 4 }
+    public enum VideoFlags : byte { Key = 1, First = 2, Last = 4, /** the still screen encoded again to sharpen it */ Refine = 8 }
 
     /// <summary>
     /// [0] type, [1] flags, [2..3] epoch, [4..7] frameId, [8..11] total length, [12..15] offset,

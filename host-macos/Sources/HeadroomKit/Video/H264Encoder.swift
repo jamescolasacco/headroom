@@ -16,6 +16,31 @@ public struct EncodedPacket {
     public let sample: CMSampleBuffer
     public let captureUs: Int64
     public let encodeMs: Double
+    /// A frame of a still screen encoded again to sharpen it (VideoPipeline's refinement), not a new picture.
+    public let refinement: Bool
+}
+
+/// How the encoder spends bits. Screen content changes little most of the time and a lot at once (a scroll, a
+/// window opening): it needs room for the big frames, and a still screen should end up sharp.
+public struct RateControl {
+    /// Apple's low-latency rate control: every frame about the same size (made for video calls).
+    public var lowLatency: Bool
+    /// The encoder's quicker, lower-quality mode.
+    public var speedOverQuality: Bool
+    /// The most it may send in any `burstWindow` seconds, as a multiple of the average rate.
+    public var burstMultiple: Double
+    public var burstWindow: Double
+
+    /// The defaults, or HEADROOM_VT_RC="lowlatency|normal,speed|quality,<multiple>,<window s>" (for measuring).
+    public static let current: RateControl = {
+        var rc = RateControl(lowLatency: true, speedOverQuality: true, burstMultiple: 1.5, burstWindow: 0.2)
+        let parts = (ProcessInfo.processInfo.environment["HEADROOM_VT_RC"] ?? "").split(separator: ",").map(String.init)
+        if parts.count > 0, !parts[0].isEmpty { rc.lowLatency = parts[0] != "normal" }
+        if parts.count > 1 { rc.speedOverQuality = parts[1] != "quality" }
+        if parts.count > 2, let m = Double(parts[2]) { rc.burstMultiple = m }
+        if parts.count > 3, let w = Double(parts[3]) { rc.burstWindow = w }
+        return rc
+    }()
 }
 
 /// H.264 through VideoToolbox, configured for one-in/one-out ultra-low latency like the Windows encoder:
@@ -37,7 +62,8 @@ public final class H264Encoder {
     private let onOutput: (EncodedPacket) -> Void
     private let lock = NSLock()
     private var inFlightCount = 0
-    private var submitTimes: [Int64: Int64] = [:]  // capture µs -> submit µs
+    private var submitted: [Int64: (us: Int64, refinement: Bool)] = [:]  // capture µs -> when it was submitted, and what it is
+    private let rc = RateControl.current
 
     public var inFlight: Int { lock.lock(); defer { lock.unlock() }; return inFlightCount }
 
@@ -45,12 +71,14 @@ public final class H264Encoder {
 
     public static func create(_ o: EncoderOptions, onOutput: @escaping (EncodedPacket) -> Void) throws -> H264Encoder {
         var attempts = [Attempt]()
-        if o.preference != "software" {
+        if o.preference != "software" && RateControl.current.lowLatency {
             attempts.append(Attempt(label: "Apple H.264 (hardware, low latency)", spec: [
                 kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: true,
                 kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true,
                 kVTVideoEncoderSpecification_EnableLowLatencyRateControl: true,
             ], lowLatency: true))
+        }
+        if o.preference != "software" {
             attempts.append(Attempt(label: "Apple H.264 (hardware)", spec: [
                 kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: true,
                 kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true,
@@ -117,13 +145,13 @@ public final class H264Encoder {
         try set(kVTCompressionPropertyKey_H264EntropyMode, kVTH264EntropyMode_CABAC)
         try set(kVTCompressionPropertyKey_ExpectedFrameRate, fps as NSNumber)
         try set(kVTCompressionPropertyKey_AverageBitRate, (o.bitrateKbps * 1000) as NSNumber, required: true)
-        try set(kVTCompressionPropertyKey_DataRateLimits, Self.dataRateLimits(o.bitrateKbps) as CFArray)
+        try set(kVTCompressionPropertyKey_DataRateLimits, Self.dataRateLimits(o.bitrateKbps, RateControl.current) as CFArray)
         // Keyframes only on demand (viewer join, decoder error, resolution change): IDRs are 10-20x larger
         // than P-frames and every periodic one is a latency spike on a constrained link.
         try set(kVTCompressionPropertyKey_MaxKeyFrameInterval, 0x7FFF_FFFF as NSNumber)
         try set(kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, 0 as NSNumber)
         try set(kVTCompressionPropertyKey_MaxFrameDelayCount, 0 as NSNumber)
-        try set(kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, kCFBooleanTrue!)
+        try set(kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, RateControl.current.speedOverQuality ? kCFBooleanTrue! : kCFBooleanFalse!)
         // VUI: BT.709 primaries/transfer/matrix, limited range. Browsers honour these.
         try set(kVTCompressionPropertyKey_ColorPrimaries, kCVImageBufferColorPrimaries_ITU_R_709_2)
         try set(kVTCompressionPropertyKey_TransferFunction, kCVImageBufferTransferFunction_ITU_R_709_2)
@@ -147,17 +175,17 @@ public final class H264Encoder {
             VTSessionSetProperty(transfer, key: kVTPixelTransferPropertyKey_RealTime, value: kCFBooleanTrue)
         }
         self.transfer = transfer
-        Log.info("encoder", "using '\(name)' \(o.width)x\(o.height)@\(fps) \(o.bitrateKbps) kbps")
+        Log.info("encoder", "using '\(name)' \(o.width)x\(o.height)@\(fps) \(o.bitrateKbps) kbps, bursts up to \(rc.burstMultiple)x per \(rc.burstWindow) s\(rc.speedOverQuality ? "" : ", quality first")")
     }
 
-    /// Hard cap over a short window (1.5x the average per 200 ms), so one big frame can't flood the link.
-    private static func dataRateLimits(_ kbps: Int) -> [NSNumber] {
-        let bytesPerWindow = Double(kbps) * 1000 / 8 * 1.5 * 0.2
-        return [NSNumber(value: bytesPerWindow), NSNumber(value: 0.2)]
+    /// A hard cap over a short window, so one big frame can't flood the link.
+    private static func dataRateLimits(_ kbps: Int, _ rc: RateControl) -> [NSNumber] {
+        let bytesPerWindow = Double(kbps) * 1000 / 8 * rc.burstMultiple * rc.burstWindow
+        return [NSNumber(value: bytesPerWindow), NSNumber(value: rc.burstWindow)]
     }
 
     /// Converts `source` into an encoder buffer and submits it. Returns false if the frame was not accepted.
-    public func encode(_ source: CVPixelBuffer, captureUs: Int64, forceKeyFrame: Bool) -> Bool {
+    public func encode(_ source: CVPixelBuffer, captureUs: Int64, forceKeyFrame: Bool, refinement: Bool = false) -> Bool {
         guard let session, let transfer, let pool = VTCompressionSessionGetPixelBufferPool(session) else { return false }
         var dstOut: CVPixelBuffer?
         guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &dstOut) == kCVReturnSuccess, let dst = dstOut else { return false }
@@ -168,8 +196,8 @@ public final class H264Encoder {
 
         lock.lock()
         inFlightCount += 1
-        submitTimes[captureUs] = Clock.nowUs
-        if submitTimes.count > 64 { submitTimes.removeAll() }
+        submitted[captureUs] = (Clock.nowUs, refinement)
+        if submitted.count > 64 { submitted.removeAll() }
         lock.unlock()
 
         let props: CFDictionary? = forceKeyFrame ? [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue!] as CFDictionary : nil
@@ -179,7 +207,7 @@ public final class H264Encoder {
             self?.encoded(status, flags, sample, captureUs)
         }
         if st != noErr {
-            lock.lock(); inFlightCount -= 1; submitTimes[captureUs] = nil; lock.unlock()
+            lock.lock(); inFlightCount -= 1; submitted[captureUs] = nil; lock.unlock()
             Log.warn("encoder", "EncodeFrame failed (\(st))")
             return false
         }
@@ -189,21 +217,21 @@ public final class H264Encoder {
     private func encoded(_ status: OSStatus, _ flags: VTEncodeInfoFlags, _ sample: CMSampleBuffer?, _ captureUs: Int64) {
         lock.lock()
         inFlightCount = max(0, inFlightCount - 1)
-        let submitted = submitTimes.removeValue(forKey: captureUs)
+        let info = submitted.removeValue(forKey: captureUs)
         lock.unlock()
         guard status == noErr, !flags.contains(.frameDropped), let sample else {
             if status != noErr { Log.warn("encoder", "encode error \(status)") }
             return
         }
-        let ms = submitted.map { Double(Clock.nowUs - $0) / 1000 } ?? 0
-        onOutput(EncodedPacket(sample: sample, captureUs: captureUs, encodeMs: ms))
+        let ms = info.map { Double(Clock.nowUs - $0.us) / 1000 } ?? 0
+        onOutput(EncodedPacket(sample: sample, captureUs: captureUs, encodeMs: ms, refinement: info?.refinement ?? false))
     }
 
     public func setBitrate(_ kbps: Int) {
         guard let session, kbps != bitrateKbps else { return }
         bitrateKbps = kbps
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: (kbps * 1000) as NSNumber)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: Self.dataRateLimits(kbps) as CFArray)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: Self.dataRateLimits(kbps, rc) as CFArray)
     }
 
     public func invalidate() {
