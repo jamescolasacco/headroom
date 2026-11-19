@@ -1,6 +1,7 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import IOKit
 
 public struct MonitorInfo: Equatable {
     /// CGDirectDisplayID as a string — the id the protocol uses.
@@ -42,6 +43,7 @@ public enum Displays {
     }()
 
     public static func enumerate() -> [MonitorInfo] {
+        if testDisplayAsleep { return [] }
         if let (w, h) = testPatternSize {
             let main = CGDisplayBounds(CGMainDisplayID())
             var m = MonitorInfo(id: "test", displayID: CGMainDisplayID(), name: "Test pattern", bounds: main.isEmpty ? CGRect(x: 0, y: 0, width: w, height: h) : main,
@@ -88,6 +90,37 @@ public enum Displays {
     }
 
     public static func find(_ id: String) -> MonitorInfo? { enumerate().first { $0.id == id } }
+
+    /// The lid is closed (clamshell): the built-in display is off, and with no other display there's nothing to show.
+    public static var lidClosed: Bool {
+        let root = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
+        guard root != 0 else { return false }
+        defer { IOObjectRelease(root) }
+        return (IORegistryEntryCreateCFProperty(root, "AppleClamshellState" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? Bool) ?? false
+    }
+
+    /// What a viewer is told while this Mac has no display to show: a display asleep isn't listed until it wakes.
+    public static var noDisplayDetail: String {
+        lidClosed
+            ? "This Mac's lid is closed, so it has no screen to show. Open the lid (or connect a display) and the picture starts by itself."
+            : "Waking this Mac's display…"
+    }
+
+    // Test only (HEADROOM_TEST_PATTERN_ASLEEP=<seconds>, with the test pattern): the "display" starts out asleep, as a
+    // sleeping Mac's does (it isn't listed), and wakes that long after a viewer asks it to (SessionManager.wakeDisplay).
+    private static let testAsleepSeconds = ProcessInfo.processInfo.environment["HEADROOM_TEST_PATTERN_ASLEEP"].flatMap(Double.init)
+    private static let testWake = Locked<(asleep: Bool, at: Date?)>((true, nil))
+    static var testDisplayAsleep: Bool {
+        guard testAsleepSeconds != nil else { return false }
+        return testWake.with { s in
+            if s.asleep, let at = s.at, Date() >= at { s.asleep = false }
+            return s.asleep
+        }
+    }
+    static func testDisplayWake() {
+        guard let secs = testAsleepSeconds else { return }
+        testWake.with { s in if s.asleep && s.at == nil { s.at = Date().addingTimeInterval(secs) } }
+    }
 
     /// Friendly names ("LG UltraFine", "Built-in Retina Display") come from NSScreen, which belongs to the
     /// main thread; cache them and refresh when the display configuration changes.

@@ -29,6 +29,7 @@ public enum SessionManager {
         IOPMAssertionDeclareUserActivity("Headroom viewer connected" as CFString, kIOPMUserActiveLocal, &activityAssertion)
         let handlers = changedHandlers
         lock.unlock()
+        Displays.testDisplayWake()
         handlers.forEach { $0() }
     }
 
@@ -48,6 +49,14 @@ public enum SessionManager {
             Log.info("session", "last viewer left; locking the screen")
             InputInjector.shared.lockScreen()
         }
+    }
+
+    /// Wakes the display, and the Mac from a dark wake, as moving the mouse would: a viewer is waiting to see it.
+    static func wakeDisplay() {
+        lock.lock()
+        IOPMAssertionDeclareUserActivity("Headroom viewer waiting for the display" as CFString, kIOPMUserActiveLocal, &activityAssertion)
+        lock.unlock()
+        Displays.testDisplayWake()
     }
 
     public static func disconnectDevice(_ deviceId: String) {

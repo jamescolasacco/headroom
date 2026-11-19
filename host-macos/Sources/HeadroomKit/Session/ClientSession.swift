@@ -41,6 +41,12 @@ public final class ClientSession: WebSocketPeer, VideoSink {
     private var tickTimer: DispatchSourceTimer?
     private var sameMachineNotified = false
     private var timeoutLogged = false
+    /// The viewer's `start`, waiting for a display: this Mac had none (its display asleep, or the lid closed). The tick
+    /// keeps waking it and starts the stream as soon as one is there.
+    private var waitingStart: JSONObject?
+    private var lastDisplayCheckUs: Int64 = 0
+    private var lastWakeUs: Int64 = 0
+    private var shownNoDisplay = ""
 
     // Flow control / congestion state, under `flowLock` (touched by the pipeline and the event loop too).
     private let flowLock = NSLock()
@@ -329,9 +335,17 @@ public final class ClientSession: WebSocketPeer, VideoSink {
         let cfg = ConfigStore.current
         let monitors = Displays.enumerate()
         guard !monitors.isEmpty else {
-            sendJson(["t": "status", "capture": "unavailable", "detail": "no displays"])
+            // Asleep (a sleeping display isn't listed) or the lid closed: wake it, and start when there's one to show.
+            if waitingStart == nil { Log.info("session", "\(id): no display yet (asleep, or the lid is closed); waking it") }
+            waitingStart = root
+            if let a = root.boolIfPresent("audio") { setAudio(a) }
+            SessionManager.wakeDisplay()
+            lastWakeUs = Clock.nowUs
+            tellNoDisplay()
             return
         }
+        waitingStart = nil
+        shownNoDisplay = ""
         let wanted = root.str("monitor")
         let monitor = monitors.first { $0.id == wanted } ?? monitors[0]
         var maxFps = min(max(root.int("maxFps") ?? cfg.video.maxFps, 5), max(5, cfg.video.maxFps))
@@ -354,6 +368,30 @@ public final class ClientSession: WebSocketPeer, VideoSink {
             ClipboardService.shared.subscribe(self) { [weak self] text in self?.onClipboardChanged(text) }
         }
         Log.info("session", "\(id): stream \(monitor.id) (\(monitor.name)) max \(maxFps) fps, \(maxKbps) kbps cap, view-only=\(viewOnly)")
+    }
+
+    /// Waiting for a display (see waitingStart): once a second, look; every few, nudge it awake again and say why there's
+    /// nothing yet (the lid may have been opened or closed meanwhile).
+    private func followDisplays(_ now: Int64) {
+        guard let request = waitingStart, now - lastDisplayCheckUs >= 1_000_000 else { return }
+        lastDisplayCheckUs = now
+        let monitors = Displays.enumerate()
+        if !monitors.isEmpty {
+            Log.info("session", "\(id): the display is awake; starting the stream")
+            sendJson(["t": "monitors", "monitors": monitors.map(\.json)])
+            startStream(request)
+        } else if now - lastWakeUs >= 5_000_000 {
+            lastWakeUs = now
+            SessionManager.wakeDisplay()
+            tellNoDisplay()
+        }
+    }
+
+    private func tellNoDisplay() {
+        let detail = Displays.noDisplayDetail
+        guard detail != shownNoDisplay else { return }
+        shownNoDisplay = detail
+        sendJson(["t": "status", "capture": "unavailable", "detail": detail])
     }
 
     // ------------------------------------------------------------------------------------------- cursor
@@ -554,6 +592,7 @@ public final class ClientSession: WebSocketPeer, VideoSink {
             return
         }
         attachCursor()
+        if waitingStart != nil { followDisplays(now) }
         adaptBitrate(now)
         if now - lastStatsUs >= 1_000_000 {
             lastStatsUs = now
