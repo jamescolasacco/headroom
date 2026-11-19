@@ -10,7 +10,12 @@ namespace Headroom.Host.Config;
 /// </summary>
 public sealed class HostConfig
 {
-    public const string DefaultServer = "https://relay.colasac.co";
+    public const string DefaultServer = "https://headroom.colasac.co";
+
+    /// <summary>Headroom's service moved from relay.colasac.co (gone) to headroom.colasac.co: the same server, so
+    /// sign-ins made at the old address keep working at the new one.</summary>
+    public static string Moved(string server) =>
+        string.Equals(server.TrimEnd('/'), "https://relay.colasac.co", StringComparison.OrdinalIgnoreCase) ? DefaultServer : server;
 
     /// <summary>Stable random id so viewers can recognise this host across address changes.</summary>
     public string? HostId { get; set; }
@@ -144,6 +149,8 @@ public static class ConfigStore
                 var cfg = JsonSerializer.Deserialize<HostConfig>(json, JsonOptions) ?? new HostConfig();
                 // Fields of older versions (password, paired devices, ...) are simply ignored.
                 if (string.IsNullOrWhiteSpace(cfg.Server)) cfg.Server = HostConfig.DefaultServer;
+                cfg.Server = HostConfig.Moved(cfg.Server);
+                if (cfg.Account is { } moved && !string.IsNullOrEmpty(moved.Server)) moved.Server = HostConfig.Moved(moved.Server);
                 // Sign-ins from before email accounts (usernames) don't work any more: start signed out.
                 if (cfg.Account is { } a && (string.IsNullOrWhiteSpace(a.Email) || string.IsNullOrEmpty(a.Token) || string.IsNullOrEmpty(a.Server)))
                     cfg.Account = null;

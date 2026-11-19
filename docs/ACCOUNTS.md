@@ -6,7 +6,7 @@ all of them and connect without anyone accepting. Each device is named after its
 Server (Account → this computer's name).
 
 The account server (`account-server/server.mjs`, Node.js 20+, no dependencies) is also the relay
-([RELAY.md](RELAY.md)) and serves the website. The public one is https://relay.colasac.co; you can run your own.
+([RELAY.md](RELAY.md)) and serves the website. The public one is https://headroom.colasac.co; you can run your own.
 
 ## Signing up and signing in
 

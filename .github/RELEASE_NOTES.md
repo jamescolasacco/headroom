@@ -2,6 +2,7 @@ Remote desktop for your own computers, and quick help with a code: **Headroom Se
 
 ## New in 0.4.8: wake your Mac from your phone, and sign in
 
+- **Headroom has a new address: https://headroom.colasac.co** (relay.colasac.co is gone). Headroom Server and Headroom Viewer move to it by themselves with this update, still signed in: until a computer has it, it can't be reached, so on each one press **Restart to update** (or **Check for updates** in its menu-bar or tray menu). On a phone or in a browser, open the new address and sign in again; a Home Screen icon made from the old one won't open, so add it again from the new one.
 - **Connect to a Mac that's asleep.** Tap it anyway: **Waiting for …** stays up (with Cancel, for up to 10 minutes) and connects the moment the Mac is back. A sleeping Mac wakes for a moment every few minutes; Headroom Server now gets back online within seconds of that (it could take half a minute, often too late), and the connection wakes the Mac up. Before, the website said it couldn't be reached.
 - **The picture starts when the display wakes.** Connecting to a Mac whose display had turned off said there was no display and stopped there, so you had to connect again. Now Headroom wakes the display and the picture starts by itself, usually within a few seconds. With the lid closed it says so: a closed MacBook has no screen to show.
 - **Type your password at the lock screen.** What you typed on a phone went to the Mac as text without keys, and password fields and the lock screen can ignore that. Each character now goes as the key that types it on the Mac's keyboard layout, Shift included, the way a keyboard plugged into the Mac sends it. (Emoji and letters the layout has no key for still go as text.) If typing ever stops working, Headroom Server's log says which app has secure input on.
@@ -71,7 +72,7 @@ Updating on a Mac: the apps aren't notarized, so macOS asks for **Screen Recordi
 
 ## New in 0.4: one account for your devices, and codes for everyone else
 
-- **Your devices, signed in with your email.** Create an account at https://relay.colasac.co (email, password, and a code we email you). Sign in with it in Headroom Server on each computer and it's one of your devices, listed even while it's off. Sign in at the website or in Headroom Viewer and click a computer to connect, from anywhere. No addresses, no pairing, no port forwarding. Rename a computer in Headroom Server.
+- **Your devices, signed in with your email.** Create an account at https://headroom.colasac.co (email, password, and a code we email you). Sign in with it in Headroom Server on each computer and it's one of your devices, listed even while it's off. Sign in at the website or in Headroom Viewer and click a computer to connect, from anywhere. No addresses, no pairing, no port forwarding. Rename a computer in Headroom Server.
 - **Let someone connect.** Headroom Server → *Let someone connect* gives a 9-digit code and a link. The other person enters it in their browser — no account, nothing to install. Your computer always asks first: it shows the name they typed (marked as not verified), roughly where they are, and a warning about support scams. **Accept**, **View only** or **Decline**; file transfer and clipboard are off unless you tick them. A bar at the top of your screen shows who's connected, with **Stop**, and you can switch their control, files and clipboard while they're connected. Works on computers that aren't signed in to an account too.
 - **Account security:** email verification, "Forgot password?" by emailed code, a human check against bots, optional two-factor sign-in, an email for every new sign-in, *Where you're signed in* with Sign out for each, change email, delete account.
 - **Simpler apps.** Headroom Server's window has four sections: Home, Let someone connect, Account, Settings. The website is a code box and a sign-in when signed out, and your devices when signed in.
@@ -99,6 +100,6 @@ The installers aren't code-signed, so Windows may say it protected your PC: choo
 
 ### iPhone / iPad, or any browser
 
-Nothing to install: open https://relay.colasac.co. In Safari, Share → Add to Home Screen gives a full-screen app.
+Nothing to install: open https://headroom.colasac.co. In Safari, Share → Add to Home Screen gives a full-screen app.
 
 `SHA256SUMS.txt` lists the checksums of every download; `SHA256SUMS.txt.sig` is their signature with Headroom's certificate (`assets/headroom-signing.cer` in the repository).

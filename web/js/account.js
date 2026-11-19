@@ -3,9 +3,21 @@
 import { postNative, nativeViewer } from './platform.js';
 
 const KEY = 'headroom.account.v2';
+// Headroom's service moved from relay.colasac.co (gone) to headroom.colasac.co: the same server, so a sign-in made at
+// the old address (in Headroom Viewer) keeps working at the new one.
+const OLD_SERVER = 'https://relay.colasac.co', NEW_SERVER = 'https://headroom.colasac.co';
 
 export function loadAccount() {
-  try { return JSON.parse(localStorage.getItem(KEY) || 'null'); } catch { return null; }
+  let a;
+  try { a = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch { return null; }
+  if (typeof a?.server === 'string' && a.server.replace(/\/+$/, '').toLowerCase() === OLD_SERVER) {
+    a.server = NEW_SERVER;
+    for (const c of a.computers || []) {
+      if (typeof c.lastUrl === 'string' && c.lastUrl.startsWith(OLD_SERVER)) c.lastUrl = NEW_SERVER + c.lastUrl.slice(OLD_SERVER.length);
+    }
+    saveAccount(a);
+  }
+  return a;
 }
 
 function saveAccount(a) {

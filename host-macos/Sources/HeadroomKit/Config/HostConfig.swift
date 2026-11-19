@@ -29,7 +29,14 @@ public struct HostConfig: Codable {
     /// Signed in to a Headroom account (with this computer's own sign-in there), if it is.
     public var account: AccountLink?
 
-    public static let defaultServer = "https://relay.colasac.co"
+    public static let defaultServer = "https://headroom.colasac.co"
+
+    /// Headroom's service moved from relay.colasac.co (gone) to headroom.colasac.co: the same server, so sign-ins made
+    /// at the old address keep working at the new one.
+    static func moved(_ server: String) -> String {
+        let s = server.hasSuffix("/") ? String(server.dropLast()) : server
+        return s.lowercased() == "https://relay.colasac.co" ? defaultServer : server
+    }
 
     public init() {}
 
@@ -45,9 +52,10 @@ public struct HostConfig: Codable {
         tls = try c.decodeIfPresent(TlsSettings.self, forKey: .tls) ?? TlsSettings()
         lockOnDisconnect = try c.decodeIfPresent(Bool.self, forKey: .lockOnDisconnect) ?? false
         notifyOnConnect = try c.decodeIfPresent(Bool.self, forKey: .notifyOnConnect) ?? true
-        server = (try? c.decodeIfPresent(String.self, forKey: .server)) ?? HostConfig.defaultServer
+        server = HostConfig.moved((try? c.decodeIfPresent(String.self, forKey: .server)) ?? HostConfig.defaultServer)
         // Sign-ins from before email accounts (usernames) don't work any more: start signed out.
         account = try? c.decodeIfPresent(AccountLink.self, forKey: .account)
+        if let a = account { account?.server = HostConfig.moved(a.server) }
     }
 }
 

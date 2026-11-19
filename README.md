@@ -16,7 +16,7 @@ Open source, and you can run the whole service yourself.
 | **Mac** | **Headroom Server**: menu-bar app + window | **Headroom Viewer** desktop app (captures ⌘Tab, ⌘Space, Mission Control), or any browser |
 | **iPhone / iPad** | — | the website, installed via Share → Add to Home Screen (no App Store) |
 
-The public service runs at **https://relay.colasac.co** (the apps use it unless you set another); the same server
+The public service runs at **https://headroom.colasac.co** (the apps use it unless you set another); the same server
 is in this repository for running your own.
 
 ## Install
@@ -34,13 +34,13 @@ Recording and Accessibility when Headroom Server asks. (Or in Terminal, without 
 **Headroom-Viewer-Setup.exe** where you connect from. They aren't code-signed, so Windows may say it protected
 your PC: More info → Run anyway.
 
-**iPhone / iPad, or any browser:** nothing to install. Open https://relay.colasac.co.
+**iPhone / iPad, or any browser:** nothing to install. Open https://headroom.colasac.co.
 
 To build from source instead, see [Build](#build).
 
 ## Using it
 
-1. **Create an account** at https://relay.colasac.co (email and password; we email you a code to confirm).
+1. **Create an account** at https://headroom.colasac.co (email and password; we email you a code to confirm).
 2. **On each computer** you want to reach: Headroom Server → **Account** → sign in with that email. It shows up in
    your list, named after the computer (rename it there).
 3. **On any device:** sign in at the website or in Headroom Viewer and click a computer. Your own devices connect
@@ -165,7 +165,7 @@ Forks: run `tools/make-signing-cert.sh` once (it makes your own certificate and 
 
 ## iPhone / iPad
 
-Open https://relay.colasac.co in Safari, sign in (or enter a code), then **Share → Add to Home Screen** for a
+Open https://headroom.colasac.co in Safari, sign in (or enter a code), then **Share → Add to Home Screen** for a
 full-screen app. The Home Screen app has its own storage, so sign in again inside it. Sound needs iOS 26 or later
 (Safari's WebCodecs audio). Tip: allow "Paste from Other Apps" for Safari (or the home-screen app) in Settings to
 avoid paste prompts.
