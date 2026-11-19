@@ -27,11 +27,13 @@ export class Viewport extends EventTarget {
   get zoomed() { return this.zoom > 1.01; }
 
   setSizes(encW, encH, srcW, srcH) {
-    const changed = encW !== this.encW || encH !== this.encH;
+    // Another monitor starts unzoomed. The same one at another resolution (Auto follows the zoom) keeps the zoom
+    // and the offsets: the picture is the same size here either way.
+    const newSource = (srcW || encW) !== this.srcW || (srcH || encH) !== this.srcH;
     this.encW = encW; this.encH = encH; this.srcW = srcW || encW; this.srcH = srcH || encH;
     this.stage.style.width = `${encW}px`;
     this.stage.style.height = `${encH}px`;
-    if (changed) { this.zoom = 1; }
+    if (newSource) { this.zoom = 1; }
     this.layout();
   }
 

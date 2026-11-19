@@ -47,7 +47,7 @@ export const DEFAULT_PREFS = {
   scaling: 'fit',           // fit | actual | fill
   maxFps: 60,
   maxBitrateKbps: 0,        // 0 = host maximum (adaptive)
-  resolution: 'native',     // native | 1080 | 720 | device
+  resolution: 'auto',       // auto (as big as it's shown here: see Session._autoSize) | native | 1440 | 1080 | 720
   audio: true,
   stats: false,
   renderer: 'auto',         // auto | video | canvas

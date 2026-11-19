@@ -405,8 +405,8 @@ export class Toolbar {
         { value: 0, label: 'Auto' }, { value: 5000, label: '5' }, { value: 12000, label: '12' }, { value: 25000, label: '25' }, { value: 50000, label: '50' },
       ], p.maxBitrateKbps, v => s.setPref('maxBitrateKbps', v))));
       advanced(row('Resolution', segmented([
-        { value: 'native', label: 'Native' }, { value: '1440', label: '1440p' }, { value: '1080', label: '1080p' }, { value: '720', label: '720p' }, { value: 'device', label: 'This screen' },
-      ], p.resolution, v => s.setPref('resolution', v))));
+        { value: 'auto', label: 'Auto' }, { value: 'native', label: 'Native' }, { value: '1440', label: '1440p' }, { value: '1080', label: '1080p' }, { value: '720', label: '720p' },
+      ], p.resolution === 'device' ? 'auto' : p.resolution, v => s.setPref('resolution', v))));
       if (isTouchPrimary) {
         el.append(row('Scrolling', segmented([
           { value: true, label: 'Natural' }, { value: false, label: 'Traditional' },

@@ -76,6 +76,8 @@ export class Session {
     const viewer = $('viewer'), stage = $('stage'), layer = $('input-layer'), sink = $('kbd-sink');
     this.viewport = new Viewport(viewer, stage);
     this.viewport.mode = this.prefs.scaling;
+    // Auto resolution follows the picture's size here: the window resized, the phone turned, zoomed in or out.
+    this.viewport.addEventListener('change', () => this._followSize());
     this.cursor = new CursorRenderer(layer, $('remote-cursor'), this.viewport);
     this.presenter = new VideoPresenter({ video: $('video'), canvas: $('canvas'), preference: this.prefs.renderer });
     this.conn = new Connection(this.host);
@@ -324,16 +326,12 @@ export class Session {
   sendStart() {
     if (!this.conn?.isOpen) return;
     const res = this.prefs.resolution;
-    const dpr = window.devicePixelRatio || 1;
     let maxWidth = 0, maxHeight = 0;
     if (res === '1080') { maxWidth = 1920; maxHeight = 1080; }
     else if (res === '720') { maxWidth = 1280; maxHeight = 720; }
     else if (res === '1440') { maxWidth = 2560; maxHeight = 1440; }
-    else if (res === 'device') {
-      // Cap both dimensions at this screen's long side in device pixels (works in either orientation;
-      // the host preserves aspect ratio).
-      maxWidth = maxHeight = Math.round(Math.max(screen.width, screen.height) * dpr);
-    }
+    else if (res !== 'native') ({ maxWidth, maxHeight } = this._autoSize()); // Auto (and "This screen", which it replaced)
+    this._sentSize = `${maxWidth}x${maxHeight}`;
     this.conn.sendJson({
       t: 'start',
       monitor: this.monitorId,
@@ -342,6 +340,33 @@ export class Session {
       maxWidth, maxHeight,
       audio: !!this.prefs.audio && this.audio.supported,
     });
+  }
+
+  /**
+   * Auto resolution: the stream is as big as the whole desktop is drawn on this screen, in device pixels, and as
+   * you zoom in it grows, up to the computer's own size. Pixels nobody sees cost encode time, delay and bitrate: a
+   * phone showing a Retina Mac at a third of its size gets a light, fast stream, a 4K screen every pixel. In
+   * tenths of the computer's size (half at least), so small changes don't restart the stream.
+   */
+  _autoSize() {
+    const m = this.monitors.find(x => x.id === this.monitorId) || this.monitors[0];
+    if (!m?.width || !m?.height) return { maxWidth: 0, maxHeight: 0 };
+    const v = this.viewport, dpr = window.devicePixelRatio || 1;
+    // Before any video: the desktop fitted into this window.
+    const shownW = v.encW ? v.encW * v.scale * dpr : Math.min(v.viewer.clientWidth, v.viewer.clientHeight * m.width / m.height) * dpr;
+    const s = Math.min(1, Math.max(0.5, Math.ceil(shownW / m.width * 10 - 0.05) / 10));
+    return s >= 1 ? { maxWidth: 0, maxHeight: 0 } : { maxWidth: Math.round(m.width * s), maxHeight: Math.round(m.height * s) };
+  }
+
+  /** The picture changed size here: with Auto resolution, ask for the size that fits now (once it settles). */
+  _followSize() {
+    const res = this.prefs.resolution;
+    if (res !== 'auto' && res !== 'device') return;
+    clearTimeout(this._sizeTimer);
+    this._sizeTimer = setTimeout(() => {
+      const { maxWidth, maxHeight } = this._autoSize();
+      if (`${maxWidth}x${maxHeight}` !== this._sentSize) this.sendStart();
+    }, 700);
   }
 
   selectMonitor(id) {
