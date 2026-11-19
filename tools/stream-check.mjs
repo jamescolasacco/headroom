@@ -5,7 +5,7 @@
 // ffmpeg's QP tables: lower is sharper).
 //
 //   node tools/stream-check.mjs [--url=http://127.0.0.1:7080] [--seconds=20] [--ack-delay=0] [--ack-jitter=0]
-//                               [--link-kbps=0] [--max-width=0] [--max-kbps=0] [--min-target-kbps=0] [--out=stream-check.h264] [--quiet]
+//                               [--link-kbps=0] [--max-width=0] [--max-kbps=0] [--max-fps=60] [--min-target-kbps=0] [--out=stream-check.h264] [--quiet]
 //
 // --ack-delay / --ack-jitter (ms) hold each frame's ack back, and --link-kbps adds its transmission time on a link
 // that fast, as a longer network path would (the jitter is seeded: every run sees the same delays).
@@ -23,6 +23,7 @@ const ackDelay = Number(arg('ack-delay', '0')), ackJitter = Number(arg('ack-jitt
 const linkKbps = Number(arg('link-kbps', '0'));
 const maxWidth = Number(arg('max-width', '0'));
 const maxKbps = Number(arg('max-kbps', '0')) || undefined; // the viewer's bitrate cap (Settings → quality)
+const maxFps = Number(arg('max-fps', '60'));
 const outFile = arg('out', 'stream-check.h264');
 const minTarget = Number(arg('min-target-kbps', '0'));
 const quiet = process.argv.includes('--quiet');
@@ -77,7 +78,7 @@ ws.onmessage = ev => {
     const m = JSON.parse(ev.data);
     if (m.t === 'welcome') {
       t0 = now;
-      ws.send(JSON.stringify({ t: 'start', monitor: m.monitors[0]?.id, maxFps: 60, maxBitrateKbps: maxKbps, maxWidth, maxHeight: maxWidth ? Math.round(maxWidth * 0.75) : 0, audio: false }));
+      ws.send(JSON.stringify({ t: 'start', monitor: m.monitors[0]?.id, maxFps, maxBitrateKbps: maxKbps, maxWidth, maxHeight: maxWidth ? Math.round(maxWidth * 0.75) : 0, audio: false }));
     } else if (m.t === 'video-config') { configs.push(m); ({ sps, pps } = parseAvcC(m.description)); }
     else if (m.t === 'stats') stats.push({ at: (now - t0) / 1000, ...m });
     else if (m.t === 'pong') {
