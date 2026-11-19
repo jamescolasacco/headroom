@@ -1,5 +1,9 @@
 Remote desktop for your own computers, and quick help with a code: **Headroom Server** on the computer you want to reach; **Headroom Viewer**, any browser, or an iPhone/iPad on the device you use.
 
+## New in 0.4.4
+
+- **Clicks on a phone or touchscreen are instant.** A tap's click goes out the moment your finger lifts, instead of a quarter of a second later in case a drag followed. Tap, then touch and drag is still one press-and-drag.
+
 ## New in 0.4.3: download, install, and it keeps itself up to date
 
 - **Real installers.** On a Mac, open **Headroom-macOS.dmg** and drag both apps to Applications. On Windows, run **Headroom-Server-Setup.exe** and **Headroom-Viewer-Setup.exe**. No Terminal, no PowerShell.
