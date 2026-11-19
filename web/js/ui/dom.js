@@ -147,12 +147,18 @@ export function busy(button, busyLabel) {
 let sheetClose = null;
 
 /**
- * Opens the session's sheet (a small panel of options). It is named by its first heading, takes focus, closes on
- * Escape or a tap outside, and gives focus back to whatever opened it.
+ * The way out of a dialog or sheet, in its top corner: a sticky strip with no height of its own holds it, so it stays
+ * in view while a tall one scrolls (on a phone, its other buttons can be a long scroll away).
  */
+function closeStrip(cls, onClick) {
+  return h('div', { class: 'close-strip' },
+    h('button', { type: 'button', class: `icon-btn ${cls}`, 'aria-label': 'Close', onclick: onClick }, svg('<path d="M18 6 6 18M6 6l12 12"/>', 20)));
+}
+
 /**
  * Opens the session's option sheet. It's named `label` (the name of the button that opened it), else by its first
- * heading; it takes focus, keeps Tab inside it, closes on Escape, and gives focus back to its button.
+ * heading; it takes focus, keeps Tab inside it, closes on Escape, its close button or a tap outside, and gives focus
+ * back to its button.
  */
 export function openSheet(build, { onClose, label } = {}) {
   const sheet = document.getElementById('sheet');
@@ -167,8 +173,7 @@ export function openSheet(build, { onClose, label } = {}) {
   else if (title) { sheet.removeAttribute('aria-label'); title.id ||= nextId('sheet'); sheet.setAttribute('aria-labelledby', title.id); }
   else { sheet.removeAttribute('aria-label'); sheet.removeAttribute('aria-labelledby'); }
   // A way out you can see (on a phone a tall sheet leaves little to tap around it).
-  sheet.prepend(h('button', { type: 'button', class: 'sheet-close', 'aria-label': 'Close', onclick: () => close() },
-    svg('<path d="M18 6 6 18M6 6l12 12"/>', 20)));
+  sheet.prepend(closeStrip('sheet-close', () => close()));
   sheet.hidden = false;
   backdrop.hidden = false;
   const onKey = e => {
@@ -238,8 +243,9 @@ export function segmented(options, value, onChange, label) {
 // ------------------------------------------------------------------ modal dialog
 /**
  * Opens the modal dialog. It is named by its first heading. Focus goes to the element marked `autofocus`, else
- * to the heading (so the dialog is read from the top and no keyboard pops up on phones); closing (Escape too)
- * gives focus back to whatever opened it.
+ * to the heading (so the dialog is read from the top and no keyboard pops up on phones). Its close button (always
+ * in view at the top), Escape or a click outside it close it, as Cancel would; closing gives focus back to
+ * whatever opened it.
  */
 export function dialog(build) {
   const dlg = document.getElementById('dlg');
@@ -248,6 +254,16 @@ export function dialog(build) {
   return new Promise(resolve => {
     const done = v => { dlg.close(); resolve(v); };
     build(dlg, done);
+    dlg.prepend(closeStrip('dlg-close', () => done()));
+    // Outside it is the backdrop (the click lands on the dialog element itself, beyond its box). A press that started
+    // inside, like selecting text and letting go outside, doesn't count.
+    const outside = e => {
+      const r = dlg.getBoundingClientRect();
+      return e.target === dlg && (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom);
+    };
+    let pressedOutside = false;
+    dlg.onpointerdown = e => { pressedOutside = outside(e); };
+    dlg.onclick = e => { if (pressedOutside && outside(e)) done(); pressedOutside = false; };
     const title = dlg.querySelector('h2');
     if (title) {
       title.id ||= nextId('dlg');

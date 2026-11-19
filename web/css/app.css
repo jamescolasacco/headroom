@@ -430,13 +430,14 @@ button.host-main:not(:disabled):not([aria-disabled="true"]):active { transform: 
 }
 .dlg form, .dlg .body { padding: 28px; }
 .dlg .body form, .dlg form form { padding: 0; }
-.dlg h2 { margin: 0 0 var(--s2); font: 600 22px/1.2 var(--display); letter-spacing: -0.02em; }
+.dlg h2 { margin: 0 32px var(--s2) 0; font: 600 22px/1.2 var(--display); letter-spacing: -0.02em; } /* clear of the close button */
 .dlg h2:focus { outline: none; }
 .dlg .actions { display: flex; gap: var(--s2); justify-content: flex-end; margin-top: var(--s5); flex-wrap: wrap; }
 .dlg .sub-h { font-size: var(--t-label); font-weight: 600; color: var(--ink); margin: var(--s5) 0 var(--s2); }
 .dlg .qr-mini { margin-top: var(--s2); }
 /* "Got a code?" in its dialog: the dialog itself lights up like the screen on the front page */
 .dlg:has(> form.code-dialog) { background: transparent; box-shadow: var(--float-shadow); }
+.dlg:has(> form.code-dialog) .dlg-close { background: transparent; color: rgba(238, 241, 246, .8); }
 .dlg > form.code-dialog { border-radius: inherit; }
 
 /* the Account page */
@@ -605,8 +606,18 @@ button.task-row:not(:disabled):not([aria-disabled="true"]):active { transform: n
   @starting-style { #toolbar.pinned ~ .sheet { transform: translate(-50%, 6px); } }
 }
 .sheet h3 { font-size: var(--t-small); font-weight: 600; color: var(--ink-2); margin: var(--s3) 12px 6px; }
-.sheet-close { position: absolute; top: 4px; right: 4px; z-index: 1; width: 44px; min-height: 44px; padding: 0; border: 0; border-radius: 14px; color: var(--ink-2); }
-.sheet > .sheet-close + * { margin-right: 44px; } /* the first row keeps clear of it */
+/* the close button of a dialog or sheet (dom.js closeStrip): a strip that sticks to the top while it scrolls, with no
+   height of its own, holds it in the corner; it's opaque, so what scrolls under it doesn't show through */
+.close-strip { position: sticky; top: 0; height: 0; z-index: 3; }
+.close-strip > .icon-btn { position: absolute; width: 44px; min-height: 44px; border: 0; border-radius: 12px; color: var(--ink-2); }
+.close-strip > .icon-btn svg { width: 20px; height: 20px; }
+.dlg-close { top: 10px; right: 10px; background: var(--glass-solid); }
+.sheet-close { top: -4px; right: -4px; background: rgb(20, 24, 33); } /* 4px from the sheet's edge (the strip sits inside its padding) */
+@media (hover: hover) and (pointer: fine) {
+  .dlg-close:hover { background: color-mix(in srgb, var(--ink) 9%, var(--glass-solid)); }
+  .sheet-close:hover { background: rgb(39, 43, 52); }
+}
+.sheet > .close-strip + * { margin-right: 44px; } /* the first row keeps clear of it */
 .sheet .item { justify-content: space-between; gap: 10px; width: 100%; text-align: left; border: 0; border-radius: 12px; padding: 10px 12px; min-height: 44px; font-weight: 400; }
 @media (hover: hover) and (pointer: fine) { .sheet .item:hover { background: rgba(238, 241, 246, .08); } }
 .sheet .item .sub { color: var(--ink-3); font-size: var(--t-small); }
