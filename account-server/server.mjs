@@ -42,7 +42,7 @@ const TRUST_PROXY = env.TRUST_PROXY === '1';   // behind a reverse proxy: take t
 // Email (verification codes, password resets, sign-in alerts) through Resend.
 const RESEND_API_KEY = env.RESEND_API_KEY || '';
 const EMAIL_FROM = env.EMAIL_FROM || '';       // e.g. "Headroom <no-reply@example.com>", on a domain verified in Resend
-const PUBLIC_URL = (env.PUBLIC_URL || '').replace(/\/+$/, ''); // e.g. https://relay.example.com (for links in emails)
+const PUBLIC_URL = (env.PUBLIC_URL || '').replace(/\/+$/, ''); // e.g. https://headroom.example.com (for links in emails)
 const DEV_MAIL = env.DEV_MAIL === '1';         // testing only: don't send; GET /api/dev/mail shows the last message
 // Cloudflare Turnstile on sign-up and "forgot password" (the forms that send email).
 const TURNSTILE_SITEKEY = env.TURNSTILE_SITEKEY || '';

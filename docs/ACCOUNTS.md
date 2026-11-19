@@ -30,7 +30,7 @@ recipient so nobody can be flooded with emails.
 On a Linux server or VPS with systemd, behind HTTPS (Cloudflare Tunnel, Caddy, nginx):
 
 ```bash
-sudo tools/install-account-server-linux.sh --url https://relay.example.com
+sudo tools/install-account-server-linux.sh --url https://headroom.example.com
 ```
 
 It installs the `headroom-accounts` service on `127.0.0.1:8780` and creates `/etc/headroom-accounts.env`

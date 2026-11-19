@@ -175,7 +175,7 @@ avoid paste prompts.
 The account server and relay is one Node.js file with no dependencies (`account-server/server.mjs`). On a Linux
 server or VPS (systemd), behind HTTPS (Cloudflare Tunnel, Caddy, nginx):
 ```bash
-sudo tools/install-account-server-linux.sh --url https://relay.example.com
+sudo tools/install-account-server-linux.sh --url https://headroom.example.com
 ```
 Then put your [Resend](https://resend.com) API key and sender address, and your Cloudflare Turnstile keys, in
 `/etc/headroom-accounts.env` and `sudo systemctl restart headroom-accounts`. Moderation from the command line:

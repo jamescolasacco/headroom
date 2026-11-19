@@ -3,11 +3,12 @@
 # tunnel or reverse proxy that adds HTTPS (Cloudflare Tunnel, Caddy, nginx). Run it from a checkout of the
 # repository; run it again after `git pull` to update (data, accounts and settings are kept).
 #
-#   sudo tools/install-account-server-linux.sh [--port 8780] [--name "Headroom"] [--url https://relay.example.com]
+#   sudo tools/install-account-server-linux.sh [--port 8780] [--name "Headroom"] [--url https://headroom.example.com]
 #   sudo tools/install-account-server-linux.sh --uninstall          stop and remove the service (keeps the data)
 #
-# Settings (email, the human check) live in /etc/headroom-accounts.env, created once and never overwritten: put your
-# Resend API key and Cloudflare Turnstile keys there, then `sudo systemctl restart headroom-accounts`.
+# Settings (email, the human check) live in /etc/headroom-accounts.env, created once and kept (later runs change only
+# PUBLIC_URL, when --url is given): put your Resend API key and Cloudflare Turnstile keys there, then
+# `sudo systemctl restart headroom-accounts`.
 # Accounts from the command line (as the service user): sudo headroom-accounts list-users | add-user <email> |
 # disable-user <email> | enable-user <email> | reset-2fa <email> | reset-password <email> | delete-user <email>
 #
@@ -87,6 +88,11 @@ TURNSTILE_SECRET=
 EOF
   chmod 600 "$ENVFILE"
   echo "Created $ENVFILE: add your email and Turnstile keys there."
+elif [ -n "$URL" ]; then
+  # The settings stay as they are, except the address emails give, which follows --url (the site moved to a new domain).
+  esc=$(printf '%s' "$URL" | sed 's/[&|\\]/\\&/g')
+  if grep -q '^PUBLIC_URL=' "$ENVFILE"; then sed -i "s|^PUBLIC_URL=.*|PUBLIC_URL=$esc|" "$ENVFILE"
+  else printf 'PUBLIC_URL=%s\n' "$URL" >> "$ENVFILE"; fi
 fi
 
 cat > "$CLI" <<EOF
@@ -151,7 +157,7 @@ cat <<EOF
 
 Point your tunnel or reverse proxy at http://localhost:$PORT, e.g. in cloudflared's config.yml:
     ingress:
-      - hostname: relay.example.com
+      - hostname: headroom.example.com
         service: http://localhost:$PORT
 Accounts: sudo headroom-accounts list-users   (also add-user, disable-user, enable-user, reset-2fa, delete-user)
 EOF

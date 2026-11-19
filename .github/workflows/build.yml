@@ -31,7 +31,7 @@ jobs:
             curl -fs -X POST -H 'Content-Type: application/json' -d '{"email":"ci-admin@example.com","password":"quartz-lantern-ferry-81","deviceName":"ci"}' \
               http://127.0.0.1:8790/api/account/login | grep -q '"token"'
           }
-          sudo tools/install-account-server-linux.sh --port 8790 --url https://relay.example.com
+          sudo tools/install-account-server-linux.sh --port 8790 --url https://headroom.example.com
           curl -fs http://127.0.0.1:8790/api/info | grep -q '"signup":true'
           sudo test -f /etc/headroom-accounts.env
           test "$(sudo stat -c %a /etc/headroom-accounts.env)" = 600

@@ -62,7 +62,7 @@ settings window, its API or anything else — the computer enforces the same lis
 The relay needs a public **HTTPS** address. On a Linux server or VPS:
 
 ```bash
-sudo tools/install-account-server-linux.sh --url https://relay.example.com
+sudo tools/install-account-server-linux.sh --url https://headroom.example.com
 ```
 
 (see [ACCOUNTS.md](ACCOUNTS.md) for email and the human check), behind one of:
@@ -70,7 +70,7 @@ sudo tools/install-account-server-linux.sh --url https://relay.example.com
 - **Cloudflare Tunnel** (free, no open ports; needs a domain on Cloudflare). In cloudflared's `config.yml`:
   ```yaml
   ingress:
-    - hostname: relay.example.com
+    - hostname: headroom.example.com
       service: http://localhost:8780
     - service: http_status:404
   ```
