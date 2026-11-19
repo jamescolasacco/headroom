@@ -195,9 +195,15 @@ if (sourceDir && counted.length && cfg.width && offsetUs != null) {
   // Every frame from just before each stop to its last sharpening pass, decoded in one go (arrival order).
   const span = x => { const a = []; for (let n = Math.max(0, x.stopIndex - 3); n <= x.j; n++) a.push(n); return a; };
   const wanted = [...new Set(counted.flatMap(span))].sort((a, b) => a - b);
-  const r = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', outFile, '-vf', `select='${wanted.map(n => `eq(n\\,${n})`).join('+')}',scale=${W}:${H},format=gray`,
-    '-vsync', '0', '-f', 'rawvideo', '-pix_fmt', 'gray', '-'], { maxBuffer: 2 ** 32 });
-  const decoded = new Map(wanted.map((n, i) => [n, r.stdout?.subarray(i * size, (i + 1) * size)]));
+  // (In groups: ffmpeg's select expression doesn't take hundreds of terms.)
+  const decoded = new Map();
+  for (let g = 0; g < wanted.length; g += 24) {
+    const group = wanted.slice(g, g + 24);
+    const r = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', outFile, '-vf', `select='${group.map(n => `eq(n\\,${n})`).join('+')}',scale=${W}:${H},format=gray`,
+      '-vsync', '0', '-f', 'rawvideo', '-pix_fmt', 'gray', '-'], { maxBuffer: 2 ** 32 });
+    if (r.status !== 0 && !quiet) console.error('ffmpeg:', String(r.stderr).slice(0, 300));
+    group.forEach((n, i) => decoded.set(n, r.stdout?.subarray(i * size, (i + 1) * size)));
+  }
   // The page of text: the left 70% of the screen (the photo and the frame counter are to its right).
   const X1 = Math.floor(W * 0.7);
   const fit = (d, s, step) => { // least squares s ≈ a·d + b (the two pictures' levels can differ: video vs full range)
