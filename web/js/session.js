@@ -88,9 +88,9 @@ export class Session {
     const inputAllowed = () => this.permissions.input && this.conn.isOpen;
     const onUserGesture = () => { this.clipboard.onUserGesture(); this.audio.ctx?.state === 'suspended' && this.audio.ctx.resume().catch(() => { }); };
 
-    // What you type on a phone's keyboard, shown above the keys while you type (the eye on the keys bar).
+    // What you type on a phone's keyboard, shown above the keys while you type (the eye on the keys bar hides it).
     this.typing = new TypingPreview($('typing'));
-    this.typing.setEnabled(this.prefs.typingPreview !== false);
+    this.typing.setHidden(this.prefs.typingHidden === true);
     this.typing.setHost(this.hostOs);
 
     this.keyboard = new KeyboardInput({
@@ -114,11 +114,11 @@ export class Session {
       keyboard: this.keyboard, mods: this.mods, conn: this.conn,
       onLayout: () => this.layoutChrome(),
       onKey: code => this.typing.key(code),
-      onPreview: on => this._showTyping(on),
+      onHideText: on => this._hideTypedText(on),
       onHideKeyboard: () => this.softkbd.hide(),
     });
     this.extraKeys.setHost(this.hostOs);
-    this.extraKeys.setPreview(this.typing.enabled);
+    this.extraKeys.setTextHidden(this.typing.hidden);
     this.softkbd.addEventListener('change', () => {
       const open = this.softkbd.open;
       // First: the picture keeps its size while the keyboard takes the bottom of the screen (it pans instead).
@@ -490,7 +490,7 @@ export class Session {
     const bar = this.toolbar ? this.toolbar.place(keys, top) : 0;
     v.setInsets(top, Math.max(keys, bar));
     // Messages sit above the keyboard, the toolbar and the extra keys, and above what you type while you type.
-    const typing = this.softkbd?.open && this.typing?.enabled ? 52 : 0;
+    const typing = this.softkbd?.open ? 52 : 0;
     document.documentElement.style.setProperty('--inset-bottom', `${Math.round((this._covered || 0) + v.insetBottom + typing)}px`);
   }
 
@@ -504,14 +504,13 @@ export class Session {
     return this._safeProbe.offsetHeight;
   }
 
-  /** The eye on the keys bar: show what you type above the keys, or not (for every computer). */
-  _showTyping(on) {
-    this.prefs.typingPreview = on;
-    savePrefs('global', { typingPreview: on });
-    this.typing.setEnabled(on);
-    this.extraKeys.setPreview(on);
-    this.layoutChrome();
-    toast(on ? 'What you type shows above the keys' : 'What you type no longer shows above the keys', 2600);
+  /** The eye on the keys bar: what you type shows as dots above the keys (a password), or as text. For every computer. */
+  _hideTypedText(on) {
+    this.prefs.typingHidden = on;
+    savePrefs('global', { typingHidden: on });
+    this.typing.setHidden(on);
+    this.extraKeys.setTextHidden(on);
+    toast(on ? 'What you type shows as dots' : 'What you type shows as text', 2600);
   }
 
   /** While a session is up, pinching zooms the remote screen, never the page (that would throw the layout off). */

@@ -3,7 +3,7 @@
 // A key goes on a tap: a swipe along the bar scrolls it and presses nothing (holding an arrow, del, pgup or pgdn
 // still repeats it). Labels follow the host: a Mac host gets control/option/⌘ and Force Quit instead of Ctrl+Alt+Del.
 // While the on-screen keyboard is up, the end of the bar holds two buttons that stay put while the keys scroll:
-// the eye (show what you type, ui/typing.js) and Hide keyboard.
+// the eye (hides the text you type, shown above the keys, as dots: ui/typing.js) and Hide keyboard.
 import { h, svg } from './dom.js';
 
 const LOCK_TAP_MS = 500;        // two taps on a modifier this close lock it (a double-click's time on the computer)
@@ -93,9 +93,9 @@ const KEYS = [
 export class ExtraKeysBar {
   /**
    * @param {object} o { keyboard, mods, conn, onLayout(px), onKey(code) (a key went to the computer),
-   *   onPreview(on) (the eye), onHideKeyboard() }
+   *   onHideText(on) (the eye), onHideKeyboard() }
    */
-  constructor(el, { keyboard, mods, conn, onLayout, onKey, onPreview, onHideKeyboard }) {
+  constructor(el, { keyboard, mods, conn, onLayout, onKey, onHideText, onHideKeyboard }) {
     this.el = el;
     this.keyboard = keyboard;
     this.mods = mods;
@@ -106,11 +106,11 @@ export class ExtraKeysBar {
     this.macHost = false;
     this.keyboardOpen = false; // the on-screen keyboard is up (the session says: setKeyboardOpen)
     this.keys = h('div', { class: 'xk-keys', role: 'group', 'aria-label': 'Extra keys' });
-    this.previewBtn = this._endButton('Show what you type', () => onPreview?.(!this.preview));
+    this.eyeBtn = this._endButton('Hide typed text', () => onHideText?.(!this.textHidden));
     this.end = h('div', { class: 'xk-end', hidden: true },
-      this.previewBtn, this._endButton('Hide keyboard', () => onHideKeyboard?.(), HIDE_KEYBOARD));
+      this.eyeBtn, this._endButton('Hide keyboard', () => onHideKeyboard?.(), HIDE_KEYBOARD));
     el.replaceChildren(this.keys, this.end);
-    this.setPreview(true);
+    this.setTextHidden(false);
     this._render();
     mods.addEventListener('change', () => this._sync());
   }
@@ -123,11 +123,11 @@ export class ExtraKeysBar {
     return b;
   }
 
-  /** The eye: what you type shows above the keys (on), or doesn't. */
-  setPreview(on) {
-    this.preview = on;
-    this.previewBtn.replaceChildren(svg(on ? EYE : EYE_OFF));
-    this.previewBtn.setAttribute('aria-pressed', String(on));
+  /** The eye: open while the text you type shows above the keys, struck through while it's hidden as dots. */
+  setTextHidden(on) {
+    this.textHidden = on;
+    this.eyeBtn.replaceChildren(svg(on ? EYE_OFF : EYE));
+    this.eyeBtn.setAttribute('aria-pressed', String(on));
   }
 
   setKeyboardOpen(open) {

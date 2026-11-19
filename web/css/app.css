@@ -667,6 +667,7 @@ button.task-row:not(:disabled):not([aria-disabled="true"]):active { transform: n
 @media (prefers-reduced-motion: no-preference) { .typing:not(.shown) { transform: translate(-50%, 6px); } }
 .typed { flex: 1; min-width: 0; overflow: hidden; white-space: pre; }
 .typing.clipped .typed { -webkit-mask-image: linear-gradient(to right, transparent, #000 32px); mask-image: linear-gradient(to right, transparent, #000 32px); }
+.typing.dots .typed { letter-spacing: .14em; } /* hidden text (the eye): dots, spaced like a password field's */
 /* the computer's cursor is at the end of it */
 .typed::after { content: ""; display: inline-block; width: 2px; height: 1.15em; margin-left: 1px; vertical-align: -0.2em; border-radius: 1px; background: var(--light); }
 @media (prefers-reduced-motion: no-preference) { .typing.shown .typed::after { animation: caret 1.06s steps(1) infinite; } }

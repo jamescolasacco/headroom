@@ -53,7 +53,7 @@ export const DEFAULT_PREFS = {
   renderer: 'auto',         // auto | video | canvas
   pointerSpeed: 1.0,
   naturalScroll: true,
-  typingPreview: true,      // what you type on a phone's keyboard shows above the keys (saved for every computer)
+  typingHidden: false,      // what you type on a phone's keyboard shows as dots above the keys (saved for every computer)
 };
 
 export function loadPrefs(hostId) {
