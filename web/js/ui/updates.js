@@ -62,37 +62,35 @@ export class UpdateCorner {
     const pct = `${Math.round((u.progress || 0) * 100)}%`;
     const outcome = performance.now() < this.outcomeUntil;
     const checked = u.checkedAt ? `, checked ${new Date(u.checkedAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}` : '';
-    let icon = DOWNLOAD, label = '', name = 'Check for updates', tip = name, state = 'idle', open = false;
+    let icon = DOWNLOAD, label = '', name = 'Check for updates', state = 'idle', open = false;
     switch (u.phase) {
       case 'ready':
         icon = RESTART; label = 'Restart to update'; open = true; state = 'ready';
-        name = tip = `Restart to update to ${this.app}${v}`;
+        name = `Restart to update to ${this.app}${v}`;
         break;
       case 'downloading':
         icon = ring(u.progress || 0); label = `Downloading ${pct}`; open = true; state = 'busy';
-        name = tip = `Downloading ${this.app}${v}: ${pct}`;
+        name = `Downloading ${this.app}${v}: ${pct}`;
         break;
       case 'checking':
         icon = SPIN; label = 'Checking…'; open = this.asked; state = 'busy';
-        name = tip = 'Checking for updates…';
+        name = 'Checking for updates…';
         break;
       case 'current':
         if (outcome) { icon = DONE; label = 'Up to date'; open = true; }
         state = 'current';
-        tip = `${this.app} ${u.current || ''} is up to date${checked}. Click to check again.`.replace(/ {2,}/g, ' ');
         name = `Check for updates (${this.app} is up to date${checked})`;
         break;
       case 'failed':
         if (outcome) { label = 'Couldn\'t check'; open = true; }
         state = 'failed';
-        tip = `${u.message || 'Couldn\'t check for updates.'} Click to try again.`;
         name = `Check for updates (the last check failed: ${u.message || 'unknown error'})`;
         break;
     }
     const b = this.btn;
     b.className = `upd ${state}${open ? ' open' : ''}`;
     b.setAttribute('aria-label', name);
-    b.title = tip;
+    b.title = label || (state === 'ready' ? 'Restart to update' : 'Check for updates'); // (the full story is in its name)
     b.setAttribute('aria-disabled', state === 'busy' ? 'true' : 'false');
     b.firstChild.replaceChildren(svg(icon, 20));
     b.lastChild.textContent = label;

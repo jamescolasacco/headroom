@@ -5,7 +5,7 @@ import { h, svg, dialog, toast, announce, field, busy, nextId, plural, trackWind
 import { I } from './ui/icons.js';
 import { lightOf } from './ui/light.js';
 import { qrSvg } from './qr.js';
-import { deviceLabel, platformId, secure, hasWebCodecs, isStandalone, isIOS, isMac, nativeViewer, postNative, onNative } from './platform.js';
+import { deviceLabel, platformId, secure, hasWebCodecs, isStandalone, isIOS, nativeViewer, postNative, onNative } from './platform.js';
 import * as Account from './account.js';
 import { DEFAULT_ACCOUNT_SERVER, DOWNLOAD_URL } from './config.js';
 import { UpdateCorner } from './ui/updates.js';
@@ -114,9 +114,6 @@ function renderHome() {
   renderInstall(acct);
   const hint = [];
   if (cantShow()) hint.push(cantShow());
-  if (acct && nativeViewer) hint.push(isMac
-    ? 'Tip: ⌘Tab, ⌘Space and other system shortcuts go to the remote computer while its window is focused.'
-    : 'Tip: Win, Alt+Tab and PrtScn go to the remote computer while its window is focused. Ctrl+Alt+End sends Ctrl+Alt+Del.');
   $('home-hint').textContent = hint.join(' ');
 }
 
@@ -164,10 +161,9 @@ function homeScreenSteps() {
     dialog(dlg => {
       dlg.append(h('div', { class: 'body' },
         h('h2', {}, 'Add Headroom to your Home Screen'),
-        h('p', { class: 'muted' }, 'Firefox gives Home Screen apps a letter for an icon, whatever the website (a Firefox bug). Safari gives it Headroom\'s icon: open this page there and add it in three taps. It\'s the same app.'),
+        h('p', { class: 'muted' }, 'Firefox puts a letter on the icon. Safari uses Headroom\'s.'),
         h('div', { class: 'actions' }, h('a', { class: 'button primary', href: safari }, 'Open in Safari')),
-        h('p', { class: 'muted small' }, `Didn't open? Go to ${location.host} in Safari. Or add it from Firefox, with the letter: tap Share `,
-          glyph(I.share), ', then Add to Home Screen ', glyph(I.addHome), '.')));
+        h('p', { class: 'muted small' }, `Didn't open? Go to ${location.host} in Safari.`)));
     });
     return;
   }
@@ -177,7 +173,6 @@ function homeScreenSteps() {
   dialog(dlg => {
     dlg.append(h('div', { class: 'body' },
       h('h2', {}, 'Add Headroom to your Home Screen'),
-      h('p', { class: 'muted' }, 'It opens full screen, like an app. Add it in three taps:'),
       h('ol', { class: 'steps' },
         h('li', {}, ...first),
         h('li', {}, 'Tap Add to Home Screen ', glyph(I.addHome), '. Not in the list? Tap View More first.'),
@@ -209,8 +204,7 @@ function renderDevices(acct) {
   empty.hidden = hosts.length > 0;
   if (!empty.querySelector('.empty-actions')) {
     empty.querySelector('.empty-text').append(h('div', { class: 'empty-actions' },
-      h('a', { class: 'button primary', href: DOWNLOAD_URL, target: '_blank', rel: 'noopener' }, 'Get Headroom Server', svg(EXTERNAL, 16)),
-      h('p', { class: 'muted small' }, 'Free, for Mac and Windows.')));
+      h('a', { class: 'button primary', href: DOWNLOAD_URL, target: '_blank', rel: 'noopener' }, 'Get Headroom Server', svg(EXTERNAL, 16))));
   }
 }
 
@@ -286,8 +280,8 @@ async function waitForComputer(host, left) {
 }
 
 const ASLEEP = {
-  macos: 'It\'s asleep or offline. A sleeping Mac checks in every few minutes: Headroom connects then and wakes it up.',
-  other: 'It\'s asleep or off. Headroom connects as soon as it\'s back on.',
+  macos: 'It\'s asleep or offline.',
+  other: 'It\'s asleep or off.',
 };
 
 function connect(host, face = null) {
@@ -363,7 +357,7 @@ function codeForm({ inline = false, code = '', onDone } = {}) {
   codeIn.addEventListener('input', () => { codeIn.value = Account.prettyCode(codeIn.value); err.textContent = ''; });
   const codeField = field('Code', codeIn);
   const nameIn = h('input', { type: 'text', value: pref('headroom.guestName'), name: 'name', placeholder: 'Alex', autocomplete: 'name', maxlength: '40' });
-  const nameField = field('Your name', nameIn, { hint: 'Shown to them when they decide whether to let you in.' });
+  const nameField = field('Your name', nameIn);
   // On the signed-out page it's a compact row (signing in is that page's main action); in its dialog, the main one.
   const submit = h('button', { type: 'submit', class: inline ? '' : 'primary' }, 'Connect');
   const [codeLabel, , , codeErr] = codeField.nodes;
@@ -380,7 +374,6 @@ function codeForm({ inline = false, code = '', onDone } = {}) {
   if (inline) { codeLabel.classList.add('sr-only'); codeIn.addEventListener('focus', revealName); }
   const form = h('form', { class: inline ? 'code-screen' : 'code-screen code-dialog', novalidate: true },
     h('h2', {}, 'Got a code?'),
-    h('p', { class: 'muted small' }, 'Enter the code from the person at the other computer. They\'ll be asked to accept.'),
     ...(inline ? [codeLabel, codeRow, codeErr] : codeField.nodes), nameWrap, err,
     inline ? null : h('div', { class: 'actions' }, submit)); // (the dialog's own close button cancels)
   form.addEventListener('submit', async e => {
@@ -460,7 +453,7 @@ function humanCheck() {
   };
 }
 
-const PASSWORD_HINT = 'At least 12 characters. A few random words make a strong, easy one; spaces are fine.';
+const PASSWORD_HINT = 'At least 12 characters';
 
 /**
  * The second box of a new password ("Confirm password"), so a typo can't lock you out. `check()` says what's
@@ -509,7 +502,7 @@ function signInStep(show, { email = pref('headroom.lastEmail'), notice = '' } = 
   const web = path => () => window.open(`${server}/${path}`, '_blank', 'noopener');
   const form = h('form', { novalidate: true },
     h('h2', {}, 'Sign in'),
-    notice ? h('p', { class: 'notice' }, notice) : h('p', { class: 'muted small' }, 'See and connect to your devices.'),
+    notice ? h('p', { class: 'notice' }, notice) : null,
     ...emailF.nodes, ...passF.nodes, totpWrap, err, submit,
     h('div', { class: 'row-center links' },
       h('button', { type: 'button', class: 'link', 'data-signup': '', hidden: !!info && !info.signup, onclick: () => nativeViewer && info?.turnstile ? web('#signup')() : show(signUpStep, { email: emailIn.value.trim() }) }, 'Create account'),
@@ -547,7 +540,6 @@ function signUpStep(show, { email = '' } = {}) {
   const submit = h('button', { type: 'submit', class: 'primary wide' }, 'Create account');
   const form = h('form', { novalidate: true },
     h('h2', {}, 'Create your account'),
-    h('p', { class: 'muted small' }, 'Free. Then sign in with this email in Headroom Server on each of your computers.'),
     ...emailF.nodes, ...passF.nodes, ...againF.nodes, check.el, err, submit,
     h('div', { class: 'row-center links' }, h('button', { type: 'button', class: 'link', onclick: () => show(signInStep, { email: emailIn.value.trim() }) }, 'I have an account')));
   form.addEventListener('submit', async e => {
@@ -584,7 +576,6 @@ function forgotStep(show, { email = '' } = {}) {
   const submit = h('button', { type: 'submit', class: 'primary wide' }, 'Email me a code');
   const form = h('form', { novalidate: true },
     h('h2', {}, 'Forgot your password?'),
-    h('p', { class: 'muted small' }, 'We\'ll email you a code to choose a new one.'),
     ...emailF.nodes, check.el, err, submit,
     h('div', { class: 'row-center links' }, h('button', { type: 'button', class: 'link', onclick: () => show(signInStep, { email: emailIn.value.trim() }) }, 'Back to sign in')));
   form.addEventListener('submit', async e => {
@@ -657,7 +648,7 @@ function codeStep(show, { email, kind, title, what, button, extra, run, back }) 
   };
   const form = h('form', { novalidate: true },
     h('h2', {}, title),
-    h('p', { class: 'muted small' }, 'We sent a 6-digit code to ', h('b', {}, email), ` ${what}. It works for 15 minutes; check spam if it doesn't arrive.`),
+    h('p', { class: 'muted small' }, 'We sent a 6-digit code to ', h('b', {}, email), ` ${what}.`),
     ...codeF.nodes, ...(extra?.nodes || []), err, submit,
     h('div', { class: 'row-center links' }, resend, h('span', { 'aria-hidden': 'true' }, ' · '), h('button', { type: 'button', class: 'link', onclick: () => { clearInterval(timer); back(); } }, 'Change email')),
     status);
@@ -733,7 +724,7 @@ function accountPage() {
             toast(`Removed ${d.name}. Sign in again in Headroom Server on it to add it back.`);
             load();
             refreshAccount();
-          }, `Remove ${d.name}`))) : [h('li', { class: 'muted small' }, 'None yet. Sign in with this email in Headroom Server on a computer.')]));
+          }, `Remove ${d.name}`))) : [h('li', { class: 'muted small' }, 'None yet.')]));
         drawTasks();
       } catch (e) {
         if (e.status === 401) { done(); Account.forget(); renderHome(); return; }
@@ -813,7 +804,6 @@ function accountPage() {
         const pwF = field('Password', pw);
         const submit = h('button', { type: 'submit' }, 'Turn off two-factor');
         const form = h('form', { novalidate: true },
-          h('p', { class: 'small' }, 'Signing in asks for a code from your authenticator app. Turning it off needs your password.'),
           ...pwF.nodes, err, h('div', { class: 'actions' }, submit), status);
         form.onsubmit = async e => {
           e.preventDefault();
@@ -827,8 +817,7 @@ function accountPage() {
         return [form];
       }
       const start = h('button', { type: 'button', class: 'primary' }, 'Set up two-factor');
-      const box = h('div', {}, h('p', { class: 'small' }, 'Also ask for a code from an authenticator app (like Google Authenticator or 1Password) when signing in.'),
-        h('div', { class: 'actions' }, start), err);
+      const box = h('div', {}, h('div', { class: 'actions' }, start), err);
       start.onclick = async () => {
         const restore = busy(start, 'Starting…');
         if (!restore) return;
@@ -840,7 +829,7 @@ function accountPage() {
           qr.innerHTML = qrSvg(setup.uri, { border: 2 });
           const on = h('button', { type: 'submit', class: 'primary' }, 'Turn on');
           const form = h('form', { novalidate: true }, qr,
-            h('p', { class: 'small' }, 'Scan this with your authenticator app, or enter this key: ', h('span', { class: 'mono' }, setup.secret), '. Then type the code it shows.'),
+            h('p', { class: 'small' }, 'Key: ', h('span', { class: 'mono' }, setup.secret)),
             ...codeF.nodes, err, h('div', { class: 'actions' }, on), status);
           form.onsubmit = async e => {
             e.preventDefault();
@@ -950,7 +939,7 @@ function accountPage() {
       loadErr,
       h('h3', { class: 'sub-h' }, 'Where you\'re signed in'), signins,
       h('h3', { class: 'sub-h' }, 'Your devices'),
-      h('p', { class: 'muted small' }, 'Computers signed in with Headroom Server. Rename one in Headroom Server on it.'), devices,
+      devices,
       h('h3', { class: 'sub-h' }, 'Settings'), tasks,
       h('div', { class: 'actions' },
         h('button', { type: 'button', onclick: async () => { done(); await Account.signOut(); signedOutNotice = 'Signed out.'; rebuildSignIn(); renderHome(); $('signin-slot').querySelector('input')?.focus(); } }, 'Sign out'))));

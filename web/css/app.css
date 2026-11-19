@@ -284,10 +284,9 @@ label.field { display: block; margin: var(--s4) 0 6px; font-size: var(--t-label)
 /* signed out: the headline and the code on the left, signing in on the right */
 .welcome { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(300px, 400px); gap: clamp(32px, 6vw, 88px); align-items: start; }
 .hero-line {
-  font: 600 clamp(36px, 5.4vw, 60px)/1.02 var(--display); letter-spacing: -0.035em; margin: 0 0 var(--s4); max-width: 16ch;
+  font: 600 clamp(36px, 5.4vw, 60px)/1.02 var(--display); letter-spacing: -0.035em; margin: 0 0 var(--s6); max-width: 16ch;
   text-wrap: balance;
 }
-.tagline { margin: 0 0 var(--s6); color: var(--ink-2); max-width: 44ch; font-size: 17px; }
 
 /* "Got a code?": a lit screen you type the code into (always night: it's a screen) */
 .code-screen {
@@ -711,7 +710,6 @@ button.task-row:not(:disabled):not([aria-disabled="true"]):active { transform: n
 }
 .typing.blank .typed::after { content: none; }
 .typing.blank .typed::before { margin: 0 4px 0 0; }
-.typed-hint { color: var(--ink-3); }
 .typing:not(.blank) .typed { cursor: copy; } /* a tap on the text copies it */
 .typed-flash { color: var(--light); font-weight: 500; }
 .typing.flash .typed::after { content: none; }

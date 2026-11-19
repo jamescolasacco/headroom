@@ -4,7 +4,7 @@
 // bar above the keyboard takes its place.
 import { h, svg, openSheet, closeSheet, sheetOpen, sheetItem, segmented, toast, fmtBytes } from './dom.js';
 import { I } from './icons.js';
-import { isTouchPrimary, isIPad, canFullscreen, isApple, hasKeyboardLock } from '../platform.js';
+import { isTouchPrimary, isIPad, canFullscreen } from '../platform.js';
 import { listFiles, uploadFile } from '../api.js';
 
 const FOLD = '<path d="m6 9 6 6 6-6"/>';     // down: the bar goes down out of the way
@@ -224,7 +224,6 @@ export class Toolbar {
         active: m.id === s.monitorId,
         onClick: () => { s.selectMonitor(m.id); closeSheet(); },
       })));
-      if (!isTouchPrimary) el.append(h('p', { class: 'muted small', style: { padding: '4px 12px' } }, 'Shortcut: Ctrl+Alt+Shift+1…9 or ←/→'));
     });
   }
 
@@ -243,22 +242,20 @@ export class Toolbar {
           b('Hide app', 'hide', '⌘H'), b('Minimize', 'minimize', '⌘M'), b('Emoji', 'emoji', '⌃⌘Space'), b('Esc', 'esc')));
       } else {
         el.append(h('div', { class: 'grid' },
-          b('Ctrl+Alt+Del', 'cad'), b('Task Manager', 'taskmgr', 'Ctrl+Shift+Esc'), b('Lock', 'lock', 'Lock the remote computer'),
+          b('Ctrl+Alt+Del', 'cad'), b('Task Manager', 'taskmgr', 'Ctrl+Shift+Esc'), b('Lock', 'lock'),
           b('Start (Win)', 'win'), b('Alt+Tab', 'alttab'), b('Task View', 'wintab', 'Win+Tab'),
           b('Show desktop', 'desktop', 'Win+D'), b('Explorer', 'explorer', 'Win+E'), b('Run…', 'run', 'Win+R'),
           b('Settings', 'settings', 'Win+I'), b('Snip', 'snip', 'Win+Shift+S'), b('PrtScn', 'prtsc'),
           b('Close app', 'altf4', 'Alt+F4'), b('Esc', 'esc'), b('Ctrl+Esc', 'ctrlesc')));
-        if (!s.elevated) el.append(h('p', { class: 'muted small', style: { padding: '0 12px 6px' } },
-          'Ctrl+Alt+Del and the lock/UAC screens need Headroom installed as a service on the host.'));
       }
       el.append(h('h3', {}, 'Type text'));
-      const ta = h('textarea', { class: 'local-input', 'aria-label': 'Text to type on the remote computer', placeholder: 'Text to type on the remote (useful at login screens)…' });
+      const ta = h('textarea', { class: 'local-input', 'aria-label': 'Text to type on the remote computer', placeholder: 'Text to type' });
       el.append(h('div', { class: 'row' }, ta, h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px' } },
         h('button', { type: 'button', class: 'primary', onclick: () => { s.typeText(ta.value); closeSheet(); } }, 'Type it'))));
       if (!isTouchPrimary) {
         el.append(h('h3', {}, 'Mouse'));
         el.append(sheetItem(s.relative ? 'Release captured mouse' : 'Capture mouse (games / 3D apps)', {
-          sub: 'Ctrl+Alt+Shift+R', onClick: () => { s.toggleRelativeMouse(); closeSheet(); },
+          onClick: () => { s.toggleRelativeMouse(); closeSheet(); },
         }));
       }
     });
@@ -324,7 +321,7 @@ export class Toolbar {
       input.addEventListener('change', () => { this.uploadFiles([...input.files], state.path); input.value = ''; });
       el.append(h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between' } },
         h('h3', {}, 'Files on ' + s.host.name),
-        h('button', { type: 'button', class: 'tb', onclick: () => input.click(), title: 'Upload here' }, svg(I.upload), h('span', {}, 'Upload'))), input);
+        h('button', { type: 'button', class: 'tb', onclick: () => input.click() }, svg(I.upload), h('span', {}, 'Upload'))), input);
       pathEl = h('div', { class: 'files-path' });
       listEl = h('div');
       this.progressEl = h('div', { class: 'progress', hidden: true }, h('div'));
@@ -388,9 +385,6 @@ export class Toolbar {
           { value: 'pc', label: 'As pressed' },
           { value: 'cmdctrl', label: 'Ctrl = ⌘' },
         ], p.keyboardProfile === 'mac' ? 'pc' : p.keyboardProfile, v => s.setPref('keyboardProfile', v))));
-        el.append(h('p', { class: 'muted small', style: { padding: '0 12px' } },
-          isApple ? 'Keys go to the Mac as pressed: ⌘ is ⌘, ⌥ is ⌥.' : 'Ctrl = ⌘: Ctrl+C/V/Z… act as ⌘C/V/Z on the Mac, and the Windows key is Control.',
-          ' System shortcuts like ⌘Tab and ⌘Space can\'t be captured by a browser tab: use the Shortcuts menu, or Headroom Viewer.'));
       } else {
         el.append(row('Keyboard', segmented([
           { value: 'auto', label: 'Auto' },
@@ -398,9 +392,6 @@ export class Toolbar {
           { value: 'pc', label: 'PC' },
           { value: 'cmdctrl', label: '⌘ = Ctrl' },
         ], p.keyboardProfile, v => s.setPref('keyboardProfile', v))));
-        el.append(h('p', { class: 'muted small', style: { padding: '0 12px' } },
-          isApple ? 'Mac shortcuts: ⌘C/V/X/Z/A/S/F… act as Ctrl, ⌘Q closes, ⌘ alone opens Start, ⌥←/→ jump words.' : 'PC: keys are sent exactly as pressed.',
-          !hasKeyboardLock && !isTouchPrimary ? ' Tip: in Chrome/Edge full screen, Alt+Tab and the Windows key go to the remote too.' : ''));
       }
       // The technical options, folded away: most sessions never need them.
       const more = h('details', {}, h('summary', {}, 'Picture and network'));
@@ -428,13 +419,7 @@ export class Toolbar {
       advanced(row('Video drawing', segmented([
         { value: 'auto', label: 'Auto' }, { value: 'video', label: 'Video' }, { value: 'canvas', label: 'Canvas' },
       ], p.renderer, v => { s.setPref('renderer', v); toast('Takes effect the next time you connect'); })));
-      advanced(h('p', { class: 'muted small', style: { padding: '0 12px' } }, 'Leave these on Auto unless the picture misbehaves.'));
       el.append(more);
-      // Keyboard shortcuts: only where there's a keyboard to press them on.
-      if (!isTouchPrimary) {
-        el.append(h('p', { class: 'muted small', style: { padding: '8px 12px 4px' } },
-          'Ctrl+Alt+Shift+M toggles this toolbar · F full screen · S stats · Q disconnect'));
-      }
     });
   }
 }

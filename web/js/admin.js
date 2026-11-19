@@ -147,7 +147,7 @@ function renderOffline(message) {
     h('div', { class: 'face me off', 'aria-hidden': 'true' }),
     h('div', { class: 'me-text' },
       h('h2', { class: 'title' }, 'Headroom Server isn\'t running'),
-      h('p', { class: 'me-sub' }, native ? 'Start it here, or from the Headroom icon in the menu bar / notification area.' : `This page talks to Headroom Server on this computer (${message}).`),
+      native ? null : h('p', { class: 'me-sub' }, `This page talks to Headroom Server on this computer (${message}).`),
       native ? h('div', { class: 'row me-badges' }, h('button', { class: 'primary', onclick: () => postNative({ cmd: 'startServer' }) }, 'Start server')) : null))));
 }
 
@@ -274,7 +274,7 @@ function checkbox(label, checked, onChange, key) {
 }
 
 function qrBox(text, size) {
-  const box = h('div', { class: 'qr', role: 'img', 'aria-label': 'QR code that opens the link', title: text, style: size ? { width: `${size}px` } : null });
+  const box = h('div', { class: 'qr', role: 'img', 'aria-label': 'QR code that opens the link', style: size ? { width: `${size}px` } : null });
   box.innerHTML = QrCode.encode(text, 'M').toSvg({ border: 2 });
   return box;
 }
@@ -319,8 +319,7 @@ function requestsCard() {
       h('div', { class: 'row request-actions' },
         btn('Accept', 'sm accept', true, false),
         btn('View only', 'sm accept', true, true),
-        btn('Decline', 'sm decline', false, false)),
-      h('p', { class: 'muted small' }, 'Accept lets them see and control; View only lets them watch. No answer in 2 minutes declines.'));
+        btn('Decline', 'sm decline', false, false)));
   }));
 }
 
@@ -358,17 +357,12 @@ function viewHome() {
     : waiting ? plural(waiting, '1 person is waiting for your answer', `${waiting} people are waiting for your answer`)
       : n ? plural(n, `${st.sessions[0].device || 'Someone'} is connected`, `${n} people are connected`)
         : missing ? 'Needs permission before anyone can connect' : 'Nobody is connected';
-  const sub = stopped ? `Nobody can connect to ${thisPc()} until you start it. Settings, your account and everything else here still work.`
-    : waiting ? 'Answer above: Accept, View only or Decline.'
-      : n ? (n > 1 ? 'Each of them can see this screen. Stop anyone below.' : `They can see ${thisPc()}'s screen. Stop them at any time below.`)
-        : missing ? 'Turn on the two permissions below.'
-          : st.account ? 'Ready. Your devices can connect from anywhere.' : 'Ready for codes. Sign in to reach it from your devices too.';
   // This computer's screen, as your devices see it: lit in its own light; warm while a person is here.
   const glyph = state === 'live' ? I.user : state === 'warn' ? ICON.warn : mac() ? I.apple : I.windows;
   const face = state === 'live' ? ' lamp' : state === 'warn' ? ' off warn' : state === 'stopped' ? ' off' : ' os';
   const hero = h('div', { class: 'me-block' },
     h('div', { class: `face me${face}`, 'aria-hidden': 'true' }, svg(glyph, 34)),
-    h('div', { class: 'me-text' }, h('p', { class: 'title' }, title), h('p', { class: 'me-sub' }, sub),
+    h('div', { class: 'me-text' }, h('p', { class: 'title' }, title),
     h('div', { class: 'row me-badges' },
       st.account ? h('span', { class: 'badge ok' }, `Signed in as ${st.account.email}`) : h('span', { class: 'badge' }, 'Not signed in'),
       stopped ? h('span', { class: 'badge' }, 'Stopped')
@@ -414,7 +408,6 @@ function stopServerButton(n) {
   const b = n ? armedButton('Stop server', plural(n, 'Stop, and end the session?', `Stop, and end ${n} sessions?`), stop, 'home:stop-server')
     : h('button', { type: 'button', 'data-key': 'home:stop-server', onclick: stop }, 'Stop server');
   b.className = 'sm';
-  b.title = 'Nobody can connect until you start it again. Settings and your account still work.';
   return b;
 }
 
@@ -461,11 +454,6 @@ function viewConnect() {
   const left = c ? Math.max(0, Math.round((new Date(c.expiresAt) - Date.now()) / 1000)) : 0;
   if (!c || !left) {
     put(card,
-      h('p', {}, `Give someone a code and they can connect to ${thisPc()} from their browser. No account or download for them.`),
-      h('ol', { class: 'steps small' },
-        h('li', {}, `They open ${site() || 'the Headroom website'} and enter the code, or you send them the link.`),
-        h('li', {}, `${ThisPc()} asks you to accept, and you choose what they can do. Nobody gets in without you clicking Accept.`),
-        h('li', {}, 'You can stop the session at any time.')),
       h('div', { class: 'row' }, h('button', {
         class: 'primary', type: 'button', 'data-key': 'connect:create', 'aria-disabled': online ? null : 'true', onclick: async e => {
           if (!online || e.currentTarget.getAttribute('aria-disabled') === 'true') return;
@@ -494,10 +482,9 @@ function viewConnect() {
               onclick: () => api('/support/code', { method: 'DELETE' }).then(() => { announce('Stopped sharing. That code no longer works.'); pendingFocus = 'connect:create'; refresh({ force: true }); }),
             }, 'Stop sharing')),
           h('p', { class: 'small' }, `They enter it at ${site()}, or open the link: `, h('span', { class: 'mono link-text' }, c.link))),
-        h('figure', { class: 'share-qr' }, qrBox(c.link, 132), h('figcaption', { class: 'muted small' }, 'Or scan to open the link'))));
+        h('figure', { class: 'share-qr' }, qrBox(c.link, 132))));
   }
   return h('section', {}, h('h2', { tabindex: '-1' }, 'Let someone connect'),
-    h('p', { class: 'lead' }, 'For help from someone, or to reach this computer from a browser that isn\'t signed in.'),
     note('request'), requestsCard(), card);
 }
 
@@ -513,7 +500,7 @@ function viewAccount() {
   const a = st.account;
   if (a) {
     const name = h('input', { type: 'text', name: 'displayName', value: st.settings.displayName || '', placeholder: st.host.machine, class: 'grow', maxlength: '64', autocomplete: 'off', 'data-key': 'account:name' });
-    const nameF = field(`${ThisPc()}'s name`, name, { hint: 'How it\'s listed in your account and shown to people who connect. Leave empty to use the computer\'s name.' });
+    const nameF = field(`${ThisPc()}'s name`, name);
     const save = h('button', { type: 'submit', 'data-key': 'account:save' }, 'Save name');
     const form = h('form', { class: 'name-form' }, ...nameF.nodes, h('div', { class: 'row' }, save), note('rename'));
     form.onsubmit = async e => {
@@ -524,7 +511,6 @@ function viewAccount() {
       refresh({ force: true });
     };
     return h('section', {}, h('h2', { tabindex: '-1' }, 'Account'),
-      h('p', { class: 'lead' }, `${ThisPc()} is one of your devices. Sign in at ${site()} or in Headroom Viewer on any device to see it and connect.`),
       h('div', { class: 'card' }, h('dl', { class: 'kv' },
         h('dt', { class: 'k' }, 'Signed in as'), h('dd', {}, a.email),
         h('dt', { class: 'k' }, 'Last check-in'), h('dd', {}, a.error ? h('span', {}, h('span', { class: 'badge bad' }, 'Problem'), ` ${a.error}`) : agoEl(a.lastSync))),
@@ -568,10 +554,8 @@ function viewAccount() {
   };
   const web = (path, label) => h('a', { href: `${st.relay.site}/${path}`, target: '_blank', rel: 'noopener', onclick: e => { if (native) { e.preventDefault(); openExternal(`${st.relay.site}/${path}`); } } }, label);
   return h('section', {}, h('h2', { tabindex: '-1' }, 'Account'),
-    h('p', { class: 'lead' }, `Sign in with your Headroom account to add ${thisPc()} to it. Then it's in your list on every device where you're signed in — click it to connect, from anywhere.`),
     h('div', { class: 'card' }, h('h3', {}, 'Sign in'), form,
-      h('p', { class: 'small muted', style: { marginTop: '12px' } }, web('#signup', 'Create an account'), ' · ', web('#forgot', 'Forgot password?'), ` (opens ${site()})`)),
-    h('p', { class: 'small muted' }, `Your password goes only to Headroom; ${thisPc()} gets its own sign-in, which you can remove from any device (Account → Your devices).`));
+      h('p', { class: 'small muted', style: { marginTop: '12px' } }, web('#signup', 'Create an account'), ' · ', web('#forgot', 'Forgot password?'))));
 }
 
 // ------------------------------------------------------------------ Settings
@@ -581,26 +565,23 @@ function permissionsCard() {
   const p = st.permissions || {};
   const item = (ok, title, sub, kind, url) => h('li', { class: 'li' },
     h('div', { class: 'main' }, h('div', { class: 't' }, title, ' ', h('span', { class: `badge ${ok ? 'ok' : 'bad'}` }, ok ? 'Allowed' : 'Not allowed')),
-      h('div', { class: 's' }, sub)),
+      sub ? h('div', { class: 's' }, sub) : null),
     ok ? null : h('div', { class: 'row' },
       h('button', { class: 'sm', type: 'button', 'data-key': `perm:${kind}:ask`, onclick: () => post('/permissions/request', { kind }).then(() => refresh({ force: true })) }, 'Ask macOS'),
       h('button', { class: 'sm', type: 'button', 'data-key': `perm:${kind}:open`, onclick: () => openExternal(url) }, 'Open System Settings')));
   return h('div', { class: 'card' }, h('h3', {}, 'macOS permissions'),
     h('ul', { class: 'list' },
-      item(p.screenRecording, 'Screen Recording', 'Lets people who connect see the screen and hear its sound.', 'screen', p.screenRecordingUrl),
-      item(p.accessibility, 'Accessibility', 'Lets people who connect control the mouse and keyboard.', 'accessibility', p.accessibilityUrl)),
-    p.screenRecording && p.accessibility ? null : h('p', { class: 'small muted' },
-      'Turn on Headroom Server in each list (System Settings → Privacy & Security). macOS applies Screen Recording after Headroom Server restarts.'));
+      item(p.screenRecording, 'Screen Recording', null, 'screen', p.screenRecordingUrl),
+      item(p.accessibility, 'Accessibility', null, 'accessibility', p.accessibilityUrl)),
+    p.screenRecording ? null : h('p', { class: 'small muted' }, 'Screen Recording takes effect after Headroom Server restarts.'));
 }
 
 function viewSettings() {
   const v = st.settings.video, p = st.settings.permissions;
-  const row = (title, sub, control) => {
+  const row = (title, control) => {
     const t = h('div', { class: 't', id: nextId('set') }, title);
-    const s = h('div', { class: 's', id: nextId('set') }, sub);
     control.setAttribute('aria-labelledby', t.id);
-    control.setAttribute('aria-describedby', s.id);
-    return h('div', { class: 'switch-row' }, h('div', { class: 'main' }, t, s), control);
+    return h('div', { class: 'switch-row' }, h('div', { class: 'main' }, t), control);
   };
   const sel = (value, options, onChange, key) => {
     const s = h('select', { class: 'inline', 'data-key': key }, ...options.map(([val, label]) => h('option', { value: String(val) }, label)));
@@ -611,20 +592,18 @@ function viewSettings() {
   const openBtn = (label, path, what) => native ? h('button', { class: 'sm', type: 'button', 'aria-label': `Open the ${what} folder`, onclick: () => postNative({ cmd: 'openFolder', path }) }, label) : null;
   return h('section', {}, h('h2', { tabindex: '-1' }, 'Settings'),
     h('div', { class: 'card' }, h('h3', {}, 'General'),
-      loginItem !== null ? switchRow('Start at login', `Keeps ${thisPc()} reachable after a restart.`, loginItem, x => { loginItem = x; postNative({ cmd: 'loginItem', enabled: x }); }, 'set:login') : null,
-      switchRow('Notify when someone connects', `A notification on ${thisPc()} each time a session starts or ends.`, st.settings.notifyOnConnect !== false, x => saveSettings({ notifyOnConnect: x }), 'set:notify'),
-      mac() ? switchRow('Lock this Mac when the last person disconnects', 'So nobody walks up to an unlocked screen afterwards.', st.settings.lockOnDisconnect, x => saveSettings({ lockOnDisconnect: x }), 'set:lock') : null),
+      loginItem !== null ? switchRow('Start at login', null, loginItem, x => { loginItem = x; postNative({ cmd: 'loginItem', enabled: x }); }, 'set:login') : null,
+      switchRow('Notify when someone connects', null, st.settings.notifyOnConnect !== false, x => saveSettings({ notifyOnConnect: x }), 'set:notify'),
+      mac() ? switchRow('Lock this Mac when the last person disconnects', null, st.settings.lockOnDisconnect, x => saveSettings({ lockOnDisconnect: x }), 'set:lock') : null),
     h('div', { class: 'card' }, h('h3', {}, 'Your devices may'),
-      h('p', { class: 'small muted' }, 'For devices signed in to your account. Guests get what you allow when you accept them.'),
-      switchRow('Control', 'Off = they can watch but not use the mouse or keyboard.', p.input, x => saveSettings({ input: x }), 'set:input'),
-      switchRow('Clipboard', 'Copy on one side, paste on the other (text).', p.clipboard, x => saveSettings({ clipboard: x }), 'set:clipboard'),
-      switchRow('Files', `Browse, download and upload files on ${thisPc()}.`, p.fileTransfer, x => saveSettings({ fileTransfer: x }), 'set:files'),
-      switchRow('Sound', `Hear ${thisPc()}'s audio.`, st.settings.audio.enabled, x => saveSettings({ audio: x }), 'set:sound')),
+      switchRow('Control', null, p.input, x => saveSettings({ input: x }), 'set:input'),
+      switchRow('Clipboard', null, p.clipboard, x => saveSettings({ clipboard: x }), 'set:clipboard'),
+      switchRow('Files', null, p.fileTransfer, x => saveSettings({ fileTransfer: x }), 'set:files'),
+      switchRow('Sound', null, st.settings.audio.enabled, x => saveSettings({ audio: x }), 'set:sound')),
     h('div', { class: 'card' }, h('h3', {}, 'Picture quality'),
-      h('p', { class: 'small muted' }, 'Upper limits. Each session adapts below these to its connection.'),
-      row('Encoder', mac() ? 'Hardware uses the Mac\'s built-in video encoder (fastest). Software works everywhere.' : 'Hardware uses your graphics card (fastest). Software works everywhere.', sel(v.encoder, [['auto', 'Automatic'], ['hardware', 'Hardware only'], ['software', 'Software']], x => saveSettings({ encoder: x }), 'set:encoder')),
-      row('Maximum frame rate', 'Higher is smoother but uses more bandwidth.', sel(v.maxFps, [[30, '30 fps'], [60, '60 fps'], [120, '120 fps'], [144, '144 fps'], [240, '240 fps']], x => saveSettings({ maxFps: +x }), 'set:fps')),
-      row('Maximum bitrate', 'Caps bandwidth per session.', sel(v.maxBitrateKbps, [[10000, '10 Mb/s'], [20000, '20 Mb/s'], [40000, '40 Mb/s'], [80000, '80 Mb/s'], [150000, '150 Mb/s']], x => saveSettings({ maxBitrateKbps: +x }), 'set:bitrate'))),
+      row('Encoder', sel(v.encoder, [['auto', 'Automatic'], ['hardware', 'Hardware only'], ['software', 'Software']], x => saveSettings({ encoder: x }), 'set:encoder')),
+      row('Maximum frame rate', sel(v.maxFps, [[30, '30 fps'], [60, '60 fps'], [120, '120 fps'], [144, '144 fps'], [240, '240 fps']], x => saveSettings({ maxFps: +x }), 'set:fps')),
+      row('Maximum bitrate', sel(v.maxBitrateKbps, [[10000, '10 Mb/s'], [20000, '20 Mb/s'], [40000, '40 Mb/s'], [80000, '80 Mb/s'], [150000, '150 Mb/s']], x => saveSettings({ maxBitrateKbps: +x }), 'set:bitrate'))),
     mac() ? permissionsCard() : null,
     h('div', { class: 'card' }, h('h3', {}, 'About'), h('dl', { class: 'kv' },
       h('dt', { class: 'k' }, 'Version'), h('dd', {}, st.host.version),

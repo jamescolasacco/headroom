@@ -98,7 +98,7 @@ export class TypingPreview {
     const empty = !this.units.length;
     this.el.classList.toggle('blank', empty);
     if (empty) {
-      this.line.replaceChildren(h('span', { class: 'typed-hint' }, 'What you type shows here'));
+      this.line.replaceChildren();
       this.el.classList.remove('clipped');
       return;
     }

@@ -304,10 +304,7 @@ export class Session {
     });
     c.addEventListener('pending', () => {
       // Our own words (the computer repeats its message every 20 s to keep the connection alive).
-      const who = this.host.support?.name;
-      this._overlay('Waiting for them to accept…',
-        `${who ? `They see your name, “${who}”,` : 'They see your name'} and choose what you can do. If nobody answers within 2 minutes, it's declined.`, true,
-        [{ label: 'Cancel', onClick: () => this.stop() }]);
+      this._overlay('Waiting for them to accept…', '', true, [{ label: 'Cancel', onClick: () => this.stop() }]);
     });
     c.addEventListener('fatal', e => {
       const m = e.detail;
@@ -327,7 +324,7 @@ export class Session {
         };
         this._overlay(titles[m.code], text[m.code], false, back);
       } else if (m.code === 'unauthorized') {
-        this._overlay('No access', 'This device doesn\'t accept your sign-in right now. It may have left your account; check it\'s still signed in with your email.', false, [
+        this._overlay('No access', 'This device doesn\'t accept your sign-in. It may have left your account.', false, [
           { label: 'Back', primary: true, onClick: () => { this.stop(); this.onUnauthorized?.(this.host); } },
         ]);
       } else if (m.code === 'rate-limited') {
@@ -343,7 +340,7 @@ export class Session {
         this.typing?.reset();
         if (!this._opened && this.host.account) {
           // It was listed as there, but it doesn't answer: it just fell asleep. It's tried again until it's back.
-          if (attempt > 2) this.waitingFor('It isn\'t answering: it may have just gone to sleep. Headroom keeps trying, and connects when it\'s back.');
+          if (attempt > 2) this.waitingFor('It isn\'t answering.');
           return;
         }
         this._overlay('Reconnecting…', attempt > 2 ? `Can't reach ${this.host.name}. Still trying (${reason || 'network'}).` : '', true,

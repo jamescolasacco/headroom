@@ -115,7 +115,7 @@ export class ExtraKeysBar {
     this.eyeBtn = this._endButton('Hide typed text', () => onHideText?.(!this.textHidden), null, 'xk-eye');
     this.typeBox.append(this.eyeBtn);
     const line = this.typeBox.querySelector('.typed');
-    if (line) { line.title = 'Tap to copy'; this._onTap(line, () => onCopyText?.()); }
+    if (line) this._onTap(line, () => onCopyText?.());
     this.hideBtn = this._endButton('Hide keyboard', () => { this.hideAsked = true; onHideKeyboard?.(); }, HIDE_KEYBOARD, 'xk xk-icon xk-hide');
     this.hideBtn.hidden = true;
     el.replaceChildren(this.typeBox, this.keys, this.hideBtn);
