@@ -11,7 +11,7 @@
     <RootNamespace>Headroom.Server</RootNamespace>
     <ApplicationIcon>..\..\assets\headroom.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>0.4.3</Version>
+    <Version>0.4.4</Version>
     <Product>Headroom</Product>
     <Description>Headroom Server — tray icon and settings for the Headroom host</Description>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>

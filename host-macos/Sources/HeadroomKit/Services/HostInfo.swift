@@ -5,7 +5,7 @@ import SystemConfiguration
 public enum HostInfo {
     public static let version: String = {
         if let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String, !v.isEmpty { return v }
-        return "0.4.3" // dev builds (no bundle); keep in step with tools/build-macos.sh
+        return "0.4.4" // dev builds (no bundle); keep in step with tools/build-macos.sh
     }()
 
     /// The Mac's user-visible name (System Settings → General → About → Name), e.g. "Sam's MacBook Pro".

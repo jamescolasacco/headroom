@@ -14,7 +14,7 @@
     <ServerGarbageCollection>false</ServerGarbageCollection>
     <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
     <TieredPGO>true</TieredPGO>
-    <Version>0.4.3</Version>
+    <Version>0.4.4</Version>
     <Product>Headroom</Product>
     <Company>Headroom</Company>
     <Description>Headroom remote desktop host</Description>

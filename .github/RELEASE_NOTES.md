@@ -1,12 +1,14 @@
 Remote desktop for your own computers, and quick help with a code: **Headroom Server** on the computer you want to reach; **Headroom Viewer**, any browser, or an iPhone/iPad on the device you use.
 
-## New in 0.4.4
+## New in 0.4.4: Remote Desktop's touch gestures, and instant clicks
 
 - **Clicks on a phone or touchscreen are instant.** A tap's click goes out the moment your finger lifts, instead of a quarter of a second later in case a drag followed.
 - **Every Microsoft Remote Desktop gesture, plus double- and triple-click drags.** Tap, then touch and drag: a click-drag (text by the character). Tap tap, then touch and drag: a double-click drag (by the word). Tap tap tap, then touch and drag: a triple-click drag (by the paragraph). The same with two fingers is a right-click drag. Taps count as double and triple clicks just as your computer counts them.
 - **Headroom Server stays in reach on a full menu bar.** macOS hides menu-bar icons that don't fit (beside a MacBook's notch, the newest go first). When it hides Headroom's, Headroom Server keeps a Dock icon while it runs, even with its window closed: click it for the window, or right-click it for the same quick actions as the menu-bar icon.
 - **Stop and start the server from its window**, not just the menu-bar or tray menu: Home has **Stop server** (it asks first if someone's connected, since their session ends), and once it's stopped the window shows **Start server**.
 - **The extra-keys bar presses only on a tap.** Swiping along it scrolls it, without pressing the key you started on. Modifiers: tap for the next key or click (tap again to cancel), double-tap to lock until you tap them off.
+
+**Updating:** 0.4.3 updates itself to 0.4.4 (**Restart to update**). From 0.4.2 or older, install 0.4.4 once from below: 0.4.2 can't update itself, and on a Mac, macOS asks for Screen Recording and Accessibility one last time, because the signature changes to Headroom's certificate; after that, updates keep them. On your own Headroom server, `git pull` and run `tools/install-account-server-linux.sh` again for the website's part (the phone changes).
 
 ## New in 0.4.3: download, install, and it keeps itself up to date
 
@@ -16,8 +18,6 @@ Remote desktop for your own computers, and quick help with a code: **Headroom Se
 - **Only real updates get in.** An update is installed only if its checksums are signed with Headroom's certificate, every file matches, and on a Mac the new app carries the same signature. On Windows, Headroom Server's update asks for administrator permission once (it replaces Program Files and restarts the service).
 - **Dragging on a phone works like a laptop trackpad.** Tap, then touch again and drag: it's one press-and-drag, so a window moves instead of zooming and a file moves instead of opening, even if you hold a moment first. In trackpad mode, slow movements move the pointer further and fast ones accelerate less.
 - **Windows: the service installs.** Setting up Headroom Server's service (what makes the lock screen, sign-in screen and UAC prompts reachable) failed with a command-line error, also from `install.ps1`. It works now, and Setup's log says why if it ever can't.
-
-**Already have 0.4.2?** Install 0.4.3 once from below (0.4.2 can't update itself). On a Mac, macOS asks for Screen Recording and Accessibility one last time, because the signature changes to Headroom's certificate; after that, updates keep them.
 
 ## New in 0.4.2: lit screens
 
