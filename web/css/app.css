@@ -162,6 +162,10 @@ p { text-wrap: pretty; }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 :focus:not(:focus-visible) { outline: none; }
 a { color: var(--ink); text-underline-offset: 3px; text-decoration-color: var(--rim-strong); }
+/* Every :hover rule goes inside @media (hover: hover) and (pointer: fine) (a tap would leave it stuck on a touch
+   screen) and behind :where(html:not([data-bg])): in Headroom Viewer's and Server's windows, data-bg marks the window
+   in the background, where the web view gets no mouse moves and would keep the last hover lit (ui/dom.js
+   trackWindowFront). */
 @media (hover: hover) and (pointer: fine) { :where(html:not([data-bg])) a:hover { text-decoration-color: currentColor; } }
 
 /* the wordmark: a screen with its top lit */
