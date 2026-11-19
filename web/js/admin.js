@@ -370,7 +370,8 @@ function viewHome() {
       n > 1 ? h('button', {
         class: 'sm danger', type: 'button', 'data-key': 'home:stop-all',
         onclick: () => { pendingFocus = 'heading'; post('/sessions/disconnect-all').then(() => refresh({ force: true })); },
-      }, 'Stop all') : null)));
+      }, 'Stop all') : null,
+      native ? stopServerButton(n) : null)));
   const next = !st.account && !n && !waiting ? h('div', { class: 'card' }, h('h3', {}, 'Get started'),
     h('ul', { class: 'list' },
       h('li', { class: 'li' }, h('div', { class: 'main' }, h('div', { class: 't' }, 'Reach this computer from your other devices'),
@@ -387,6 +388,19 @@ function viewHome() {
     n ? h('div', { class: 'card' }, h('h3', {}, 'Connected now'), h('ul', { class: 'list' }, ...st.sessions.map(sessionRow))) : null,
     missing ? permissionsCard() : null,
     next);
+}
+
+/**
+ * Stop server (in Headroom Server's own window), as in its menu-bar or tray menu: the window then says it isn't
+ * running, with Start server. With someone connected it asks in place first, as their session would end.
+ */
+function stopServerButton(n) {
+  const stop = () => postNative({ cmd: 'stopServer' });
+  const b = n ? armedButton('Stop server', plural(n, 'Stop, and end the session?', `Stop, and end ${n} sessions?`), stop, 'home:stop-server')
+    : h('button', { type: 'button', 'data-key': 'home:stop-server', onclick: stop }, 'Stop server');
+  b.className = 'sm';
+  b.title = 'Nobody can connect until you start it again.';
+  return b;
 }
 
 // ------------------------------------------------------------------ updates

@@ -13,6 +13,8 @@ final class SettingsWindow: NSObject, NSWindowDelegate, WKNavigationDelegate, WK
     var onClose: (() -> Void)?
     /// "Restart to update" in the page (the app asks first if someone is connected).
     var installUpdate: (() -> Void)?
+    /// "Stop server" in the page (it asks first if someone is connected), as in the menu-bar menu.
+    var stopServer: (() -> Void)?
 
     init(startServer: @escaping (@escaping (Bool) -> Void) -> Void) {
         self.startServer = startServer
@@ -97,6 +99,8 @@ final class SettingsWindow: NSObject, NSWindowDelegate, WKNavigationDelegate, WK
             }
         case "startServer":
             startServer { [weak self] ok in if ok { self?.navigate(self?.pendingSection ?? "home", reload: true) } }
+        case "stopServer":
+            stopServer?()
         case "getLoginItem":
             sendToPage(["cmd": "loginItem", "enabled": AppDelegate.loginEnabled])
         case "loginItem":

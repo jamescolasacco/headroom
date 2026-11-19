@@ -5,6 +5,7 @@ Remote desktop for your own computers, and quick help with a code: **Headroom Se
 - **Clicks on a phone or touchscreen are instant.** A tap's click goes out the moment your finger lifts, instead of a quarter of a second later in case a drag followed.
 - **Every Microsoft Remote Desktop gesture, plus double- and triple-click drags.** Tap, then touch and drag: a click-drag (text by the character). Tap tap, then touch and drag: a double-click drag (by the word). Tap tap tap, then touch and drag: a triple-click drag (by the paragraph). The same with two fingers is a right-click drag. Taps count as double and triple clicks just as your computer counts them.
 - **Headroom Server stays in reach on a full menu bar.** macOS hides menu-bar icons that don't fit (beside a MacBook's notch, the newest go first). When it hides Headroom's, Headroom Server keeps a Dock icon while it runs, even with its window closed: click it for the window, or right-click it for the same quick actions as the menu-bar icon.
+- **Stop and start the server from its window**, not just the menu-bar or tray menu: Home has **Stop server** (it asks first if someone's connected, since their session ends), and once it's stopped the window shows **Start server**.
 - **The extra-keys bar presses only on a tap.** Swiping along it scrolls it, without pressing the key you started on. Modifiers: tap for the next key or click (tap again to cancel), double-tap to lock until you tap them off.
 
 ## New in 0.4.3: download, install, and it keeps itself up to date

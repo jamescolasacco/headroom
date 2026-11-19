@@ -262,7 +262,7 @@ public sealed class TrayApp : ApplicationContext
         _ui.Post(_ =>
         {
             if (_window == null || _window.IsDisposed)
-                _window = new SettingsWindow(LoadIconLarge(), StartServerFromWindowAsync, _updater, RestartToUpdate);
+                _window = new SettingsWindow(LoadIconLarge(), StartServerFromWindowAsync, _updater, RestartToUpdate, StopServerFromWindowAsync);
             _window.Navigate(section);
             if (!_window.Visible) _window.Show();
             if (_window.WindowState == FormWindowState.Minimized) _window.WindowState = FormWindowState.Normal;
@@ -274,6 +274,20 @@ public sealed class TrayApp : ApplicationContext
     {
         using var s = Assembly.GetExecutingAssembly().GetManifestResourceStream("headroom.ico")!;
         return new Icon(s, 32, 32);
+    }
+
+    /// <summary>
+    /// "Stop server" in the window, as the tray menu's: the service (which asks for administrator permission), or
+    /// the engine this app started. False if it wasn't stopped (permission declined, or an engine we didn't start).
+    /// </summary>
+    private async Task<bool> StopServerFromWindowAsync()
+    {
+        bool stopped;
+        if (EngineManager.ServiceInstalled) stopped = await Task.Run(() => EngineManager.ControlService(false));
+        else if (_engine.OwnsEngine) { _userStopped = true; _engine.StopUserMode(); stopped = true; }
+        else stopped = false;
+        await PollAsync();
+        return stopped;
     }
 
     private async Task<bool> StartServerFromWindowAsync()

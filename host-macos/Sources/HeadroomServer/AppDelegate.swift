@@ -363,8 +363,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
     }
 
+    /// Stop Server, from the menu or the window: the window says so at once, with Start server.
     @objc private func stopServer() {
         engine.stop()
+        if let s = settings, s.window.isVisible { s.showOffline() }
         poll()
     }
 
@@ -411,6 +413,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             settings = SettingsWindow { [weak self] done in self?.startServer(done) }
             settings?.installUpdate = { [weak self] in self?.restartToUpdate() }
             settings?.onClose = { [weak self] in self?.updateDockIcon(windowOpen: false) }
+            settings?.stopServer = { [weak self] in self?.stopServer() }
         }
         settings?.show(section)
     }

@@ -23,6 +23,8 @@ public sealed class SettingsWindow : Form
     /// <summary>The tray app's updater, and its "Restart to update" (which asks first if someone is connected).</summary>
     private readonly Updater? _updates;
     private readonly Action? _installUpdate;
+    /// <summary>"Stop server" in the page (it asks first if someone is connected), as in the tray menu.</summary>
+    private readonly Func<Task<bool>>? _stopServer;
 
     /// <summary>Close for good (app exit) instead of hiding.</summary>
     public void CloseForExit()
@@ -31,11 +33,13 @@ public sealed class SettingsWindow : Form
         Close();
     }
 
-    public SettingsWindow(Icon icon, Func<Task<bool>> startServer, Updater? updates = null, Action? installUpdate = null)
+    public SettingsWindow(Icon icon, Func<Task<bool>> startServer, Updater? updates = null, Action? installUpdate = null,
+        Func<Task<bool>>? stopServer = null)
     {
         _startServer = startServer;
         _updates = updates;
         _installUpdate = installUpdate;
+        _stopServer = stopServer;
         Text = "Headroom Server";
         Icon = icon;
         ClientSize = new Size(960, 680);
@@ -146,6 +150,9 @@ public sealed class SettingsWindow : Form
                     break;
                 case "startServer":
                     if (await _startServer()) Navigate(_pendingSection, reload: true);
+                    break;
+                case "stopServer":
+                    if (_stopServer != null && await _stopServer()) ShowOffline(); // with Start server
                     break;
                 case "getLoginItem":
                     SendLoginItem();
