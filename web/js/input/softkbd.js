@@ -8,8 +8,9 @@ import { charToCode } from './keymap.js';
 
 // Different invisible characters before and after the caret, so the diff can tell a Backspace
 // (left side shrinks) from a forward Delete (right side shrinks).
-const LEFT = '​'.repeat(12);   // zero-width space
-const RIGHT = '⁠'.repeat(12);  // word joiner
+const ZWSP = '​', WJ = '⁠'; // zero-width space, word joiner
+const LEFT = ZWSP.repeat(12);
+const RIGHT = WJ.repeat(12);
 const STRIP = /[​⁠]/g;
 
 export class SoftKeyboard extends EventTarget {
@@ -23,11 +24,19 @@ export class SoftKeyboard extends EventTarget {
     this.open = false;
     this.composing = false;
     const s = ctx.sink;
-    s.addEventListener('input', () => this._input());
+    // While a word is being composed (Asian keyboards, dictation, swipe typing, Android's suggestions) the field
+    // holds a draft: what it becomes is sent when the composition ends. Each input event says itself whether it's
+    // part of one (isComposing): a composition whose end never came (the keyboard went away mid-word, a browser that
+    // skips compositionend) must not leave every later keystroke ignored until the page is reloaded.
+    s.addEventListener('input', e => this._input(e));
     s.addEventListener('compositionstart', () => { this.composing = true; });
     s.addEventListener('compositionend', () => { this.composing = false; this._input(); });
-    s.addEventListener('blur', () => { if (this.open) { this.open = false; this.dispatchEvent(new Event('change')); } });
+    s.addEventListener('blur', () => {
+      this.composing = false;
+      if (this.open) { this.open = false; this.dispatchEvent(new Event('change')); }
+    });
     s.addEventListener('focus', () => {
+      this.composing = false;
       this._reset();
       // On a touch screen the keyboard comes up whenever this field has focus, also when iOS gives it back by
       // itself (after the app switcher, or a hardware keyboard coming and going): say so.
@@ -39,6 +48,7 @@ export class SoftKeyboard extends EventTarget {
   /** Must be called synchronously from a tap/click handler. */
   show() {
     const s = this.ctx.sink;
+    this.composing = false;
     this._reset();
     s.focus({ preventScroll: true });
     if (!this.open) { this.open = true; this.dispatchEvent(new Event('change')); } // (focus may have said so already)
@@ -72,17 +82,23 @@ export class SoftKeyboard extends EventTarget {
     try { s.setSelectionRange(LEFT.length, LEFT.length); } catch { }
   }
 
-  _input() {
-    if (this.composing) return;
+  _input(e) {
+    // Mid-composition: wait for its end. The event's own word counts over ours (ours may be stale).
+    if (e && typeof e.isComposing === 'boolean') { if (e.isComposing) return; this.composing = false; }
+    else if (this.composing) return;
     const v = this.ctx.sink.value;
     if (v === LEFT + RIGHT) return;
-    let left = 0;
-    while (left < v.length && v[left] === '​') left++;
-    let right = 0;
-    while (right < v.length - left && v[v.length - 1 - right] === '⁠') right++;
-    const backspaces = Math.max(0, LEFT.length - left);
-    const deletes = Math.max(0, RIGHT.length - right);
-    const inserted = v.slice(left, v.length - right).replace(STRIP, '');
+    // Counted, not read off the ends: a caret dragged in among them (iOS's space bar is a trackpad) leaves them out of
+    // place, and typing there must not count as deleting them.
+    let lefts = 0, rights = 0;
+    for (const ch of v) { if (ch === ZWSP) lefts++; else if (ch === WJ) rights++; }
+    let backspaces = Math.max(0, LEFT.length - lefts);
+    let deletes = Math.max(0, RIGHT.length - rights);
+    // Which way a deletion went, when the event says (from a caret among the right-hand ones, Backspace eats those).
+    const type = e?.inputType || '';
+    if (/^delete.*Backward$/.test(type)) { backspaces += deletes; deletes = 0; }
+    else if (/^delete.*Forward$/.test(type)) { deletes += backspaces; backspaces = 0; }
+    const inserted = v.replace(STRIP, '');
     const kb = this.ctx.keyboard;
     for (let i = 0; i < backspaces; i++) this._key('Backspace');
     for (let i = 0; i < deletes; i++) this._key('Delete');
