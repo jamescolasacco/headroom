@@ -16,7 +16,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${HEADROOM_VERSION:-0.4.8}"
+VERSION="${HEADROOM_VERSION:-0.4.9}"
 BUILD_NUMBER="${HEADROOM_BUILD:-$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)}"
 ONLY=""
 UNIVERSAL=0

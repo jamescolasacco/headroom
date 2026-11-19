@@ -1,5 +1,13 @@
 Remote desktop for your own computers, and quick help with a code: **Headroom Server** on the computer you want to reach; **Headroom Viewer**, any browser, or an iPhone/iPad on the device you use.
 
+## New in 0.4.9: links that don't stay lit, and Headroom on your Home Screen
+
+- **Links and buttons don't stay lit.** In Headroom Viewer, Create account and Forgot password? open your browser, which puts the Viewer in the background: the link stayed highlighted there, and hovering anything else did nothing until you clicked back into the window. Headroom Viewer's and Headroom Server's windows now show hover only while they're in front.
+- **Your iPhone's Home Screen icon is Headroom's**, not a letter H. iPhones make that icon from the website's app details and fetch the picture only once Add to Home Screen opens; tapping Add before it arrived kept a letter instead. The picture is part of the details now, so it's there at once. (Already added with an H? Remove it and add it again.)
+- **An install button under your devices**, on the website: in Chrome and Edge (Android, Windows, Mac) **Install app** opens their install dialog. On an iPhone or iPad, **Add to Home Screen** shows the three taps for the browser you're in: a website can't open that menu for you there.
+
+**Updating:** 0.4.3 and later update themselves (**Restart to update**, or the download button in the window's corner to check now). From 0.4.2 or older, install this once from below: 0.4.2 can't update itself, and on a Mac, macOS asks for Screen Recording and Accessibility one last time, because the signature changes to Headroom's certificate; after that, updates keep them. Computers still on 0.4.7 or older can't be reached until they update (Headroom's address changed in 0.4.8). On your own Headroom server, `git pull` and run `tools/install-account-server-linux.sh` again for the website's part (the Home Screen icon and the install button here; waiting for a sleeping computer, the phone keyboard fix and the typing box in 0.4.8).
+
 ## New in 0.4.8: wake your Mac from your phone, and sign in
 
 - **Headroom has a new address: https://headroom.colasac.co** (relay.colasac.co is gone). Headroom Server and Headroom Viewer move to it by themselves with this update, still signed in: until a computer has it, it can't be reached, so on each one press **Restart to update** (or **Check for updates** in its menu-bar or tray menu). On a phone or in a browser, open the new address and sign in again; a Home Screen icon made from the old one won't open, so add it again from the new one.
@@ -10,8 +18,6 @@ Remote desktop for your own computers, and quick help with a code: **Headroom Se
 - **What you type sits in a box on top of the keys** while the keyboard is up, and the picture stays above it, so nothing covers the bottom of the screen. Tap the text to copy it. The eye beside it shows it as dots (a password) and back, and tapping anything on the keys bar keeps the keyboard up (in Firefox on iPhone the eye closed it).
 - **Updates: a button in the corner.** Headroom Server's and Headroom Viewer's windows have a download button at the top right: click it to check right away; an update shows its progress there, then the button becomes **Restart to update**.
 - **One way out of each dialog:** the close button at the top. The Done and Cancel buttons that repeated it at the bottom are gone.
-
-**Updating:** 0.4.3 and later update themselves (**Restart to update**, or the download button in the window's corner to check now). From 0.4.2 or older, install this once from below: 0.4.2 can't update itself, and on a Mac, macOS asks for Screen Recording and Accessibility one last time, because the signature changes to Headroom's certificate; after that, updates keep them. On your own Headroom server, `git pull` and run `tools/install-account-server-linux.sh` again for the website's and relay's part (waiting for a sleeping computer, the phone keyboard fix, the typing box).
 
 ## New in 0.4.7: phones type where you can see it
 

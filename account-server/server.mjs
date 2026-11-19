@@ -24,7 +24,7 @@ import readline from 'node:readline';
 import { Duplex } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
-const VERSION = '0.4.8';
+const VERSION = '0.4.9';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const env = process.env;
 const PORT = Number(env.PORT || 8780);
