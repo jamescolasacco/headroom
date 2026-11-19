@@ -1,9 +1,10 @@
 // Maps the remote desktop onto the window: fit / actual size / fill, plus pinch-zoom and pan.
 // The stage element is sized in *encoded* pixels and transformed (GPU) — cheap at any zoom.
 //
-// The picture lives between `insetTop` (a pinned toolbar) and `insetBottom` (the extra-keys bar). While the
-// on-screen keyboard is up the visible area shrinks, but the picture keeps its size and pans instead (so the
-// part you're typing into stays readable); the session calls layout() when the visible area changes.
+// The picture lives between `insetTop` (the status bar or notch, on a phone) and `insetBottom` (a phone's toolbar
+// and the extra-keys bar). While the on-screen keyboard is up the visible area shrinks, but the picture keeps its
+// size and pans instead (so the part you're typing into stays readable); the session calls layout() when the
+// visible area changes.
 
 export class Viewport extends EventTarget {
   constructor(viewer, stage) {
@@ -16,8 +17,8 @@ export class Viewport extends EventTarget {
     this.zoom = 1;                   // user zoom on top of the mode's base scale
     this.ox = 0; this.oy = 0;        // stage offset in viewer CSS px
     this.cw = 0; this.ch = 0;        // the picture's area (between the insets)
-    this.insetTop = 0;               // a pinned toolbar
-    this.insetBottom = 0;            // the extra-keys bar
+    this.insetTop = 0;               // the status bar or notch (a phone)
+    this.insetBottom = 0;            // a phone's toolbar and the extra-keys bar
     this.keyboard = false;           // the on-screen keyboard is up
     this.restW = 0; this.restH = 0;  // the picture's area the last time the keyboard was down
     this.base = 1;
@@ -43,16 +44,12 @@ export class Viewport extends EventTarget {
     this.layout();
   }
 
-  setInsetBottom(px) {
-    if (Math.abs(px - this.insetBottom) < 1) return;
-    this.insetBottom = px;
-    this.viewer.style.setProperty('--inset-bottom', `${px}px`);
-    this.layout();
-  }
-
-  setInsetTop(px) {
-    if (Math.abs(px - this.insetTop) < 1) return;
-    this.insetTop = px;
+  /** What the session's own bars cover at the top and bottom (the picture keeps clear of them). */
+  setInsets(top, bottom) {
+    if (Math.abs(top - this.insetTop) < 1 && Math.abs(bottom - this.insetBottom) < 1) return;
+    this.insetTop = top;
+    this.insetBottom = bottom;
+    this.viewer.style.setProperty('--inset-bottom', `${bottom}px`);
     this.layout();
   }
 
@@ -83,7 +80,7 @@ export class Viewport extends EventTarget {
 
   _clamp() {
     const w = this.encW * this.scale, h = this.encH * this.scale, top = this.insetTop;
-    // Smaller than the area: centre. Larger: keep its edges covered (never under the toolbar or the bar).
+    // Smaller than the area: centre. Larger: keep its edges covered (never under the toolbar or the keys).
     this.ox = w <= this.cw + 0.5 ? (this.cw - w) / 2 : Math.min(0, Math.max(this.cw - w, this.ox));
     this.oy = h <= this.ch + 0.5 ? top + (this.ch - h) / 2 : Math.min(top, Math.max(top + this.ch - h, this.oy));
   }

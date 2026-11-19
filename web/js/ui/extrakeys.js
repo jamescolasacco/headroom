@@ -2,10 +2,16 @@
 //   tap = held for the next key or click (tap again: off), double-tap = locked until tapped off.
 // A key goes on a tap: a swipe along the bar scrolls it and presses nothing (holding an arrow, del, pgup or pgdn
 // still repeats it). Labels follow the host: a Mac host gets control/option/⌘ and Force Quit instead of Ctrl+Alt+Del.
+// While the on-screen keyboard is up, the end of the bar holds two buttons that stay put while the keys scroll:
+// the eye (show what you type, ui/typing.js) and Hide keyboard.
+import { h, svg } from './dom.js';
 
 const LOCK_TAP_MS = 500;        // two taps on a modifier this close lock it (a double-click's time on the computer)
 const TAP_SLOP = 10;            // px a tap may wander; further is a swipe along the bar
 const REPEAT_DELAY = 380, REPEAT_EVERY = 55;
+const EYE = '<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>';
+const EYE_OFF = '<path d="M10.6 5.1A9.7 9.7 0 0 1 12 5c6.4 0 10 7 10 7a16.4 16.4 0 0 1-2.4 3.2M6.6 6.6C3.9 8.3 2 12 2 12s3.6 7 10 7a9.4 9.4 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2M3 3l18 18"/>';
+const HIDE_KEYBOARD = '<rect x="2.5" y="3" width="19" height="11.5" rx="2"/><path d="M6.5 7h.01M10.5 7h.01M14.5 7h.01M17.5 7h.01M7.5 11h9M8.5 18.5l3.5 3 3.5-3"/>';
 
 export class StickyModifiers extends EventTarget {
   constructor(keyboard) {
@@ -85,19 +91,49 @@ const KEYS = [
 ];
 
 export class ExtraKeysBar {
-  constructor(el, { keyboard, mods, conn, onLayout }) {
+  /**
+   * @param {object} o { keyboard, mods, conn, onLayout(px), onKey(code) (a key went to the computer),
+   *   onPreview(on) (the eye), onHideKeyboard() }
+   */
+  constructor(el, { keyboard, mods, conn, onLayout, onKey, onPreview, onHideKeyboard }) {
     this.el = el;
     this.keyboard = keyboard;
     this.mods = mods;
     this.conn = conn;
     this.onLayout = onLayout;
+    this.onKey = onKey;
     this.visible = false;
     this.macHost = false;
-    el.setAttribute('role', 'group');
-    el.setAttribute('aria-label', 'Extra keys');
+    this.keyboardOpen = false; // the on-screen keyboard is up (the session says: setKeyboardOpen)
+    this.keys = h('div', { class: 'xk-keys', role: 'group', 'aria-label': 'Extra keys' });
+    this.previewBtn = this._endButton('Show what you type', () => onPreview?.(!this.preview));
+    this.end = h('div', { class: 'xk-end', hidden: true },
+      this.previewBtn, this._endButton('Hide keyboard', () => onHideKeyboard?.(), HIDE_KEYBOARD));
+    el.replaceChildren(this.keys, this.end);
+    this.setPreview(true);
     this._render();
     mods.addEventListener('change', () => this._sync());
-    this.keyboardOpen = false; // set by the session (it follows the on-screen keyboard)
+  }
+
+  /** A button at the end of the bar. Pressing it never takes focus from the keyboard's input (that would close it). */
+  _endButton(label, onClick, icon) {
+    const b = h('button', { type: 'button', class: 'xk xk-icon', 'aria-label': label, title: label }, icon ? svg(icon) : null);
+    b.addEventListener('pointerdown', e => e.preventDefault());
+    b.addEventListener('click', onClick);
+    return b;
+  }
+
+  /** The eye: what you type shows above the keys (on), or doesn't. */
+  setPreview(on) {
+    this.preview = on;
+    this.previewBtn.replaceChildren(svg(on ? EYE : EYE_OFF));
+    this.previewBtn.setAttribute('aria-pressed', String(on));
+  }
+
+  setKeyboardOpen(open) {
+    this.keyboardOpen = open;
+    this.end.hidden = !open;
+    this.position();
   }
 
   /** Re-label for the host's platform ('macos' | 'windows'). */
@@ -110,9 +146,9 @@ export class ExtraKeysBar {
   }
 
   _render() {
-    this.el.replaceChildren();
+    this.keys.replaceChildren();
     for (const k of KEYS) {
-      if (k.sep) { const s = document.createElement('span'); s.className = 'xk-sep'; this.el.append(s); continue; }
+      if (k.sep) { const s = document.createElement('span'); s.className = 'xk-sep'; this.keys.append(s); continue; }
       if (k.pcOnly && this.macHost) continue;
       const b = document.createElement('button');
       b.type = 'button';
@@ -132,7 +168,7 @@ export class ExtraKeysBar {
       b.addEventListener('pointerleave', () => this._cancel());
       // From a keyboard (Enter or Space: a click with no pointer), press it once.
       b.addEventListener('click', e => { if (e.detail === 0) this._press(k); });
-      this.el.append(b);
+      this.keys.append(b);
     }
   }
 
@@ -181,10 +217,11 @@ export class ExtraKeysBar {
     this.mods.pressForKey();
     this.keyboard.tap(k.code);
     this.mods.consume(k.code);
+    this.onKey?.(k.code);
   }
 
   _sync() {
-    for (const b of this.el.querySelectorAll('.xk.mod')) {
+    for (const b of this.keys.querySelectorAll('.xk.mod')) {
       const s = this.mods.state.get(b.dataset.code);
       if (s) b.dataset.state = s; else delete b.dataset.state;
       b.setAttribute('aria-pressed', String(!!s));

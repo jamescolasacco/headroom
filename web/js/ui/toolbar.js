@@ -1,12 +1,14 @@
 // Session toolbar and its sheets. With a mouse it's a pill at the top that hides by itself (it comes back at the
-// top edge); on touch screens it stays put, since that's where the keyboard is, and can be folded to a small tab.
+// top edge, away from the computer's own taskbar or Dock at the bottom). On touch screens it sits at the bottom, in
+// reach of a thumb, and stays put; it can be folded to a small tab, and while the on-screen keyboard is up the keys
+// bar above the keyboard takes its place.
 import { h, svg, openSheet, closeSheet, sheetOpen, sheetItem, segmented, toast, fmtBytes } from './dom.js';
 import { I } from './icons.js';
 import { isTouchPrimary, isIPad, canFullscreen, isApple, hasKeyboardLock } from '../platform.js';
 import { listFiles, uploadFile } from '../api.js';
 
-const FOLD = '<path d="m6 15 6-6 6 6"/>';
-const UNFOLD = '<path d="m6 9 6 6 6-6"/>';
+const FOLD = '<path d="m6 9 6 6 6-6"/>';     // down: the bar goes down out of the way
+const UNFOLD = '<path d="m6 15 6-6 6 6"/>';   // up: it comes back
 const MORE = '<circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/>';
 const NARROW = 560; // narrower than this (a phone held upright): the bar keeps the everyday tools, the rest go under More
 
@@ -116,7 +118,7 @@ export class Toolbar {
     this.el.classList.toggle('collapsed', this.collapsed);
     if (this.collapsed) {
       this.el.replaceChildren(this.btn(UNFOLD, 'Show tools', () => this.setCollapsed(false)));
-      this.fit();
+      this.s.layoutChrome?.();
       return;
     }
     // Disconnect, then which computer this is: its screen in its own light, and its name (wide screens).
@@ -133,24 +135,29 @@ export class Toolbar {
     }
     if (this.touchUi) items.push(h('span', { class: 'tb-sep' }), this.btn(FOLD, 'Hide tools', () => this.setCollapsed(true)));
     this.el.replaceChildren(...items);
-    this.fit();
+    this.s.layoutChrome?.();
   }
 
   /**
-   * After a redraw or a change of screen size: a phone turned sideways gets the whole bar (and back), and on touch
-   * screens the picture keeps clear of the bar (it sits below it rather than under it).
+   * Touch screens, after a redraw or a change of screen size (the session's layoutChrome): the bar sits at the
+   * bottom, above the extra keys when they show (`keys` px), and the picture keeps clear of it. While the on-screen
+   * keyboard is up it steps aside: the keys bar over the keyboard takes its place, with its own Hide keyboard
+   * button. So it does when there's no room for it (a phone on its side): the strip shows the picture. A phone
+   * turned sideways gets the whole bar (and back). Returns how much of the bottom it takes, the keys under it
+   * included (0: it's away, or folded to its tab, which may sit on the picture).
    */
-  fit() {
-    if (this.touchUi && !this.collapsed && this.narrow() !== this._compact) { this.refresh(); return; }
-    const v = this.s.viewport;
-    if (!v || !this.touchUi) return;
-    // No room for it (a phone on its side with the keyboard up leaves a strip): it steps aside until there is,
-    // so the strip shows the picture and the extra keys. (The keyboard's own Done button still closes it.)
-    const below = this.el.offsetTop + this.el.offsetHeight + 6;
-    const cramped = v.viewer.clientHeight - below - v.insetBottom < 120;
-    this.el.classList.toggle('hidden', cramped);
-    this.el.inert = cramped;
-    v.setInsetTop(!this.collapsed && !cramped && this.el.offsetHeight > 0 ? below : 0);
+  place(keys, top) {
+    if (!this.touchUi) return 0;
+    if (!this.collapsed && this.narrow() !== this._compact) this.refresh();
+    const viewer = this.s.viewport?.viewer;
+    if (!viewer) return 0;
+    const typing = !!this.s.softkbd?.open;
+    const bottom = typing || this.collapsed ? 0 : viewer.clientHeight - this.el.offsetTop + 6;
+    const cramped = bottom > 0 && viewer.clientHeight - top - Math.max(bottom, keys) < 120;
+    const away = typing || cramped;
+    this.el.classList.toggle('hidden', away);
+    this.el.inert = away;
+    return away ? 0 : bottom;
   }
 
   /** The tools a phone's bar has no room for. */
@@ -164,7 +171,7 @@ export class Toolbar {
   }
 
   peek(ms = 3000) {
-    if (this.touchUi) return; // pinned: it doesn't hide by itself (only when there's no room: fit())
+    if (this.touchUi) return; // pinned: it doesn't hide by itself (only for the keyboard, or when there's no room: place())
     this.el.classList.remove('hidden');
     this.el.inert = false;
     clearTimeout(this.hideTimer);

@@ -470,7 +470,7 @@ button.task-row:not(:disabled):not([aria-disabled="true"]):active { transform: n
 /* ------------------------------------------------------------------ the message bar: a lit strip */
 .toast {
   /* a popover (top layer): above dialogs too. Transitions, not keyframes: a second message retargets smoothly. */
-  position: fixed; inset: auto; left: 50%; bottom: calc(var(--s5) + var(--sab) + var(--inset-bottom, 0px));
+  position: fixed; inset: auto; left: 50%; bottom: calc(var(--s5) + max(var(--sab), var(--inset-bottom, 0px)));
   margin: 0; z-index: 40; border: 1px solid transparent; border-radius: 14px; padding: 12px 18px;
   background: var(--primary); color: var(--on-primary); box-shadow: 0 14px 40px -12px var(--primary-glow), 0 2px 8px rgba(0, 0, 0, .25);
   font-size: var(--t-control); font-weight: 600; max-width: min(520px, calc(100vw - 32px)); width: max-content; text-align: center;
@@ -553,14 +553,18 @@ button.task-row:not(:disabled):not([aria-disabled="true"]):active { transform: n
   touch-action: pan-x; /* it may scroll sideways; a pinch or double tap here never zooms the page */
   transition: opacity .2s var(--ease-out), transform .2s var(--ease-out);
 }
-/* touch screens: it stays put, with finger-sized buttons; folded, it's a small tab that brings it back */
+/* touch screens: at the bottom, in reach of a thumb (above the extra keys when they show), and it stays put, with
+   finger-sized buttons; folded, it's a small tab that brings it back */
+.toolbar.pinned { top: auto; bottom: calc(8px + max(var(--sab), var(--keys-h, 0px))); max-width: calc(100% - 16px - var(--sal) - var(--sar)); }
 .toolbar.pinned .tb { min-width: 44px; min-height: 44px; }
 .toolbar.collapsed { padding: 2px; border-radius: 13px; background: rgba(12, 15, 21, .7); }
 .toolbar.collapsed .tb { position: relative; min-width: 56px; min-height: 30px; border-radius: 11px; color: var(--ink-2); }
 .toolbar.collapsed .tb::after { content: ""; position: absolute; inset: -8px -6px; } /* a finger-sized target around the small tab */
-#toolbar.pinned ~ .sheet { top: calc(70px + var(--sat)); max-height: calc(100% - 86px - var(--sat) - var(--sab)); }
+/* its sheets open upward from it */
+#toolbar.pinned ~ .sheet { top: auto; bottom: calc(var(--inset-bottom, 0px) + 4px); max-height: calc(100% - var(--inset-bottom, 0px) - 12px - var(--sat)); }
 .toolbar::-webkit-scrollbar { display: none; }
 .toolbar.hidden { opacity: 0; transform: translate(-50%, -12px); pointer-events: none; }
+.toolbar.pinned.hidden { transform: translate(-50%, 12px); }
 .tb { min-height: 40px; min-width: 42px; padding: 0 9px; border: 0; border-radius: 12px; gap: 6px; color: inherit; font-size: var(--t-label); font-weight: 500; }
 /* inside the toolbar's 4px padding the ring sits inset, so its scroll edge never clips it; arriving by keyboard
    always shows it (.kbd), whatever the browser guesses */
@@ -596,7 +600,10 @@ button.task-row:not(:disabled):not([aria-disabled="true"]):active { transform: n
   transition: opacity .18s var(--ease-out), transform .18s var(--ease-out);
 }
 @starting-style { .sheet { opacity: 0; } }
-@media (prefers-reduced-motion: no-preference) { @starting-style { .sheet { transform: translate(-50%, -6px); } } }
+@media (prefers-reduced-motion: no-preference) {
+  @starting-style { .sheet { transform: translate(-50%, -6px); } }
+  @starting-style { #toolbar.pinned ~ .sheet { transform: translate(-50%, 6px); } }
+}
 .sheet h3 { font-size: var(--t-small); font-weight: 600; color: var(--ink-2); margin: var(--s3) 12px 6px; }
 .sheet-close { position: absolute; top: 4px; right: 4px; z-index: 1; width: 44px; min-height: 44px; padding: 0; border: 0; border-radius: 14px; color: var(--ink-2); }
 .sheet > .sheet-close + * { margin-right: 44px; } /* the first row keeps clear of it */
@@ -622,14 +629,21 @@ button.task-row:not(:disabled):not([aria-disabled="true"]):active { transform: n
 .progress { height: 4px; border-radius: 2px; background: var(--rim-strong); overflow: hidden; margin: 4px 12px 10px; }
 .progress > div { height: 100%; width: 100%; background: var(--l-dot); transform: scaleX(0); transform-origin: left; transition: transform .15s linear; }
 
-/* extra keys bar (sits above the iOS keyboard; positioned from visualViewport in JS) */
+/* extra keys bar (sits above the iOS keyboard; positioned from visualViewport in JS): the keys scroll sideways,
+   the eye and Hide keyboard at its end stay put */
 .extra-keys {
-  position: absolute; left: 0; right: 0; bottom: 0; z-index: 12; display: flex; gap: 5px; overflow-x: auto;
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 12; display: flex;
   padding: 6px calc(6px + var(--sar)) calc(6px + var(--sab)) calc(6px + var(--sal));
-  background: rgba(12, 15, 21, .92); box-shadow: inset 0 1px 0 var(--rim); scrollbar-width: none; touch-action: pan-x;
+  background: rgba(12, 15, 21, .92); box-shadow: inset 0 1px 0 var(--rim);
   backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
 }
-.extra-keys::-webkit-scrollbar { display: none; }
+.xk-keys { flex: 1 1 auto; min-width: 0; display: flex; gap: 5px; overflow-x: auto; scrollbar-width: none; touch-action: pan-x; overscroll-behavior-x: contain; }
+.xk-keys::-webkit-scrollbar { display: none; }
+.xk-end { flex: none; display: flex; gap: 5px; margin-left: 6px; padding-left: 6px; box-shadow: inset 1px 0 0 var(--rim-strong); }
+.xk-end[hidden] { display: none; }
+#extra-keys .xk-icon { display: grid; place-items: center; padding: 0; color: var(--ink-2); } /* (beats the icon-and-label button's start padding) */
+.xk-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.xk-icon[aria-pressed="true"] { color: var(--light); }
 .xk { flex: 0 0 auto; min-width: 44px; min-height: 40px; height: 40px; padding: 0 10px; border-radius: 10px; background: rgba(238, 241, 246, .09); border: 1px solid transparent; box-shadow: inset 0 1px 0 rgba(255, 255, 255, .06); color: var(--ink); font-size: var(--t-label); font-weight: 500; }
 /* a held modifier is "on": lit */
 .xk.mod[data-state="once"] { background: rgba(169, 220, 255, .22); color: #fff; box-shadow: inset 0 0 0 1px rgba(169, 220, 255, .5); }
@@ -637,8 +651,32 @@ button.task-row:not(:disabled):not([aria-disabled="true"]):active { transform: n
 .xk.xk-wide { min-width: 64px; }
 .xk-sep { flex: 0 0 1px; background: var(--rim-strong); margin: 6px 2px; }
 
+/* what you type on the on-screen keyboard, just above the keys while you type (ui/typing.js) */
+.typing {
+  /* 8px above the keys, closer when there's little room above them (a phone on its side, in Safari) */
+  position: absolute; z-index: 13; left: 50%; bottom: calc(var(--keys-h, 0px) + clamp(0px, var(--room, 100px) - 42px, 8px));
+  width: min(640px, calc(100% - 16px - var(--sal) - var(--sar))); height: min(42px, var(--room, 42px)); padding: 0 14px;
+  display: flex; align-items: center; border-radius: 12px;
+  background: rgba(12, 15, 21, .88); color: var(--ink); font: 400 var(--t-body)/1.3 var(--font);
+  box-shadow: inset 0 0 0 1px var(--rim), 0 10px 28px rgba(0, 0, 0, .45);
+  backdrop-filter: blur(14px) saturate(150%); -webkit-backdrop-filter: blur(14px) saturate(150%);
+  opacity: 0; visibility: hidden; transform: translateX(-50%);
+  transition: opacity .15s var(--ease-out), transform .15s var(--ease-out), visibility 0s linear .15s;
+}
+.typing.shown { opacity: 1; visibility: visible; transition-delay: 0s; }
+@media (prefers-reduced-motion: no-preference) { .typing:not(.shown) { transform: translate(-50%, 6px); } }
+.typed { flex: 1; min-width: 0; overflow: hidden; white-space: pre; }
+.typing.clipped .typed { -webkit-mask-image: linear-gradient(to right, transparent, #000 32px); mask-image: linear-gradient(to right, transparent, #000 32px); }
+/* the computer's cursor is at the end of it */
+.typed::after { content: ""; display: inline-block; width: 2px; height: 1.15em; margin-left: 1px; vertical-align: -0.2em; border-radius: 1px; background: var(--light); }
+@media (prefers-reduced-motion: no-preference) { .typing.shown .typed::after { animation: caret 1.06s steps(1) infinite; } }
+@keyframes caret { 50% { opacity: 0; } }
+/* a shortcut it sent (a modifier held on the keys bar): a key, lit like the held modifier */
+.typed kbd { display: inline-block; margin: 0 2px; padding: 3px 6px; border-radius: 6px; font: 500 var(--t-meta)/1 var(--font); vertical-align: 1px;
+  color: var(--light); background: rgba(169, 220, 255, .14); box-shadow: inset 0 0 0 1px rgba(169, 220, 255, .45); }
+
 .stats {
-  position: absolute; left: calc(8px + var(--sal)); bottom: calc(8px + var(--sab) + var(--inset-bottom, 0px)); z-index: 11; pointer-events: none;
+  position: absolute; left: calc(8px + var(--sal)); bottom: calc(8px + max(var(--sab), var(--inset-bottom, 0px))); z-index: 11; pointer-events: none;
   font: var(--t-meta)/1.5 var(--mono); color: #e6eaf1; background: rgba(4, 6, 10, .7); border-radius: 12px; padding: 8px 10px; white-space: pre;
   box-shadow: inset 0 0 0 1px var(--rim);
 }
@@ -662,7 +700,7 @@ button.task-row:not(:disabled):not([aria-disabled="true"]):active { transform: n
   html { scroll-behavior: auto; }
   .toast, .toast:popover-open { transform: translateX(-50%); }
   @starting-style { .toast:popover-open { transform: translateX(-50%); } }
-  .toolbar.hidden { transform: translateX(-50%); }
+  .toolbar.hidden, .toolbar.pinned.hidden { transform: translateX(-50%); }
   .task-row svg, .sheet summary::after { transition: none; }
   .host-main:hover .face { transform: none; }
   .ripple { display: none; }

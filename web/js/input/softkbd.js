@@ -13,7 +13,10 @@ const RIGHT = '⁠'.repeat(12);  // word joiner
 const STRIP = /[​⁠]/g;
 
 export class SoftKeyboard extends EventTarget {
-  /** @param {object} ctx { sink, conn, keyboard (KeyboardInput), mods, touch (focus means the keyboard is up) } */
+  /**
+   * @param {object} ctx { sink, conn, keyboard (KeyboardInput), mods, touch (focus means the keyboard is up),
+   *   echo (ui/typing.js: what went to the computer, shown above the keys) }
+   */
   constructor(ctx) {
     super();
     this.ctx = ctx;
@@ -83,6 +86,7 @@ export class SoftKeyboard extends EventTarget {
     const kb = this.ctx.keyboard;
     for (let i = 0; i < backspaces; i++) this._key('Backspace');
     for (let i = 0; i < deletes; i++) this._key('Delete');
+    if (backspaces) this.ctx.echo?.back(backspaces);
     if (inserted) this._text(inserted);
     this._reset();
     kb?.ctx.onUserGesture?.();
@@ -102,13 +106,17 @@ export class SoftKeyboard extends EventTarget {
       for (const ch of text) {
         const m = charToCode(ch.toLowerCase());
         if (!m) continue;
+        const shift = m.shift || ch !== ch.toLowerCase();
+        const held = [...mods.state.keys(), ...(shift ? ['ShiftLeft'] : [])];
         mods.pressForKey();
-        if (m.shift || ch !== ch.toLowerCase()) this.ctx.keyboard.chord(['ShiftLeft', m.code]); else this.ctx.keyboard.tap(m.code);
+        if (shift) this.ctx.keyboard.chord(['ShiftLeft', m.code]); else this.ctx.keyboard.tap(m.code);
         mods.consume();
+        this.ctx.echo?.shortcut(held, /^(Key|Digit)/.test(m.code) ? m.code.replace(/^(Key|Digit)/, '') : ch);
       }
       return;
     }
     // Plain text: layout-independent Unicode injection on the host.
     this.ctx.conn.sendJson({ t: 'text', s: text });
+    this.ctx.echo?.text(text);
   }
 }

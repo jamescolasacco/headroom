@@ -120,6 +120,7 @@ export class MouseInput {
     if (b < 0 || b > 4) return;
     this.ctx.keyboard?.prepareClick();
     this.ctx.mods?.pressForClick();
+    this.ctx.onPress?.();
     this.buttons.add(b);
     this.ctx.conn.sendBinary(P.mouseButton(b, true));
   }

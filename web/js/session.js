@@ -9,6 +9,7 @@ import { MouseInput } from './input/mouse.js';
 import { TouchInput } from './input/touch.js';
 import { SoftKeyboard } from './input/softkbd.js';
 import { StickyModifiers, ExtraKeysBar } from './ui/extrakeys.js';
+import { TypingPreview } from './ui/typing.js';
 import { ClipboardSync } from './clipboard.js';
 import { Toolbar } from './ui/toolbar.js';
 import { StatsOverlay } from './ui/stats.js';
@@ -87,10 +88,16 @@ export class Session {
     const inputAllowed = () => this.permissions.input && this.conn.isOpen;
     const onUserGesture = () => { this.clipboard.onUserGesture(); this.audio.ctx?.state === 'suspended' && this.audio.ctx.resume().catch(() => { }); };
 
+    // What you type on a phone's keyboard, shown above the keys while you type (the eye on the keys bar).
+    this.typing = new TypingPreview($('typing'));
+    this.typing.setEnabled(this.prefs.typingPreview !== false);
+    this.typing.setHost(this.hostOs);
+
     this.keyboard = new KeyboardInput({
       conn: this.conn, mods: this.mods, sink, clipboard: this.clipboard, onUserGesture,
       onLocalHotkey: code => this._hotkey(code),
       softKeyboardHandles: e => this.softkbd?.handles(e),
+      onKey: code => this.typing.key(code),
     });
     this.mods.keyboard = this.keyboard;
     this.keyboard.setProfile(this.prefs.keyboardProfile, this.hostOs);
@@ -99,19 +106,25 @@ export class Session {
       conn: this.conn, viewport: this.viewport, cursor: this.cursor, layer, mods: this.mods, keyboard: this.keyboard,
       sink: isTouchPrimary ? null : sink, onUserGesture, inputAllowed,
       onRelativeChange: rel => { this.relative = rel; this.toolbar?.refresh(); if (rel) toast('Mouse captured — press Esc to release'); },
+      onPress: () => this.typing.reset(), // a click puts the cursor somewhere else
     });
 
-    this.softkbd = new SoftKeyboard({ sink, conn: this.conn, keyboard: this.keyboard, mods: this.mods, touch: isTouchPrimary || isIPad });
+    this.softkbd = new SoftKeyboard({ sink, conn: this.conn, keyboard: this.keyboard, mods: this.mods, touch: isTouchPrimary || isIPad, echo: this.typing });
     this.extraKeys = new ExtraKeysBar($('extra-keys'), {
       keyboard: this.keyboard, mods: this.mods, conn: this.conn,
-      onLayout: px => this.viewport.setInsetBottom(px),
+      onLayout: () => this.layoutChrome(),
+      onKey: code => this.typing.key(code),
+      onPreview: on => this._showTyping(on),
+      onHideKeyboard: () => this.softkbd.hide(),
     });
     this.extraKeys.setHost(this.hostOs);
+    this.extraKeys.setPreview(this.typing.enabled);
     this.softkbd.addEventListener('change', () => {
       const open = this.softkbd.open;
       // First: the picture keeps its size while the keyboard takes the bottom of the screen (it pans instead).
       this.viewport.setKeyboard(open);
-      this.extraKeys.keyboardOpen = open;
+      this.typing.setActive(open);
+      this.extraKeys.setKeyboardOpen(open);
       if (open) { this.extraKeys.show(); this._followUntil = performance.now() + 1500; }
       else if (!this.extraKeysPinned) this.extraKeys.hide();
       this.toolbar?.refresh();
@@ -121,6 +134,7 @@ export class Session {
       conn: this.conn, viewport: this.viewport, cursor: this.cursor, layer, mods: this.mods, onUserGesture,
       ripple: (x, y, kind) => this._ripple(x, y, kind),
       toggleKeyboard: () => this.toggleKeyboard(),
+      onPress: () => this.typing.reset(), // a tap's click puts the cursor somewhere else
       prefs: () => this.prefs,
       // The streamed screen's pixels per point (Retina 2, Windows at 150% 1.5).
       screenScale: () => this.monitors.find(m => m.id === this.monitorId)?.scale || 1,
@@ -202,6 +216,7 @@ export class Session {
       if (w.host?.os && w.host.os !== this.host.os) { this.host.os = w.host.os; touchHost(this.host.id, { os: w.host.os }); }
       this.keyboard.setProfile(this.prefs.keyboardProfile, this.hostOs);
       this.extraKeys.setHost(this.hostOs);
+      this.typing.setHost(this.hostOs);
       if (!this.monitors.some(m => m.id === this.monitorId)) this.monitorId = (this.monitors.find(m => m.primary) || this.monitors[0])?.id;
       this.sendStart();
       this.toolbar.refresh();
@@ -315,6 +330,7 @@ export class Session {
       const { state, attempt, reason } = e.detail;
       if (state === 'reconnecting') {
         this.keyboard?.releaseAll();
+        this.typing?.reset();
         this._overlay('Reconnecting…', attempt > 2 ? `Can't reach ${this.host.name}. Still trying (${reason || 'network'}).` : '', true,
           [{ label: 'Disconnect', onClick: () => this.stop() }]);
       } else if (state === 'open') {
@@ -371,6 +387,7 @@ export class Session {
 
   selectMonitor(id) {
     this.monitorId = id;
+    this.typing?.reset();
     savePrefs(this.host.id, { monitor: id });
     this.sendStart();
     this.toolbar.refresh();
@@ -446,17 +463,55 @@ export class Session {
         top: `${vv.offsetTop}px`, left: `${vv.offsetLeft}px`, width: `${vv.width}px`, height: `${vv.height}px`, right: 'auto', bottom: 'auto',
       });
     }
-    this.extraKeys?.position();
-    this.toolbar?.fit();
-    // Messages (shown outside the session) sit above the keyboard and the extra keys as well.
-    const covered = vv ? Math.max(0, document.documentElement.clientHeight - vv.offsetTop - vv.height) : 0;
-    document.documentElement.style.setProperty('--inset-bottom', `${Math.round(covered + this.viewport.insetBottom)}px`);
+    // What the on-screen keyboard covers of the page (messages are shown outside the session: layoutChrome).
+    this._covered = vv ? Math.max(0, document.documentElement.clientHeight - vv.offsetTop - vv.height) : 0;
+    this.layoutChrome();
     this.viewport.layout();
-    // The keyboard just came up: bring the pointer (where you clicked to type) into view above it.
+    // The keyboard just came up: bring the pointer (where you clicked to type) into view above it, and above
+    // what you type (ui/typing.js).
     if (this.viewport.keyboard && performance.now() < (this._followUntil || 0)) {
       const n = this.cursor.normalized;
-      this.viewport.follow(n.nx, n.ny, 72);
+      this.viewport.follow(n.nx, n.ny, 96);
     }
+  }
+
+  /**
+   * Where the session's own bars go, and the room they leave the picture: the extra keys at the bottom, and on
+   * touch screens the toolbar above them (or nothing, while the on-screen keyboard is up), clear of the status bar
+   * or notch at the top. Runs when any of them changes size and when the visible area does.
+   */
+  layoutChrome() {
+    const v = this.viewport;
+    if (!v || !this.extraKeys) return;
+    const keys = this.extraKeys.visible ? this.extraKeys.el.offsetHeight : 0;
+    v.viewer.style.setProperty('--keys-h', `${keys}px`);
+    v.viewer.style.setProperty('--room', `${Math.max(0, v.viewer.clientHeight - keys)}px`); // above the keys (typing.js)
+    const top = this.toolbar?.touchUi ? this._safeTop() : 0;
+    const bar = this.toolbar ? this.toolbar.place(keys, top) : 0;
+    v.setInsets(top, Math.max(keys, bar));
+    // Messages sit above the keyboard, the toolbar and the extra keys, and above what you type while you type.
+    const typing = this.softkbd?.open && this.typing?.enabled ? 52 : 0;
+    document.documentElement.style.setProperty('--inset-bottom', `${Math.round((this._covered || 0) + v.insetBottom + typing)}px`);
+  }
+
+  /** The status bar or notch at the top of a phone (env(safe-area-inset-top)): the picture keeps clear of it. */
+  _safeTop() {
+    if (!this._safeProbe) {
+      this._safeProbe = h('div', { 'aria-hidden': 'true' });
+      this._safeProbe.style.cssText = 'position:fixed;top:0;left:0;width:0;visibility:hidden;pointer-events:none;height:env(safe-area-inset-top,0px)';
+    }
+    if (!this._safeProbe.isConnected) document.body.append(this._safeProbe);
+    return this._safeProbe.offsetHeight;
+  }
+
+  /** The eye on the keys bar: show what you type above the keys, or not (for every computer). */
+  _showTyping(on) {
+    this.prefs.typingPreview = on;
+    savePrefs('global', { typingPreview: on });
+    this.typing.setEnabled(on);
+    this.extraKeys.setPreview(on);
+    this.layoutChrome();
+    toast(on ? 'What you type shows above the keys' : 'What you type no longer shows above the keys', 2600);
   }
 
   /** While a session is up, pinching zooms the remote screen, never the page (that would throw the layout off). */
@@ -632,6 +687,8 @@ export class Session {
     try { this.touch?.detach(); } catch { }
     this.softkbd?.hide();
     this.extraKeys?.hide();
+    this.typing?.reset();
+    this._safeProbe?.remove();
     this.conn?.close();
     this.presenter?.close();
     this.audio?.close();
@@ -654,7 +711,7 @@ export class Session {
     window.visualViewport?.removeEventListener('resize', this._onScreen);
     window.visualViewport?.removeEventListener('scroll', this._onScreen);
     this._lockPageZoom(false);
-    for (const k of ['top', 'left', 'width', 'height', 'right', 'bottom']) $('viewer').style.removeProperty(k);
+    for (const k of ['top', 'left', 'width', 'height', 'right', 'bottom', '--keys-h', '--room', '--inset-bottom']) $('viewer').style.removeProperty(k);
     document.documentElement.style.removeProperty('--inset-bottom');
     const leave = () => {
       $('overlay').hidden = true;

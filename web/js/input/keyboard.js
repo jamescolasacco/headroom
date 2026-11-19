@@ -7,7 +7,8 @@ import { sheetOpen, closeSheet } from '../ui/dom.js';
 
 export class KeyboardInput {
   /**
-   * @param {object} ctx { conn, mods (sticky modifiers), sink (textarea), clipboard, onLocalHotkey(key) }
+   * @param {object} ctx { conn, mods (sticky modifiers), sink (textarea), clipboard, onLocalHotkey(key), onKey(code) (a key
+   *   went to the computer) }
    */
   constructor(ctx) {
     this.ctx = ctx;
@@ -201,6 +202,7 @@ export class KeyboardInput {
     if (!isModifier(code)) this.ctx.mods?.pressForKey();
     this._perform(this._resolve(code, e), code, e);
     this.ctx.mods?.consume(code);
+    this.ctx.onKey?.(code);
   }
 
   _keyup(e) {

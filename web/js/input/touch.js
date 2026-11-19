@@ -46,7 +46,7 @@ const SCROLL_K = 2.2;        // wheel units per CSS px of finger travel
 const ACCEL_MIN = 1.5, ACCEL_MAX = 2.6, ACCEL_FROM = 0.2, ACCEL_TO = 1.4;
 
 export class TouchInput {
-  /** @param {object} ctx { conn, viewport, cursor, layer, mods, ripple(x,y,kind), toggleKeyboard(), prefs(), screenScale() } */
+  /** @param {object} ctx { conn, viewport, cursor, layer, mods, ripple(x,y,kind), toggleKeyboard(), prefs(), screenScale(), onPress() } */
   constructor(ctx) {
     this.ctx = ctx;
     this.mode = 'trackpad';
@@ -120,7 +120,7 @@ export class TouchInput {
   }
 
   _button(b, down) {
-    if (down) this.ctx.mods?.pressForClick();
+    if (down) { this.ctx.mods?.pressForClick(); this.ctx.onPress?.(); }
     this._send(P.mouseButton(b, down));
     if (b === 0) this.buttonDown = down;
     if (b === 2) this.rightDown = down;
