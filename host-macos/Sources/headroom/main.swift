@@ -34,6 +34,7 @@ func usage(_ code: Int32) -> Int32 {
           headroom [run]              start the host (default)
           headroom permissions        show (and request) Screen Recording / Accessibility
           headroom selftest [secs]    capture + encode test, writes an .h264 file
+          headroom keys <text>        which key each character of <text> is typed with (this Mac's layout)
 
         Options:     --data=<dir> --webroot=<dir> --loopback --test-pattern[=WxH]
         Environment: HEADROOM_DATA (data dir), HEADROOM_WEBROOT (client dir), HEADROOM_DEBUG=1,
@@ -61,6 +62,7 @@ case "run": code = Engine.run(banner: true)
 case "agent": code = Engine.run(banner: false)
 case "permissions": code = permissions(rest)
 case "selftest": code = SelfTest.run(rest)
+case "keys": print(KeyboardLayout.explain(rest.joined(separator: " "))); code = 0
 case "help", "--help", "-h": code = usage(0)
 default: code = usage(1)
 }

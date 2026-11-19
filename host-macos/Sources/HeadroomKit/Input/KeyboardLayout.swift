@@ -7,8 +7,17 @@ import CoreGraphics
 /// string (CGEventKeyboardSetUnicodeString) types into ordinary fields, but secure ones (password fields, the lock
 /// screen's) can ignore it. Characters the layout has no plain or Shift key for (emoji, accents reached through a dead
 /// key or Option, other scripts) aren't here: those still go as a string.
-final class KeyboardLayout {
+public final class KeyboardLayout {
     static let shared = KeyboardLayout()
+
+    /// `headroom keys <text>`: how each character of `text` would be typed on this Mac's layout, one per line.
+    public static func explain(_ text: String) -> String {
+        text.map { ch -> String in
+            let shown = ch == " " ? "space" : String(ch)
+            guard let s = shared.stroke(for: ch) else { return "\(shown)\tas text (this layout has no key for it)" }
+            return "\(shown)\t\(s.shift ? "Shift+" : "")key \(s.code)"
+        }.joined(separator: "\n")
+    }
 
     struct Stroke {
         let code: CGKeyCode

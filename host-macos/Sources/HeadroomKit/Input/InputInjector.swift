@@ -247,11 +247,13 @@ public final class InputInjector {
     /// a keyboard sends it). Keys held from the viewer don't count: the character is what was typed.
     private func typeStroke(_ stroke: KeyboardLayout.Stroke) {
         guard let shift = KeyMap.get("ShiftLeft"), let shiftFlags = shift.modifier else { return }
-        let flags: CGEventFlags = stroke.shift ? shiftFlags : []
+        // Caps Lock stays as it is (every event carries it, as a keyboard's do; see modifierFlags).
+        let base: CGEventFlags = Self.capsLockOn ? .maskAlphaShift : []
+        let flags = stroke.shift ? base.union(shiftFlags) : base
         func shiftKey(_ down: Bool) {
             let e = CGEvent(keyboardEventSource: source, virtualKey: shift.code, keyDown: down)
             e?.type = .flagsChanged
-            e?.flags = down ? shiftFlags : []
+            e?.flags = down ? base.union(shiftFlags) : base
             post(e)
         }
         if stroke.shift { shiftKey(true) }
