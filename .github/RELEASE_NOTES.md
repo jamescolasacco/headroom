@@ -1,11 +1,16 @@
 Remote desktop for your own computers, and quick help with a code: **Headroom Server** on the computer you want to reach; **Headroom Viewer**, any browser, or an iPhone/iPad on the device you use.
 
+## New in 0.4.6: a sharper, smoother picture
+
+- **Sharp over the internet, not just at home.** Headroom Server mistook ordinary internet delay for a congested network: whenever a viewer was more than about 60 ms away (through Headroom's relay, most of the time) it dropped the picture to its lowest quality and kept it there. Now it only slows down when the network is actually full, and then a little at a time. Measured through a relay: 12–40 Mb/s instead of 0.8–3, and a picture as sharp as with no network in between.
+- **Auto resolution: the picture is sent as big as you see it.** A phone showing a Retina Mac at a third of its size gets a lighter stream: less delay, smooth scrolling at 60 frames a second, and a sharper picture at the size it's shown. It grows to full resolution as you zoom in, and a big window gets every pixel. **Picture and network → Resolution** still has Native and fixed sizes.
+
+**Updating:** 0.4.3 and later update themselves (**Restart to update**). From 0.4.2 or older, install this once from below: 0.4.2 can't update itself, and on a Mac, macOS asks for Screen Recording and Accessibility one last time, because the signature changes to Headroom's certificate; after that, updates keep them. On your own Headroom server, `git pull` and run `tools/install-account-server-linux.sh` again for the website's part (Auto resolution, and the phone changes in 0.4.4).
+
 ## New in 0.4.5: Stop server keeps the window working
 
 - **Stopping Headroom Server only stops people connecting.** Stop server (in the window, the menu-bar menu or the tray menu) takes this computer offline: sessions and codes end and nobody can connect, direct or through Headroom. Its window keeps working: sign in, settings, everything. Start server turns it back on. Before, stopping it shut the window down too.
 - **Windows: no administrator prompt to stop or start it**, with the service installed too.
-
-**Updating:** 0.4.3 and later update themselves (**Restart to update**). From 0.4.2 or older, install this once from below: 0.4.2 can't update itself, and on a Mac, macOS asks for Screen Recording and Accessibility one last time, because the signature changes to Headroom's certificate; after that, updates keep them. On your own Headroom server, `git pull` and run `tools/install-account-server-linux.sh` again for the website's part (the phone changes in 0.4.4).
 
 ## New in 0.4.4: Remote Desktop's touch gestures, and instant clicks
 
