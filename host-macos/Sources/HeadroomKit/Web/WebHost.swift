@@ -17,11 +17,13 @@ public final class WebHost: HttpApp {
     public func beginStreaming(_ req: HttpRequest) -> HttpStreamDecision? {
         guard req.method == .POST, req.path == "/api/files/upload" else { return nil }
         guard req.isTLS || req.isLoopback || (req.isRelayed && !req.isGuest) else { return .respond(.status(.forbidden)) }
+        if ServerSwitch.shared.stopped { return .respond(.json(["error": "stopped"], status: .serviceUnavailable)) }
         return FileApi.beginUpload(req)
     }
 
+    /// No sessions while the server is stopped (see ServerSwitch): the request then gets a 503 from handle().
     public func shouldUpgradeWebSocket(path: String, remoteIP: String?, isTLS: Bool, relayed: Bool) -> Bool {
-        path == "/ws" && (isTLS || relayed || NetInterfaces.isLoopback(remoteIP))
+        path == "/ws" && !ServerSwitch.shared.stopped && (isTLS || relayed || NetInterfaces.isLoopback(remoteIP))
     }
 
     public func webSocketHandler(remoteIP: String?, isTLS: Bool, relayed: Bool, guest: Bool, country: String?) -> ChannelHandler {
@@ -58,6 +60,10 @@ public final class WebHost: HttpApp {
 
     public func handle(_ req: HttpRequest) -> HttpResponse {
         let path = req.path
+        // Stopped: nothing for the network, and no sessions here either; the settings window works as usual.
+        if ServerSwitch.shared.stopped && (!req.isLoopback || path == "/ws") {
+            return .json(["error": "stopped", "message": "Headroom Server is stopped on this computer."], status: .serviceUnavailable)
+        }
         if !req.isLoopback {
             if req.method == .OPTIONS, path.hasPrefix("/api") { return .status(.noContent) }
             guard Self.networkAllows(path, guest: req.isGuest), req.isTLS || req.isRelayed else { return .json(["error": "not-available"], status: .forbidden) }
@@ -117,12 +123,21 @@ public final class WebHost: HttpApp {
         switch (req.method, sub) {
         case (.GET, "/status"):
             return .json(status())
+        case (.POST, "/server/stop"):
+            ServerSwitch.shared.stop()
+            return .json(["ok": true])
+        case (.POST, "/server/start"):
+            ServerSwitch.shared.start()
+            return .json(["ok": true])
         case (.POST, "/sessions/disconnect-all"):
             SupportService.shared.revokeAll()
             for s in SessionManager.active { s.disconnect("stopped by the person at the computer") }
             return .json(["ok": true])
         case (.POST, "/support/code"):
             // "Let someone connect": a 9-digit code, and a link with it.
+            if ServerSwitch.shared.stopped {
+                return .json(["error": "stopped", "message": "Headroom Server is stopped. Start it, then create a code."], status: .conflict)
+            }
             let done = DispatchSemaphore(value: 0)
             var out: HttpResponse = .status(.internalServerError)
             SupportService.shared.createCode { result in
@@ -218,6 +233,7 @@ public final class WebHost: HttpApp {
                 ]
             },
             "pid": Int(ProcessInfo.processInfo.processIdentifier),
+            "stopped": ServerSwitch.shared.stopped, // "Stop server": nobody can connect (ServerSwitch)
             "lanAddresses": NetInterfaces.ipv4Addresses(),
             "dataDir": Paths.dataDir,
             "logDir": Paths.logDir,

@@ -51,6 +51,7 @@ public final class RelayService {
     }
 
     private var wanted: Target? {
+        if ServerSwitch.shared.stopped { return nil } // "Stop server": offline until it's started again
         let c = ConfigStore.current
         let server = c.account?.server ?? c.server
         guard let url = URL(string: server), url.host != nil, url.scheme == "https" || url.scheme == "http" else { return nil }

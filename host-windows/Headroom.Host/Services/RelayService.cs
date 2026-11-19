@@ -65,6 +65,7 @@ public sealed class RelayService
 
     private static Target? Wanted()
     {
+        if (ServerSwitch.Shared.Stopped) return null; // "Stop server": offline until it's started again
         var c = ConfigStore.Current;
         var server = c.Account?.Server ?? c.Server;
         if (!Uri.TryCreate(server, UriKind.Absolute, out var u) || u.Scheme is not ("http" or "https") || u.Host.Length == 0) return null;

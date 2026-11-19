@@ -1,5 +1,12 @@
 Remote desktop for your own computers, and quick help with a code: **Headroom Server** on the computer you want to reach; **Headroom Viewer**, any browser, or an iPhone/iPad on the device you use.
 
+## New in 0.4.5: Stop server keeps the window working
+
+- **Stopping Headroom Server only stops people connecting.** Stop server (in the window, the menu-bar menu or the tray menu) takes this computer offline: sessions and codes end and nobody can connect, direct or through Headroom. Its window keeps working: sign in, settings, everything. Start server turns it back on. Before, stopping it shut the window down too.
+- **Windows: no administrator prompt to stop or start it**, with the service installed too.
+
+**Updating:** 0.4.3 and later update themselves (**Restart to update**). From 0.4.2 or older, install this once from below: 0.4.2 can't update itself, and on a Mac, macOS asks for Screen Recording and Accessibility one last time, because the signature changes to Headroom's certificate; after that, updates keep them. On your own Headroom server, `git pull` and run `tools/install-account-server-linux.sh` again for the website's part (the phone changes in 0.4.4).
+
 ## New in 0.4.4: Remote Desktop's touch gestures, and instant clicks
 
 - **Clicks on a phone or touchscreen are instant.** A tap's click goes out the moment your finger lifts, instead of a quarter of a second later in case a drag followed.
@@ -7,8 +14,6 @@ Remote desktop for your own computers, and quick help with a code: **Headroom Se
 - **Headroom Server stays in reach on a full menu bar.** macOS hides menu-bar icons that don't fit (beside a MacBook's notch, the newest go first). When it hides Headroom's, Headroom Server keeps a Dock icon while it runs, even with its window closed: click it for the window, or right-click it for the same quick actions as the menu-bar icon.
 - **Stop and start the server from its window**, not just the menu-bar or tray menu: Home has **Stop server** (it asks first if someone's connected, since their session ends), and once it's stopped the window shows **Start server**.
 - **The extra-keys bar presses only on a tap.** Swiping along it scrolls it, without pressing the key you started on. Modifiers: tap for the next key or click (tap again to cancel), double-tap to lock until you tap them off.
-
-**Updating:** 0.4.3 updates itself to 0.4.4 (**Restart to update**). From 0.4.2 or older, install 0.4.4 once from below: 0.4.2 can't update itself, and on a Mac, macOS asks for Screen Recording and Accessibility one last time, because the signature changes to Headroom's certificate; after that, updates keep them. On your own Headroom server, `git pull` and run `tools/install-account-server-linux.sh` again for the website's part (the phone changes).
 
 ## New in 0.4.3: download, install, and it keeps itself up to date
 

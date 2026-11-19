@@ -133,11 +133,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }, onOpen: { [weak self] in self?.showWindow("home") })
 
         let needsPermission = !st.screenRecording || !st.accessibility
-        statusItem.button?.image = StatusIcon.image(active: !st.viewers.isEmpty, warning: needsPermission && st.viewers.isEmpty)
-        statusItem.button?.toolTip = switch st.viewers.count {
-        case 0: needsPermission ? "Headroom Server — needs permission" : "Headroom Server — ready (\(st.hostName))"
-        case 1: "Headroom — \(st.viewers[0].device) connected"
-        default: "Headroom — \(st.viewers.count) viewers connected"
+        statusItem.button?.image = StatusIcon.image(active: !st.viewers.isEmpty, warning: (needsPermission || st.stopped) && st.viewers.isEmpty)
+        if st.stopped {
+            statusItem.button?.toolTip = "Headroom Server — stopped"
+        } else {
+            statusItem.button?.toolTip = switch st.viewers.count {
+            case 0: needsPermission ? "Headroom Server — needs permission" : "Headroom Server — ready (\(st.hostName))"
+            case 1: "Headroom — \(st.viewers[0].device) connected"
+            default: "Headroom — \(st.viewers.count) viewers connected"
+            }
         }
         if wasOffline { settings?.reloadIfOffline() }
     }
@@ -295,7 +299,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         let st = status
         let header: String
         if let st {
-            header = st.viewers.isEmpty ? (st.online ? "Ready — nobody connected" : "Connecting to Headroom…") : st.viewers.map(\.device).joined(separator: ", ") + " connected"
+            header = st.stopped ? "Stopped — nobody can connect"
+                : st.viewers.isEmpty ? (st.online ? "Ready — nobody connected" : "Connecting to Headroom…") : st.viewers.map(\.device).joined(separator: ", ") + " connected"
         } else {
             header = engine.userStopped ? "Server stopped" : "Server not running"
         }
@@ -320,8 +325,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
 
         menu.addItem(.separator())
-        if engine.running || st != nil {
-            menu.addItem(item("Stop Server", #selector(stopServer), enabled: engine.running))
+        if let st, st.stopped {
+            menu.addItem(item("Start Server", #selector(startServerItem)))
+        } else if engine.running || st != nil {
+            menu.addItem(item("Stop Server", #selector(stopServer), enabled: st != nil))
         } else {
             menu.addItem(item("Start Server", #selector(startServerItem), enabled: EngineManager.engineExists))
         }
@@ -363,14 +370,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
     }
 
-    /// Stop Server, from the menu or the window: the window says so at once, with Start server.
+    /// Stop Server: nobody can connect until Start Server, but the engine keeps running, so the window still works
+    /// (settings, sign in…) and shows the server as stopped.
     @objc private func stopServer() {
-        engine.stop()
-        if let s = settings, s.window.isVisible { s.showOffline() }
-        poll()
+        admin.setServer(running: false) { [weak self] in self?.poll() }
     }
 
-    @objc private func startServerItem() { startServer { _ in } }
+    /// Start Server: after Stop Server, the engine lets people connect again; if it isn't running at all, it starts.
+    @objc private func startServerItem() {
+        if status?.stopped == true { admin.setServer(running: true) { [weak self] in self?.poll() } } else { startServer { _ in } }
+    }
 
     /// Starts the engine and waits (up to 10 s) for its admin API to answer.
     private func startServer(_ done: @escaping (Bool) -> Void) {
@@ -413,7 +422,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             settings = SettingsWindow { [weak self] done in self?.startServer(done) }
             settings?.installUpdate = { [weak self] in self?.restartToUpdate() }
             settings?.onClose = { [weak self] in self?.updateDockIcon(windowOpen: false) }
-            settings?.stopServer = { [weak self] in self?.stopServer() }
         }
         settings?.show(section)
     }

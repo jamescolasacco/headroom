@@ -113,6 +113,13 @@ public static class WebHost
                 }
             }
 
+            // Stopped (ServerSwitch): nothing for the network, and no sessions here either; the settings window works.
+            if (ServerSwitch.Shared.Stopped && (!IsLoopback(ctx) || path == "/ws"))
+            {
+                ctx.Response.StatusCode = 503;
+                await ctx.Response.WriteAsJsonAsync(new { error = "stopped", message = "Headroom Server is stopped on this computer." });
+                return;
+            }
             if (!IsLoopback(ctx))
             {
                 // To the network (Headroom Viewer over TLS, and the relay): sessions and their file transfers, nothing
@@ -174,6 +181,16 @@ public static class WebHost
             AdminAllowed(efc.HttpContext) ? await next(efc) : Results.Json(new { error = "admin API is only available on the host itself" }, statusCode: 403));
 
         admin.MapGet("/status", () => Results.Json(Status(), ConfigStore.JsonOptions));
+        admin.MapPost("/server/stop", () =>
+        {
+            ServerSwitch.Shared.Stop();
+            return Results.Json(new { ok = true });
+        });
+        admin.MapPost("/server/start", () =>
+        {
+            ServerSwitch.Shared.Start();
+            return Results.Json(new { ok = true });
+        });
         admin.MapPost("/sessions/disconnect-all", () =>
         {
             SupportService.Shared.RevokeAll();
@@ -201,6 +218,8 @@ public static class WebHost
         // "Let someone connect": a 9-digit code, and a link with it.
         admin.MapPost("/support/code", async () =>
         {
+            if (ServerSwitch.Shared.Stopped)
+                return Results.Json(new { error = "stopped", message = "Headroom Server is stopped. Start it, then create a code." }, statusCode: 409);
             var (code, error) = await SupportService.Shared.CreateCodeAsync();
             return code != null
                 ? Results.Json(new { code = code.Code, expiresAt = new DateTimeOffset(code.Expires, TimeSpan.Zero), link = code.Link })
@@ -298,6 +317,7 @@ public static class WebHost
             elevated = Input.InputInjector.IsSystem,
             serviceInstalled = Service.ServiceInstaller.Exists(),
             pid = Environment.ProcessId,
+            stopped = ServerSwitch.Shared.Stopped, // "Stop server": nobody can connect (ServerSwitch)
             lanAddresses = CertificateManager.GetLocalAddresses()
                 .Where(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork).Select(a => a.ToString()).ToList(),
             dataDir = Paths.DataDir,

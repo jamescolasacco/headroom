@@ -28,7 +28,6 @@ public sealed class TrayApp : ApplicationContext
     private readonly bool _launchedInTray;
     private bool _firstPoll = true;
     private bool _startingEngine;
-    private bool _userStopped;
     private int _offlinePolls;
     private readonly Updater _updater = new(Updater.App.Server);
     private string? _announcedUpdate;
@@ -74,7 +73,7 @@ public sealed class TrayApp : ApplicationContext
             _status = null;
             _offlinePolls++;
             // User mode: nobody else runs the engine, so we do (unless the service is installed).
-            if (!EngineManager.ServiceInstalled && !_userStopped && !_startingEngine && !_engine.OwnsEngine && EngineManager.EngineExists)
+            if (!EngineManager.ServiceInstalled && !_startingEngine && !_engine.OwnsEngine && EngineManager.EngineExists)
             {
                 _startingEngine = true;
                 _engine.StartUserMode();
@@ -110,7 +109,7 @@ public sealed class TrayApp : ApplicationContext
 
         int n = st.Viewers.Count;
         _tray.Icon = n > 0 ? _activeIcon : _idleIcon;
-        var text = n switch
+        var text = st.Stopped ? "Headroom Server — stopped" : n switch
         {
             0 => st.Online ? $"Headroom Server — ready ({st.HostName})" : "Headroom Server — connecting to Headroom…",
             1 => $"Headroom — {st.Viewers[0].Device} connected",
@@ -209,6 +208,7 @@ public sealed class TrayApp : ApplicationContext
         var st = _status;
         string header = st == null
             ? (EngineManager.ServiceInstalled ? "Service not running" : "Server not running")
+            : st.Stopped ? "Stopped — nobody can connect"
             : st.Viewers.Count > 0 ? string.Join(", ", st.Viewers.Select(v => v.Device)) + " connected"
             : st.Online ? "Ready — nobody connected" : "Connecting to Headroom…";
         if (header.Length > 80) header = header[..80] + "…";
@@ -223,24 +223,32 @@ public sealed class TrayApp : ApplicationContext
             m.Items.Add(new ToolStripMenuItem("Stop everyone's session", null, async (_, _) => { await _admin.DisconnectAllAsync(); await PollAsync(); }));
 
         m.Items.Add(new ToolStripSeparator());
-        if (EngineManager.ServiceInstalled)
+        if (st != null)
         {
-            m.Items.Add(new ToolStripMenuItem(st == null ? "Start service" : "Stop service", null, async (_, _) =>
+            // Stop server / Start server: the engine keeps running (the window still works); stopped, nobody can connect.
+            // No administrator permission needed, service or not.
+            m.Items.Add(new ToolStripMenuItem(st.Stopped ? "Start server" : "Stop server", null, async (_, _) =>
             {
-                bool start = _status == null;
-                await Task.Run(() => EngineManager.ControlService(start));
+                await _admin.SetServerAsync(running: _status?.Stopped == true);
+                await PollAsync();
+            }));
+        }
+        else if (EngineManager.ServiceInstalled)
+        {
+            m.Items.Add(new ToolStripMenuItem("Start service", null, async (_, _) =>
+            {
+                await Task.Run(() => EngineManager.ControlService(true));
                 await PollAsync();
             }));
         }
         else
         {
-            m.Items.Add(new ToolStripMenuItem(_engine.OwnsEngine || st != null ? "Stop server" : "Start server", null, async (_, _) =>
+            m.Items.Add(new ToolStripMenuItem("Start server", null, async (_, _) =>
             {
-                if (_engine.OwnsEngine) { _userStopped = true; _engine.StopUserMode(); }
-                else { _userStopped = false; _engine.StartUserMode(); }
+                _engine.StartUserMode();
                 await Task.Delay(1500);
                 await PollAsync();
-            }) { Enabled = EngineManager.EngineExists && (st == null || _engine.OwnsEngine) });
+            }) { Enabled = EngineManager.EngineExists });
         }
         m.Items.Add(new ToolStripMenuItem("Start with Windows", null, (_, _) => SetAutostart(!AutostartEnabled)) { Checked = AutostartEnabled });
         if (up.Phase != "ready")
@@ -262,7 +270,7 @@ public sealed class TrayApp : ApplicationContext
         _ui.Post(_ =>
         {
             if (_window == null || _window.IsDisposed)
-                _window = new SettingsWindow(LoadIconLarge(), StartServerFromWindowAsync, _updater, RestartToUpdate, StopServerFromWindowAsync);
+                _window = new SettingsWindow(LoadIconLarge(), StartServerFromWindowAsync, _updater, RestartToUpdate);
             _window.Navigate(section);
             if (!_window.Visible) _window.Show();
             if (_window.WindowState == FormWindowState.Minimized) _window.WindowState = FormWindowState.Normal;
@@ -276,24 +284,10 @@ public sealed class TrayApp : ApplicationContext
         return new Icon(s, 32, 32);
     }
 
-    /// <summary>
-    /// "Stop server" in the window, as the tray menu's: the service (which asks for administrator permission), or
-    /// the engine this app started. False if it wasn't stopped (permission declined, or an engine we didn't start).
-    /// </summary>
-    private async Task<bool> StopServerFromWindowAsync()
-    {
-        bool stopped;
-        if (EngineManager.ServiceInstalled) stopped = await Task.Run(() => EngineManager.ControlService(false));
-        else if (_engine.OwnsEngine) { _userStopped = true; _engine.StopUserMode(); stopped = true; }
-        else stopped = false;
-        await PollAsync();
-        return stopped;
-    }
-
     private async Task<bool> StartServerFromWindowAsync()
     {
         if (EngineManager.ServiceInstalled) await Task.Run(() => EngineManager.ControlService(true));
-        else { _userStopped = false; _engine.StartUserMode(); }
+        else _engine.StartUserMode();
         for (int i = 0; i < 20; i++)
         {
             await Task.Delay(500);

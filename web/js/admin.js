@@ -87,8 +87,8 @@ function viewKey() {
   const requests = (s.support?.requests || []).map(r => [r.id, r.name, r.address, r.country]);
   const perms = s.permissions ? [s.permissions.screenRecording, s.permissions.accessibility] : null;
   switch (current) {
-    case 'home': return stable(['home', sessions, requests, s.account?.email, s.relay?.state, perms, s.testPattern, s.host.name, notes.request, update?.phase === 'ready' && update.version]);
-    case 'connect': return stable(['connect', s.relay?.state, s.relay?.error, s.support?.code?.code, requests, codeError, notes.request]);
+    case 'home': return stable(['home', !!s.stopped, sessions, requests, s.account?.email, s.relay?.state, perms, s.testPattern, s.host.name, notes.request, update?.phase === 'ready' && update.version]);
+    case 'connect': return stable(['connect', !!s.stopped, s.relay?.state, s.relay?.error, s.support?.code?.code, requests, codeError, notes.request]);
     case 'account': return stable(['account', s.account?.email, s.account?.error, s.settings.displayName, s.host.machine, notes.account, notes.rename]);
     default: return stable(['settings', s.settings, perms, loginItem, s.dataDir, s.logDir, s.host.version, update && [update.phase, update.version, update.message]]);
   }
@@ -349,29 +349,34 @@ function viewHome() {
   const perms = st.permissions;
   const missing = mac() && perms && (!perms.screenRecording || !perms.accessibility);
   const relay = st.relay || {};
-  // The on-air lamp while anyone is asking or connected; only then this computer's own state.
-  const state = n || waiting ? 'live' : missing ? 'warn' : 'ready';
-  const title = waiting ? plural(waiting, '1 person is waiting for your answer', `${waiting} people are waiting for your answer`)
-    : n ? plural(n, `${st.sessions[0].device || 'Someone'} is connected`, `${n} people are connected`)
-      : missing ? 'Needs permission before anyone can connect' : 'Nobody is connected';
-  const sub = waiting ? 'Answer above: Accept, View only or Decline.'
-    : n ? (n > 1 ? 'Each of them can see this screen. Stop anyone below.' : `They can see ${thisPc()}'s screen. Stop them at any time below.`)
-      : missing ? 'Turn on the two permissions below.'
-        : st.account ? 'Ready. Your devices can connect from anywhere.' : 'Ready for codes. Sign in to reach it from your devices too.';
+  const stopped = !!st.stopped; // Stop server: nobody can connect, but all of this still works
+  // The on-air lamp while anyone is asking or connected; only then this computer's own state. Stopped, it's dark.
+  const state = stopped ? 'stopped' : n || waiting ? 'live' : missing ? 'warn' : 'ready';
+  const title = stopped ? 'Headroom Server is stopped'
+    : waiting ? plural(waiting, '1 person is waiting for your answer', `${waiting} people are waiting for your answer`)
+      : n ? plural(n, `${st.sessions[0].device || 'Someone'} is connected`, `${n} people are connected`)
+        : missing ? 'Needs permission before anyone can connect' : 'Nobody is connected';
+  const sub = stopped ? `Nobody can connect to ${thisPc()} until you start it. Settings, your account and everything else here still work.`
+    : waiting ? 'Answer above: Accept, View only or Decline.'
+      : n ? (n > 1 ? 'Each of them can see this screen. Stop anyone below.' : `They can see ${thisPc()}'s screen. Stop them at any time below.`)
+        : missing ? 'Turn on the two permissions below.'
+          : st.account ? 'Ready. Your devices can connect from anywhere.' : 'Ready for codes. Sign in to reach it from your devices too.';
   // This computer's screen, as your devices see it: lit in its own light; warm while a person is here.
   const glyph = state === 'live' ? I.user : state === 'warn' ? ICON.warn : mac() ? I.apple : I.windows;
+  const face = state === 'live' ? ' lamp' : state === 'warn' ? ' off warn' : state === 'stopped' ? ' off' : ' os';
   const hero = h('div', { class: 'me-block' },
-    h('div', { class: `face me${state === 'live' ? ' lamp' : state === 'warn' ? ' off warn' : ''}${state === 'ready' ? ' os' : ''}`, 'aria-hidden': 'true' }, svg(glyph, 34)),
+    h('div', { class: `face me${face}`, 'aria-hidden': 'true' }, svg(glyph, 34)),
     h('div', { class: 'me-text' }, h('p', { class: 'title' }, title), h('p', { class: 'me-sub' }, sub),
     h('div', { class: 'row me-badges' },
       st.account ? h('span', { class: 'badge ok' }, `Signed in as ${st.account.email}`) : h('span', { class: 'badge' }, 'Not signed in'),
-      relay.state === 'online' ? h('span', { class: 'badge ok' }, 'Online') : h('span', { class: 'badge' }, relay.state === 'retrying' ? 'Offline: retrying' : 'Connecting…'),
+      stopped ? h('span', { class: 'badge' }, 'Stopped')
+        : relay.state === 'online' ? h('span', { class: 'badge ok' }, 'Online') : h('span', { class: 'badge' }, relay.state === 'retrying' ? 'Offline: retrying' : 'Connecting…'),
       st.testPattern ? h('span', { class: 'badge' }, 'Test pattern') : null,
       n > 1 ? h('button', {
         class: 'sm danger', type: 'button', 'data-key': 'home:stop-all',
         onclick: () => { pendingFocus = 'heading'; post('/sessions/disconnect-all').then(() => refresh({ force: true })); },
       }, 'Stop all') : null,
-      native ? stopServerButton(n) : null)));
+      stopped ? startServerButton() : stopServerButton(n))));
   const next = !st.account && !n && !waiting ? h('div', { class: 'card' }, h('h3', {}, 'Get started'),
     h('ul', { class: 'list' },
       h('li', { class: 'li' }, h('div', { class: 'main' }, h('div', { class: 't' }, 'Reach this computer from your other devices'),
@@ -391,16 +396,29 @@ function viewHome() {
 }
 
 /**
- * Stop server (in Headroom Server's own window), as in its menu-bar or tray menu: the window then says it isn't
- * running, with Start server. With someone connected it asks in place first, as their session would end.
+ * Stop server / Start server, as in the menu-bar or tray menu. Stopped, nobody can connect (the relay closes, codes
+ * and sessions end), but this window keeps working: settings, signing in, everything.
  */
+function setServer(running, focus) {
+  pendingFocus = focus;
+  return post(running ? '/server/start' : '/server/stop')
+    .then(() => announce(running ? 'Headroom Server started.' : 'Headroom Server stopped. Nobody can connect until you start it.'))
+    .catch(e => announce(e.message))
+    .finally(() => refresh({ force: true }));
+}
+
+/** With someone connected, Stop server asks in place first: their session would end. */
 function stopServerButton(n) {
-  const stop = () => postNative({ cmd: 'stopServer' });
+  const stop = () => setServer(false, 'home:start-server');
   const b = n ? armedButton('Stop server', plural(n, 'Stop, and end the session?', `Stop, and end ${n} sessions?`), stop, 'home:stop-server')
     : h('button', { type: 'button', 'data-key': 'home:stop-server', onclick: stop }, 'Stop server');
   b.className = 'sm';
-  b.title = 'Nobody can connect until you start it again.';
+  b.title = 'Nobody can connect until you start it again. Settings and your account still work.';
   return b;
+}
+
+function startServerButton(key = 'home:start-server') {
+  return h('button', { class: 'sm primary', type: 'button', 'data-key': key, onclick: () => setServer(true, 'home:stop-server') }, 'Start server');
 }
 
 // ------------------------------------------------------------------ updates
@@ -462,7 +480,9 @@ function viewConnect() {
           refresh({ force: true });
         },
       }, 'Create a code')),
-      !online ? h('p', { class: 'small muted', role: 'status' }, `Connecting to Headroom…${relay.error ? ` (${relay.error})` : ''}`) : null,
+      st.stopped ? h('div', { class: 'row' }, h('p', { class: 'small muted', role: 'status' }, 'Headroom Server is stopped, so nobody can connect with a code.'),
+        startServerButton('connect:start-server'))
+        : !online ? h('p', { class: 'small muted', role: 'status' }, `Connecting to Headroom…${relay.error ? ` (${relay.error})` : ''}`) : null,
       codeError ? h('p', { class: 'msg err', role: 'alert' }, codeError) : null);
   } else {
     put(card,

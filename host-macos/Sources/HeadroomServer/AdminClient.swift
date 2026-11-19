@@ -26,6 +26,8 @@ struct ServerStatus {
     let supportRequests: [SupportRequest]
     let signedIn: Bool
     let online: Bool
+    /// "Stop server": the engine runs (the window works) but nobody can connect.
+    let stopped: Bool
 }
 
 /// Talks to the running engine's loopback-only admin API (the same one the settings window uses).
@@ -77,8 +79,14 @@ final class AdminClient {
                                    address: $0["address"] as? String ?? "", country: $0["country"] as? String)
                 },
                 signedIn: j["account"] is [String: Any],
-                online: (j["relay"] as? [String: Any])?["state"] as? String == "online"))
+                online: (j["relay"] as? [String: Any])?["state"] as? String == "online",
+                stopped: j["stopped"] as? Bool ?? false))
         }
+    }
+
+    /// Stop server / Start server: nobody can connect while stopped, but the engine (and the window) keep running.
+    func setServer(running: Bool, _ done: @escaping () -> Void = {}) {
+        request("POST", running ? "/api/admin/server/start" : "/api/admin/server/stop") { _ in done() }
     }
 
     func disconnectAll(_ done: @escaping () -> Void = {}) {

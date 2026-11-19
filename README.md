@@ -127,7 +127,8 @@ Data lives in `~/Library/Application Support/Headroom` (config and certificates,
 in `~/Library/Logs/Headroom`. `tools/uninstall-macos.sh [--purge]` removes everything.
 
 **On both**, the window has four sections: **Home** (who's connected, with Stop, and for guests their control,
-files and clipboard switches; **Stop server**, and **Start server** once it's stopped), **Let someone connect** (codes), **Account** (sign in, this computer's name) and
+files and clipboard switches; **Stop server**, and **Start server** once it's stopped: while stopped nobody can
+connect, but the window works as usual), **Let someone connect** (codes), **Account** (sign in, this computer's name) and
 **Settings** (start at login, what your devices may do, quality, permissions). The tray / menu-bar icon has the
 same essentials, and the Accept prompt appears there.
 

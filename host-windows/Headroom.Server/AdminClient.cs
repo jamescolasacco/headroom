@@ -9,9 +9,10 @@ public sealed record ViewerInfo(string Id, string Device, string Address, bool G
 /// <summary>Someone with a guest code, waiting for Accept / Decline.</summary>
 public sealed record SupportRequest(string Id, string Name, string Address, string? Country);
 
+/// <param name="Stopped">"Stop server": the engine runs (the window works) but nobody can connect.</param>
 public sealed record ServerStatus(
     string HostName, string Version, bool Elevated, bool ServiceInstalled, bool NotifyOnConnect,
-    IReadOnlyList<ViewerInfo> Viewers, IReadOnlyList<SupportRequest> SupportRequests, bool SignedIn, bool Online);
+    IReadOnlyList<ViewerInfo> Viewers, IReadOnlyList<SupportRequest> SupportRequests, bool SignedIn, bool Online, bool Stopped);
 
 /// <summary>Talks to the running engine's loopback-only admin API (the same one the settings window uses).</summary>
 public sealed class AdminClient
@@ -54,7 +55,8 @@ public sealed class AdminClient
                 viewers,
                 requests,
                 r.TryGetProperty("account", out var acct) && acct.ValueKind == JsonValueKind.Object,
-                r.TryGetProperty("relay", out var rel) && Str(rel, "state") == "online");
+                r.TryGetProperty("relay", out var rel) && Str(rel, "state") == "online",
+                Flag(r, "stopped"));
         }
         catch
         {
@@ -76,5 +78,11 @@ public sealed class AdminClient
     public async Task DisconnectAllAsync()
     {
         try { await _http.PostAsync("/api/admin/sessions/disconnect-all", null); } catch { }
+    }
+
+    /// <summary>Stop server / Start server: nobody can connect while stopped, but the engine (and the window) keep running.</summary>
+    public async Task SetServerAsync(bool running)
+    {
+        try { await _http.PostAsync(running ? "/api/admin/server/start" : "/api/admin/server/stop", null); } catch { }
     }
 }

@@ -148,7 +148,7 @@ The host only ever sees plain key codes.
 | GET | `/api/files/list?path=` | Bearer | directory listing; empty path lists roots |
 | POST | `/api/files/upload?dir=&name=` | Bearer | raw body; saved under a non-clashing name |
 | GET | `/api/files/download?t=` | ephemeral token | file download |
-| * | `/api/admin/*` | loopback only: loopback peer *and* loopback `Host`, no foreign `Origin`, `Sec-Fetch-Site` same-origin/none (so web pages can't use it); never CORS | the window's API: `status`, `settings`, `support/code` (POST/DELETE), `support/requests/<id>`, `sessions/<id>/disconnect\|rights`, `sessions/disconnect-all`, `account/join\|leave\|sync`; on macOS also `permissions/request` |
+| * | `/api/admin/*` | loopback only: loopback peer *and* loopback `Host`, no foreign `Origin`, `Sec-Fetch-Site` same-origin/none (so web pages can't use it); never CORS | the window's API: `status` (with `stopped`), `server/stop\|start` (stopped: nobody can connect — no relay, sessions, codes or direct connections — but this API and the window keep working), `settings`, `support/code` (POST/DELETE), `support/requests/<id>`, `sessions/<id>/disconnect\|rights`, `sessions/disconnect-all`, `account/join\|leave\|sync`; on macOS also `permissions/request` |
 
 Only the paths above with `none`/Bearer/ephemeral auth (and `/ws`) answer on the network; the settings window and
 `/api/admin` are loopback-only. Your account's sign-ins are checked against the hashes from the host's last
