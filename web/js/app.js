@@ -50,6 +50,8 @@ async function main() {
 
   // A guest link: https://<server>/#code=123456789
   if (hash.get('code')) { codeFlow(hash.get('code')); return; }
+  // "Open in Safari" from Firefox's Add to Home Screen steps: https://<server>/#install shows Safari's steps here.
+  if (hash.has('install') && isIOS && !isStandalone && !nativeViewer) homeScreenSteps();
   // Headroom Viewer's "Open in new window": #connect=<device id>
   if (hash.get('connect')) {
     await refreshed;
@@ -149,22 +151,33 @@ function renderInstall(acct = Account.loadAccount()) {
 
 /**
  * iPhone and iPad: Add to Home Screen, in the browser you're in. Firefox puts a letter on the icon whatever the site
- * declares (mozilla-mobile/firefox-ios#33663: touch icons, manifest icons and favicons all ignored), so in Firefox the
- * steps say so first: the app added from Safari is the same app, with Headroom's icon.
+ * declares (mozilla-mobile/firefox-ios#33663: touch icons, manifest icons and favicons all ignored), so in Firefox it
+ * leads with "Open in Safari" (x-safari-https: opens a page in Safari from another browser, iOS 15 and 17 on), which
+ * opens this page there with Safari's steps showing (#install): the same app, with Headroom's icon.
  */
 function homeScreenSteps() {
   const ua = navigator.userAgent;
   const firefox = /FxiOS/.test(ua);
   const glyph = path => h('span', { class: 'glyph', 'aria-hidden': 'true' }, svg(path, 17));
+  if (firefox) {
+    const safari = `x-safari-https://${location.host}/#install`;
+    dialog(dlg => {
+      dlg.append(h('div', { class: 'body' },
+        h('h2', {}, 'Add Headroom to your Home Screen'),
+        h('p', { class: 'muted' }, 'Firefox gives Home Screen apps a letter for an icon, whatever the website (a Firefox bug). Safari gives it Headroom\'s icon: open this page there and add it in three taps. It\'s the same app.'),
+        h('div', { class: 'actions' }, h('a', { class: 'button primary', href: safari }, 'Open in Safari')),
+        h('p', { class: 'muted small' }, `Didn't open? Go to ${location.host} in Safari. Or add it from Firefox, with the letter: tap Share `,
+          glyph(I.share), ', then Add to Home Screen ', glyph(I.addHome), '.')));
+    });
+    return;
+  }
   const first = /CriOS/.test(ua) ? ['Tap Share ', glyph(I.share), ' in the address bar.']
     : /EdgiOS/.test(ua) ? ['Tap the menu ', glyph(I.more), ', then Share.']
-    : firefox ? ['Tap Share ', glyph(I.share), '.']
     : ['Tap Share ', glyph(I.share), '. In the newest Safari it\'s in the ', glyph(I.more), ' menu.'];
   dialog(dlg => {
     dlg.append(h('div', { class: 'body' },
       h('h2', {}, 'Add Headroom to your Home Screen'),
       h('p', { class: 'muted' }, 'It opens full screen, like an app. Add it in three taps:'),
-      firefox ? h('p', { class: 'notice' }, 'From Firefox, the icon comes out as a letter H instead of Headroom\'s (a Firefox bug). Add it from Safari to get the Headroom icon: the app is the same.') : null,
       h('ol', { class: 'steps' },
         h('li', {}, ...first),
         h('li', {}, 'Tap Add to Home Screen ', glyph(I.addHome), '. Not in the list? Tap View More first.'),
