@@ -1,7 +1,7 @@
 // Headroom web client — entry point. Signed out: "Got a code?" and sign in / create account. Signed in: your
 // devices (every device that has signed in with Headroom Server) and your Account page. Then sessions.
 import { Session } from './session.js';
-import { h, svg, dialog, toast, announce, field, busy, nextId, plural } from './ui/dom.js';
+import { h, svg, dialog, toast, announce, field, busy, nextId, plural, trackWindowFront } from './ui/dom.js';
 import { I } from './ui/icons.js';
 import { lightOf } from './ui/light.js';
 import { qrSvg } from './qr.js';
@@ -25,7 +25,7 @@ async function main() {
   }
   Account.forgetOldData();
   $('btn-code').addEventListener('click', () => codeFlow());
-  if (nativeViewer) watchForUpdates();
+  if (nativeViewer) { watchForUpdates(); trackWindowFront(); }
   // Never create history entries: iOS standalone edge-swipe "back" would leave the app.
   const hash = new URLSearchParams(location.hash.slice(1));
   if (location.hash) history.replaceState(null, '', location.pathname);

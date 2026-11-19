@@ -44,6 +44,22 @@ let uid = 0;
 export const nextId = (prefix = 'hr') => `${prefix}-${++uid}`;
 
 /**
+ * Headroom Viewer's and Headroom Server's windows: hover styles apply only while the window is in front (app.css
+ * gates every :hover on `:where(html:not([data-bg]))`). A window in the background gets no mouse moves, so the web view
+ * keeps showing whatever was under the pointer when it went there: a link that opened the browser stayed lit, and
+ * nothing else lit up until the window was clicked again. (Not in a browser tab: there, clicking the address bar takes
+ * focus from the page too, and its links don't send you to another app.) Focus in an embedded frame (the human check)
+ * still counts as in front.
+ */
+export function trackWindowFront() {
+  const root = document.documentElement;
+  const mark = () => root.toggleAttribute('data-bg', !document.hasFocus());
+  addEventListener('focus', mark);
+  addEventListener('blur', () => setTimeout(mark, 0)); // where focus went (a frame of ours, or another app) is known a moment later
+  mark();
+}
+
+/**
  * Tells screen readers about something that changed, politely. The region (#announcer) is always in the page and
  * starts empty, so every update is read; clearing it first makes a repeated message read again.
  */

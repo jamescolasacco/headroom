@@ -4,7 +4,7 @@
 //
 // The status is polled every 2 s, but a section is only redrawn when what it shows has changed, and focus,
 // scroll position and unsent choices survive a redraw; times and the code countdown update in place.
-import { h, svg, announce, field, nextId, plural } from './ui/dom.js';
+import { h, svg, announce, field, nextId, plural, trackWindowFront } from './ui/dom.js';
 import { QrCode } from './qr.js';
 import { bridge } from './platform.js';
 import { lightOf } from './ui/light.js';
@@ -12,6 +12,7 @@ import { I } from './ui/icons.js';
 import { UpdateCorner } from './ui/updates.js';
 
 const native = bridge;   // present when hosted by Headroom Server's own window
+if (native) trackWindowFront();
 const postNative = msg => native?.post(msg);
 const mac = () => st?.host?.os === 'macos';
 const thisPc = () => (mac() ? 'this Mac' : 'this PC');

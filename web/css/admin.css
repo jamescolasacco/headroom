@@ -23,7 +23,7 @@ body { overflow: hidden; }
   background: transparent; color: var(--ink-2); font-size: var(--t-label); font-weight: 500; text-align: left;
 }
 .nav-item svg { width: 18px; height: 18px; stroke-width: 2; }
-@media (hover: hover) and (pointer: fine) { .nav-item:hover { background: var(--wash); color: var(--ink); border-color: transparent; } }
+@media (hover: hover) and (pointer: fine) { :where(html:not([data-bg])) .nav-item:hover { background: var(--wash); color: var(--ink); border-color: transparent; } }
 .nav-item[aria-current="page"] { background: var(--wash-2); color: var(--ink); box-shadow: inset 0 0 0 1px var(--rim); }
 button.nav-item:not(:disabled):not([aria-disabled="true"]):active { transform: none; } /* used all the time: no press motion */
 .nav-item .count {
@@ -108,7 +108,7 @@ label.check input { width: 20px; height: 20px; margin: 0; accent-color: var(--pr
 .request-actions { margin-top: var(--s4); gap: var(--s2); }
 .request-actions button { min-width: 112px; }
 .request-actions button.decline { background: var(--primary); color: var(--on-primary); border-color: transparent; font-weight: 600; }
-@media (hover: hover) and (pointer: fine) { .request-actions button.decline:hover { background: var(--primary-hover); } }
+@media (hover: hover) and (pointer: fine) { :where(html:not([data-bg])) .request-actions button.decline:hover { background: var(--primary-hover); } }
 .card.request > p.muted { margin: var(--s3) 0 0; }
 
 /* guests' switches in "Connected now" */
