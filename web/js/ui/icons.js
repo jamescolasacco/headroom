@@ -21,10 +21,9 @@ export const I = {
   up: '<path d="m18 15-6-6-6 6"/>',
   folderUp: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="m12 16v-5M9.5 13.5 12 11l2.5 2.5"/>',
   upload: '<path d="M12 16V4M7 9l5-5 5 5M4 20h16"/>',
-  // The phone's own symbols, for steps that point at them: Share, the ⋯ menu, a menu of lines, Add to Home Screen.
+  // The phone's own symbols, for steps that point at them: Share, the ⋯ menu, Add to Home Screen.
   share: '<path d="M12 3v12M8 7l4-4 4 4M8.5 10.5H6.5a1.5 1.5 0 0 0-1.5 1.5v7.5A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5V12a1.5 1.5 0 0 0-1.5-1.5h-2"/>',
   more: '<circle cx="5.5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="18.5" cy="12" r="1.2"/>',
-  menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
   addHome: '<rect x="3.5" y="3.5" width="17" height="17" rx="4.5"/><path d="M12 8v8M8 12h8"/>',
   mouse: '<rect x="6" y="3" width="12" height="18" rx="6"/><path d="M12 7v4"/>',
   windows: '<path d="M3 5.5 10.5 4.5V11.5H3zM12 4.3 21 3v8.5h-9zM3 12.5h7.5v7L3 18.5zM12 12.5h9V21l-9-1.3z"/>',

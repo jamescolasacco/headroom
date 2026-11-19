@@ -147,18 +147,24 @@ function renderInstall(acct = Account.loadAccount()) {
   slot.replaceChildren(btn);
 }
 
-/** iPhone and iPad: Add to Home Screen, in the browser you're in. */
+/**
+ * iPhone and iPad: Add to Home Screen, in the browser you're in. Firefox puts a letter on the icon whatever the site
+ * declares (mozilla-mobile/firefox-ios#33663: touch icons, manifest icons and favicons all ignored), so in Firefox the
+ * steps say so first: the app added from Safari is the same app, with Headroom's icon.
+ */
 function homeScreenSteps() {
   const ua = navigator.userAgent;
+  const firefox = /FxiOS/.test(ua);
   const glyph = path => h('span', { class: 'glyph', 'aria-hidden': 'true' }, svg(path, 17));
   const first = /CriOS/.test(ua) ? ['Tap Share ', glyph(I.share), ' in the address bar.']
-    : /FxiOS/.test(ua) ? ['Tap the menu ', glyph(I.menu), ', then Share.']
     : /EdgiOS/.test(ua) ? ['Tap the menu ', glyph(I.more), ', then Share.']
+    : firefox ? ['Tap Share ', glyph(I.share), '.']
     : ['Tap Share ', glyph(I.share), '. In the newest Safari it\'s in the ', glyph(I.more), ' menu.'];
   dialog(dlg => {
     dlg.append(h('div', { class: 'body' },
       h('h2', {}, 'Add Headroom to your Home Screen'),
       h('p', { class: 'muted' }, 'It opens full screen, like an app. Add it in three taps:'),
+      firefox ? h('p', { class: 'notice' }, 'From Firefox, the icon comes out as a letter H instead of Headroom\'s (a Firefox bug). Add it from Safari to get the Headroom icon: the app is the same.') : null,
       h('ol', { class: 'steps' },
         h('li', {}, ...first),
         h('li', {}, 'Tap Add to Home Screen ', glyph(I.addHome), '. Not in the list? Tap View More first.'),
