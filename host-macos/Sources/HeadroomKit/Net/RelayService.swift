@@ -384,10 +384,13 @@ private final class RelayControlHandler: ChannelInboundHandler {
     init(onMessage: @escaping (JSONObject) -> Void) { self.onMessage = onMessage }
 
     func handlerAdded(context: ChannelHandlerContext) {
-        // The relay pings every 25 s; three missed pings mean the path is gone (sleep, network change).
-        watchdog = context.eventLoop.scheduleRepeatedTask(initialDelay: .seconds(30), delay: .seconds(30)) { [weak self] _ in
+        // The relay pings every 25 s: 40 s without a word means the path is gone (a network change, or this Mac slept).
+        // The check runs every 5 s of awake time (the timer stands still while the Mac sleeps; the clock doesn't), so
+        // when a sleeping Mac wakes for a moment (it does every few minutes, for about 45 s) it's back on the relay
+        // within seconds: in time for a viewer that's waiting for it, whose connection then wakes it up.
+        watchdog = context.eventLoop.scheduleRepeatedTask(initialDelay: .seconds(5), delay: .seconds(5)) { [weak self] _ in
             guard let self else { return }
-            if Date().timeIntervalSince(self.lastHeard) > 80 { context.close(promise: nil) }
+            if Date().timeIntervalSince(self.lastHeard) > 40 { context.close(promise: nil) }
         }
     }
 

@@ -56,6 +56,9 @@ const EMAIL_CODE_MINUTES = 15;
 const GUEST_CODE_MINUTES = 10;
 const HEARTBEAT_S = 20;
 const ONLINE_S = 70;                           // a device counts as online if it checked in this recently
+// The relay pings each connected device every 25 s. One silent this long has gone (a Mac that fell asleep leaves its
+// connection open on this side; it's dropped after 75 s): it isn't listed as reachable, and viewers wait for it.
+const RELAY_SILENT_MS = 40_000;
 const MAX_HOSTS = Number(env.MAX_HOSTS) || 5000;     // devices connected to the relay at once
 const MAX_TUNNELS = Number(env.MAX_TUNNELS) || 2000; // viewer connections through the relay at once
 const GUEST_HOSTS_PER_ADDRESS = 5;             // devices without an account, per network address
@@ -440,7 +443,11 @@ export class Relay {
     this.tunnels = 0;
   }
 
-  online(relayId) { return !!relayId && this.hosts.has(relayId); }
+  /** Connected and answering: a device whose connection went silent (asleep, gone from the network) isn't. */
+  online(relayId) {
+    const h = relayId && this.hosts.get(relayId);
+    return !!h && Date.now() - h.link.lastHeard < RELAY_SILENT_MS;
+  }
 
   guestHostsFrom(ip) {
     let n = 0;
@@ -503,7 +510,7 @@ export class Relay {
   slotTarget(slot) {
     this.pruneSlots();
     const s = this.slots.get(slot);
-    return s && this.hosts.has(s.relayId) ? s.relayId : null;
+    return s && this.online(s.relayId) ? s.relayId : null;
   }
 
   pruneSlots() {
@@ -525,12 +532,15 @@ export class Relay {
    */
   openTunnel(relayId, meta = {}, timeoutMs = 10_000) {
     const h = this.hosts.get(relayId);
-    if (!h) return Promise.reject(Object.assign(new Error('offline'), { status: 503 }));
+    if (!h || !this.online(relayId)) return Promise.reject(Object.assign(new Error('offline'), { status: 503 }));
     if (h.tunnels >= 64 || this.tunnels >= MAX_TUNNELS) return Promise.reject(Object.assign(new Error('busy'), { status: 503 }));
     const nonce = crypto.randomBytes(18).toString('base64url');
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(nonce);
+        // Its connection is open but nothing answers on it (it just fell asleep): it's offline from now on, so
+        // viewers wait for it to connect again instead of asking it again. (A device that's merely slow reconnects.)
+        if (this.hosts.get(relayId) === h) { log(`relay: '${h.name}' didn't answer; dropping its connection`); h.link.destroy(); }
         reject(Object.assign(new Error('the device didn\'t answer'), { status: 504 }));
       }, timeoutMs);
       this.pending.set(nonce, {
