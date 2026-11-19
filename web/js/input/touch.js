@@ -2,11 +2,12 @@
 //
 // Trackpad mode (Remote Desktop's "mouse pointer" mode: the finger moves the pointer):
 //   slide                                      move the pointer (gently accelerated)
-//   tap                                        left-click (tap tap: double-click)
-//   double-tap and hold, then drag             left-click drag (hold, then drag: the same)
-//   triple-tap and hold, then drag             double-click drag
+//   tap / tap tap / tap tap tap                left-click / double-click / triple-click
+//   ... then touch and drag                    a drag with that click: in text, by character / word / paragraph
+//                                              (the first is Remote Desktop's "double-tap and hold, then drag";
+//                                              hold, then drag is the same)
 //   two-finger tap, or tap and hold            right-click
-//   two-finger double-tap and hold, then drag  right-click drag
+//   two-finger tap, then touch and drag        right-click drag ("double-tap and hold with two fingers, then drag")
 //   two-finger slide (held first or not)       mouse wheel, with momentum
 //   pinch                                      zoom the view (it follows the pointer)
 //   three-finger slide / tap                   pan the view / keyboard
@@ -17,20 +18,23 @@
 //
 // A tap's click goes out the moment the finger lifts: nothing waits to see what comes next. So in "double-tap and
 // hold, then drag" the drag's press comes right after a click on the same spot, which the computer would count as
-// a double click (a window zooms instead of following): the press starts a few points along the drag instead. The
-// second tap of a double tap (or a later one) keeps its click down for TAP_AGAIN_MS: a touch by then that drags
-// carries that press on, so the computer sees a double-click drag (words selected one by one, say), as with a mouse.
+// a double click (a window zooms instead of following): the press starts a few points along the drag instead.
+// Taps the computer counts as a double or triple click (by its own rule: see MULTI_CLICK_MS) keep the button down
+// for TAP_AGAIN_MS: a touch by then that drags carries that press on, so tap tap, then drag selects word by word and
+// tap tap tap, then drag paragraph by paragraph, as with a mouse.
 import * as P from '../protocol.js';
 
 const SLOP = 9;              // px before a touch counts as movement
 const TAP_MS = 280;
 const HOLD_MS = 450;
-// A touch this soon after a tap carries it on: dragging makes it a click-drag (after a double tap, a double-click
-// drag; with two fingers, a right-click drag). Laptop trackpads give 150–180 ms.
-const TAP_AGAIN_MS = 150;
-// Touch mode: a tap this soon after another, and this near it, lands where that one did, so the computer counts a
-// double click although a finger never lands on the same spot twice.
-const DOUBLE_TAP_MS = 320;
+// A touch this soon after a tap carries it on: dragging makes it a click-drag, or after taps the computer counted
+// as a double or triple click, a double- or triple-click drag. (150 ms was too quick for real double taps.)
+const TAP_AGAIN_MS = 350;
+// The computer counts a click this soon after the last one, and this near it, as that one's double (then triple)
+// click: Macs and Windows do by default (the Mac host counts within 5 points; Windows, a few pixels). Touch mode makes
+// a tap this soon after another, and within DOUBLE_TAP_PX of it, land where that one did, as a finger never lands on
+// the same spot twice.
+const MULTI_CLICK_MS = 500, MULTI_CLICK_PT = 5;
 const DOUBLE_TAP_PX = 36;
 // A drag's press this soon after a click of the same button, and nearer to it than this many of the computer's
 // points, starts that far from it instead (see the top): past a Mac's 5 points and Windows' 2 pixels for a double-click.
@@ -51,7 +55,7 @@ export class TouchInput {
     this.lastTap = null;             // { t, x, y }: when and where (on the screen here) the last tap was
     this.lastTap2 = null;            // the same for the last two-finger tap
     this.held = null;                // a double tap's click, its release waiting TAP_AGAIN_MS: { tx, ty, timer }
-    this.lastPress = null;           // the last press sent: { b (button), t, nx, ny }
+    this.lastPress = null;           // the last press sent: { b (button), t, nx, ny, n (its click count) }
     this.cursor = { nx: 0.5, ny: 0.5 };
     this.cursorLocalAt = 0;
     this.buttonDown = false;         // the left button
@@ -120,8 +124,20 @@ export class TouchInput {
     this._send(P.mouseButton(b, down));
     if (b === 0) this.buttonDown = down;
     if (b === 2) this.rightDown = down;
-    if (down) this.lastPress = { b, t: performance.now(), nx: this.cursor.nx, ny: this.cursor.ny };
+    if (down) {
+      const now = performance.now();
+      this.lastPress = { b, t: now, nx: this.cursor.nx, ny: this.cursor.ny, n: b === 0 ? this._clickCount(now) : 1 };
+    }
     if (!down) this.ctx.mods?.releaseAfterClick();
+  }
+
+  /** What the computer will count a left press now, at the pointer, as: 1, or 2 and 3 for a double and triple click. */
+  _clickCount(now) {
+    const p = this.lastPress, v = this.ctx.viewport;
+    if (!p || p.b !== 0 || now - p.t > MULTI_CLICK_MS || !v.srcW) return 1;
+    const r = MULTI_CLICK_PT * Math.max(1, this.ctx.screenScale?.() || 1); // in the computer's pixels
+    const d = Math.hypot((this.cursor.nx - p.nx) * v.srcW, (this.cursor.ny - p.ny) * v.srcH);
+    return d < r ? Math.min(3, p.n + 1) : 1;
   }
 
   /**
@@ -151,8 +167,17 @@ export class TouchInput {
   }
 
   /**
-   * A left click whose release waits TAP_AGAIN_MS (a double tap's second click, or a later one): a touch near
-   * (tx, ty) by then that drags carries the press on, so the computer sees a double-click drag.
+   * A tap's left click (shown at x, y; the finger was at tx, ty). One the computer will count as a double or triple
+   * click keeps the button down for TAP_AGAIN_MS (see _holdClick); any other goes out whole, at once.
+   */
+  _tapClick(now, x, y, tx, ty) {
+    if (this._clickCount(now) > 1) this._holdClick(x, y, tx, ty);
+    else this._click(0, x, y, 'left');
+  }
+
+  /**
+   * A left click whose release waits TAP_AGAIN_MS: a touch near (tx, ty) by then that drags carries the press on,
+   * so the computer sees a double- or triple-click drag.
    */
   _holdClick(x, y, tx, ty) {
     this._button(0, true);
@@ -428,24 +453,22 @@ export class TouchInput {
           this.lastTap = null;
           return;
         }
-        // A tap. Right after another (a double tap, or more) it holds its click a moment, for a double-click drag.
+        // A tap: a click (a double or triple click holds its press a moment: see _tapClick).
         this._letGo();
         this.lastTap2 = null;
         if (this.mode === 'trackpad') {
           const p = this._cursorClient();
-          if (g.armedDrag) this._holdClick(p.x, p.y, t.sx, t.sy);
-          else this._click(0, p.x, p.y, 'left');
+          this._tapClick(now, p.x, p.y, t.sx, t.sy);
           this.lastTap = { t: now, x: t.sx, y: t.sy };
         } else {
           // Direct: a second tap near the first reuses its position so double-clicks register.
           let x = t.sx, y = t.sy;
-          if (this.lastTap && now - this.lastTap.t < DOUBLE_TAP_MS && Math.hypot(x - this.lastTap.x, y - this.lastTap.y) < DOUBLE_TAP_PX) {
+          if (this.lastTap && now - this.lastTap.t < MULTI_CLICK_MS && Math.hypot(x - this.lastTap.x, y - this.lastTap.y) < DOUBLE_TAP_PX) {
             x = this.lastTap.x; y = this.lastTap.y;
           }
           const r = this.ctx.viewport.toRemote(x, y);
           this._moveTo(r.nx, r.ny);
-          if (g.armedDrag) this._holdClick(x, y, x, y);
-          else this._click(0, x, y, 'left');
+          this._tapClick(now, x, y, x, y);
           this.lastTap = { t: now, x, y };
         }
         return;
