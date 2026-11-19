@@ -45,7 +45,7 @@ export const DEFAULT_PREFS = {
   inputMode: 'auto',        // auto | trackpad | touch
   keyboardProfile: 'auto',  // auto | mac | pc | cmdctrl
   scaling: 'fit',           // fit | actual | fill
-  maxFps: 60,
+  maxFps: 15,               // a quarter of 60's frames to send; the hosts sharpen the picture once it stops moving
   maxBitrateKbps: 0,        // 0 = host maximum (adaptive)
   resolution: 'auto',       // auto (as big as it's shown here: see Session._autoSize) | native | 1440 | 1080 | 720
   audio: true,
@@ -56,7 +56,21 @@ export const DEFAULT_PREFS = {
   typingHidden: false,      // what you type on a phone's keyboard shows as dots above the keys (saved for every computer)
 };
 
+// 15 frames a second became the default (version 2). Frame rates saved before then are let go once, so everyone
+// starts there; one picked after that stays.
+const PREFS_VERSION_KEY = 'headroom.prefs.version';
+function migratePrefs() {
+  try {
+    if (Number(localStorage.getItem(PREFS_VERSION_KEY) || 1) >= 2) return;
+    const all = read(PREFS_KEY, {});
+    for (const k of Object.keys(all)) if (all[k] && typeof all[k] === 'object') delete all[k].maxFps;
+    write(PREFS_KEY, all);
+    localStorage.setItem(PREFS_VERSION_KEY, '2');
+  } catch { }
+}
+
 export function loadPrefs(hostId) {
+  migratePrefs();
   const all = read(PREFS_KEY, {});
   return { ...DEFAULT_PREFS, ...(all.global || {}), ...(hostId ? all[hostId] || {} : {}) };
 }

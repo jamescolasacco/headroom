@@ -602,7 +602,7 @@ function viewSettings() {
       switchRow('Sound', null, st.settings.audio.enabled, x => saveSettings({ audio: x }), 'set:sound')),
     h('div', { class: 'card' }, h('h3', {}, 'Picture quality'),
       row('Encoder', sel(v.encoder, [['auto', 'Automatic'], ['hardware', 'Hardware only'], ['software', 'Software']], x => saveSettings({ encoder: x }), 'set:encoder')),
-      row('Maximum frame rate', sel(v.maxFps, [[30, '30 fps'], [60, '60 fps'], [120, '120 fps'], [144, '144 fps'], [240, '240 fps']], x => saveSettings({ maxFps: +x }), 'set:fps')),
+      row('Maximum frame rate', sel(v.maxFps, [[15, '15 fps'], [30, '30 fps'], [60, '60 fps'], [120, '120 fps'], [144, '144 fps'], [240, '240 fps']], x => saveSettings({ maxFps: +x }), 'set:fps')),
       row('Maximum bitrate', sel(v.maxBitrateKbps, [[10000, '10 Mb/s'], [20000, '20 Mb/s'], [40000, '40 Mb/s'], [80000, '80 Mb/s'], [150000, '150 Mb/s']], x => saveSettings({ maxBitrateKbps: +x }), 'set:bitrate'))),
     mac() ? permissionsCard() : null,
     h('div', { class: 'card' }, h('h3', {}, 'About'), h('dl', { class: 'kv' },

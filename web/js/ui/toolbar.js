@@ -397,7 +397,7 @@ export class Toolbar {
       const more = h('details', {}, h('summary', {}, 'Picture and network'));
       const advanced = node => more.append(node);
       advanced(row('Frame rate (fps)', segmented([
-        { value: 30, label: '30' }, { value: 60, label: '60' }, { value: 120, label: '120' }, { value: 144, label: '144' },
+        { value: 15, label: '15' }, { value: 30, label: '30' }, { value: 60, label: '60' }, { value: 120, label: '120' }, { value: 144, label: '144' },
       ], p.maxFps, v => s.setPref('maxFps', v))));
       advanced(row('Bandwidth (Mb/s)', segmented([
         { value: 0, label: 'Auto' }, { value: 5000, label: '5' }, { value: 12000, label: '12' }, { value: 25000, label: '25' }, { value: 50000, label: '50' },
