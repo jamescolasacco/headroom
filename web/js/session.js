@@ -88,7 +88,7 @@ export class Session {
     const inputAllowed = () => this.permissions.input && this.conn.isOpen;
     const onUserGesture = () => { this.clipboard.onUserGesture(); this.audio.ctx?.state === 'suspended' && this.audio.ctx.resume().catch(() => { }); };
 
-    // What you type on a phone's keyboard, shown above the keys while you type (the eye on the keys bar hides it).
+    // What you type on a phone's keyboard, in a box on top of the keys while the keyboard is up (its eye hides it).
     this.typing = new TypingPreview($('typing'));
     this.typing.setHidden(this.prefs.typingHidden === true);
     this.typing.setHost(this.hostOs);
@@ -114,6 +114,7 @@ export class Session {
       keyboard: this.keyboard, mods: this.mods, conn: this.conn,
       onLayout: () => this.layoutChrome(),
       onKey: code => this.typing.key(code),
+      typingEl: $('typing'),
       onHideText: on => this._hideTypedText(on),
       onHideKeyboard: () => this.softkbd.hide(),
       keyboardUp: () => this.softkbd.open && document.activeElement === sink,
@@ -469,31 +470,29 @@ export class Session {
     this._covered = vv ? Math.max(0, document.documentElement.clientHeight - vv.offsetTop - vv.height) : 0;
     this.layoutChrome();
     this.viewport.layout();
-    // The keyboard just came up: bring the pointer (where you clicked to type) into view above it, and above
-    // what you type (ui/typing.js).
+    // The keyboard just came up: bring the pointer (where you clicked to type) into view above it.
     if (this.viewport.keyboard && performance.now() < (this._followUntil || 0)) {
       const n = this.cursor.normalized;
-      this.viewport.follow(n.nx, n.ny, 96);
+      this.viewport.follow(n.nx, n.ny, 72);
     }
   }
 
   /**
-   * Where the session's own bars go, and the room they leave the picture: the extra keys at the bottom, and on
-   * touch screens the toolbar above them (or nothing, while the on-screen keyboard is up), clear of the status bar
-   * or notch at the top. Runs when any of them changes size and when the visible area does.
+   * Where the session's own bars go, and the room they leave the picture: the extra keys at the bottom (with what you
+   * type on top of them while the on-screen keyboard is up), and on touch screens the toolbar above them (or nothing,
+   * while the keyboard is up), clear of the status bar or notch at the top. Runs when any of them changes size and
+   * when the visible area does.
    */
   layoutChrome() {
     const v = this.viewport;
     if (!v || !this.extraKeys) return;
     const keys = this.extraKeys.visible ? this.extraKeys.el.offsetHeight : 0;
     v.viewer.style.setProperty('--keys-h', `${keys}px`);
-    v.viewer.style.setProperty('--room', `${Math.max(0, v.viewer.clientHeight - keys)}px`); // above the keys (typing.js)
     const top = this.toolbar?.touchUi ? this._safeTop() : 0;
     const bar = this.toolbar ? this.toolbar.place(keys, top) : 0;
     v.setInsets(top, Math.max(keys, bar));
-    // Messages sit above the keyboard, the toolbar and the extra keys, and above what you type while you type.
-    const typing = this.softkbd?.open ? 52 : 0;
-    document.documentElement.style.setProperty('--inset-bottom', `${Math.round((this._covered || 0) + v.insetBottom + typing)}px`);
+    // Messages sit above the keyboard, the toolbar and the extra keys.
+    document.documentElement.style.setProperty('--inset-bottom', `${Math.round((this._covered || 0) + v.insetBottom)}px`);
   }
 
   /** The status bar or notch at the top of a phone (env(safe-area-inset-top)): the picture keeps clear of it. */
@@ -506,13 +505,12 @@ export class Session {
     return this._safeProbe.offsetHeight;
   }
 
-  /** The eye on the keys bar: what you type shows as dots above the keys (a password), or as text. For every computer. */
+  /** The eye in the typing box: what you type shows as dots (a password), or as text. Kept for every computer. */
   _hideTypedText(on) {
     this.prefs.typingHidden = on;
     savePrefs('global', { typingHidden: on });
     this.typing.setHidden(on);
     this.extraKeys.setTextHidden(on);
-    toast(on ? 'What you type shows as dots' : 'What you type shows as text', 2600);
   }
 
   /** While a session is up, pinching zooms the remote screen, never the page (that would throw the layout off). */
@@ -712,7 +710,7 @@ export class Session {
     window.visualViewport?.removeEventListener('resize', this._onScreen);
     window.visualViewport?.removeEventListener('scroll', this._onScreen);
     this._lockPageZoom(false);
-    for (const k of ['top', 'left', 'width', 'height', 'right', 'bottom', '--keys-h', '--room', '--inset-bottom']) $('viewer').style.removeProperty(k);
+    for (const k of ['top', 'left', 'width', 'height', 'right', 'bottom', '--keys-h', '--inset-bottom']) $('viewer').style.removeProperty(k);
     document.documentElement.style.removeProperty('--inset-bottom');
     const leave = () => {
       $('overlay').hidden = true;

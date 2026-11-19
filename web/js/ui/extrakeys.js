@@ -2,8 +2,9 @@
 //   tap = held for the next key or click (tap again: off), double-tap = locked until tapped off.
 // A key goes on a tap: a swipe along the bar scrolls it and presses nothing (holding an arrow, del, pgup or pgdn
 // still repeats it). Labels follow the host: a Mac host gets control/option/⌘ and Force Quit instead of Ctrl+Alt+Del.
-// While the on-screen keyboard is up, the end of the bar holds two buttons that stay put while the keys scroll:
-// the eye (hides the text you type, shown above the keys, as dots: ui/typing.js) and Hide keyboard.
+// While the on-screen keyboard is up, the bar is a dock of two rows, as in VNC Viewer: on top what you type
+// (ui/typing.js), in a box with the eye inside it (shows the text as dots, for a password) and Hide keyboard beside
+// it; under it the keys. The picture sits above the whole dock. A phone on its side puts all of it in one row.
 import { h, svg } from './dom.js';
 
 const LOCK_TAP_MS = 500;        // two taps on a modifier this close lock it (a double-click's time on the computer)
@@ -92,11 +93,11 @@ const KEYS = [
 
 export class ExtraKeysBar {
   /**
-   * @param {object} o { keyboard, mods, conn, onLayout(px), onKey(code) (a key went to the computer),
-   *   onHideText(on) (the eye), onHideKeyboard(), keyboardUp() (the on-screen keyboard's input has focus),
-   *   reopenKeyboard() (focus it again, from inside a tap) }
+   * @param {object} o { keyboard, mods, conn, onLayout(px), onKey(code) (a key went to the computer), typingEl (the
+   *   box what you type shows in: ui/typing.js), onHideText(on) (the eye), onHideKeyboard(), keyboardUp() (the
+   *   on-screen keyboard's input has focus), reopenKeyboard() (focus it again, from inside a tap) }
    */
-  constructor(el, { keyboard, mods, conn, onLayout, onKey, onHideText, onHideKeyboard, keyboardUp, reopenKeyboard }) {
+  constructor(el, { keyboard, mods, conn, onLayout, onKey, typingEl, onHideText, onHideKeyboard, keyboardUp, reopenKeyboard }) {
     this.el = el;
     this.keyboard = keyboard;
     this.mods = mods;
@@ -107,10 +108,14 @@ export class ExtraKeysBar {
     this.macHost = false;
     this.keyboardOpen = false; // the on-screen keyboard is up (the session says: setKeyboardOpen)
     this.keys = h('div', { class: 'xk-keys', role: 'group', 'aria-label': 'Extra keys' });
-    this.eyeBtn = this._endButton('Hide typed text', () => onHideText?.(!this.textHidden));
-    this.end = h('div', { class: 'xk-end', hidden: true },
-      this.eyeBtn, this._endButton('Hide keyboard', () => { this.hideAsked = true; onHideKeyboard?.(); }, HIDE_KEYBOARD));
-    el.replaceChildren(this.keys, this.end);
+    this.typeBox = typingEl || h('div');
+    this.typeBox.classList.add('xk-type');
+    this.typeBox.hidden = true;
+    this.eyeBtn = this._endButton('Hide typed text', () => onHideText?.(!this.textHidden), null, 'xk-eye');
+    this.typeBox.append(this.eyeBtn);
+    this.hideBtn = this._endButton('Hide keyboard', () => { this.hideAsked = true; onHideKeyboard?.(); }, HIDE_KEYBOARD, 'xk xk-icon xk-hide');
+    this.hideBtn.hidden = true;
+    el.replaceChildren(this.typeBox, this.keys, this.hideBtn);
     this.setTextHidden(false);
     this._render();
     mods.addEventListener('change', () => this._sync());
@@ -127,11 +132,11 @@ export class ExtraKeysBar {
   }
 
   /**
-   * A button at the end of the bar. A tap acts when the finger lifts on it (its click is cancelled: see the
-   * constructor); a mouse, Enter or Space click it.
+   * The eye or Hide keyboard. A tap acts when the finger lifts on it (its click is cancelled: see the constructor); a
+   * mouse, Enter or Space click it.
    */
-  _endButton(label, onClick, icon) {
-    const b = h('button', { type: 'button', class: 'xk xk-icon', 'aria-label': label, title: label }, icon ? svg(icon) : null);
+  _endButton(label, onClick, icon, cls) {
+    const b = h('button', { type: 'button', class: cls, 'aria-label': label, title: label }, icon ? svg(icon) : null);
     let tappedAt = -1e9;
     b.addEventListener('pointerdown', e => e.preventDefault());
     b.addEventListener('touchend', e => {
@@ -145,16 +150,19 @@ export class ExtraKeysBar {
     return b;
   }
 
-  /** The eye: open while the text you type shows above the keys, struck through while it's hidden as dots. */
+  /** The eye: open while the text you type shows, struck through while it's hidden as dots. */
   setTextHidden(on) {
     this.textHidden = on;
     this.eyeBtn.replaceChildren(svg(on ? EYE_OFF : EYE));
     this.eyeBtn.setAttribute('aria-pressed', String(on));
   }
 
+  /** The on-screen keyboard came up (the dock gets the typing row) or went away (just the keys, if they stay). */
   setKeyboardOpen(open) {
     this.keyboardOpen = open;
-    this.end.hidden = !open;
+    this.el.classList.toggle('typing-on', open);
+    this.typeBox.hidden = !open;
+    this.hideBtn.hidden = !open;
     this.position();
   }
 

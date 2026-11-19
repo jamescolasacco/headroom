@@ -651,21 +651,26 @@ button.task-row:not(:disabled):not([aria-disabled="true"]):active { transform: n
 .progress { height: 4px; border-radius: 2px; background: var(--rim-strong); overflow: hidden; margin: 4px 12px 10px; }
 .progress > div { height: 100%; width: 100%; background: var(--l-dot); transform: scaleX(0); transform-origin: left; transition: transform .15s linear; }
 
-/* extra keys bar (sits above the iOS keyboard; positioned from visualViewport in JS): the keys scroll sideways,
-   the eye and Hide keyboard at its end stay put */
+/* extra keys bar (sits above the iOS keyboard; positioned from visualViewport in JS). While the keyboard is up it's a
+   dock of two rows, as in VNC Viewer: what you type in a box (its eye inside) with Hide keyboard beside it, then the
+   keys, which scroll sideways. A phone on its side has room for one row: box, keys, Hide keyboard. */
 .extra-keys {
-  position: absolute; left: 0; right: 0; bottom: 0; z-index: 12; display: flex;
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 12;
+  display: grid; grid-template-columns: minmax(0, 1fr); grid-template-areas: "keys"; gap: 6px 8px;
   padding: 6px calc(6px + var(--sar)) calc(6px + var(--sab)) calc(6px + var(--sal));
   background: rgba(12, 15, 21, .92); box-shadow: inset 0 1px 0 var(--rim);
   backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
 }
-.xk-keys { flex: 1 1 auto; min-width: 0; display: flex; gap: 5px; overflow-x: auto; scrollbar-width: none; touch-action: pan-x; overscroll-behavior-x: contain; }
+.extra-keys.typing-on { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "type hide" "keys keys"; }
+@media (min-aspect-ratio: 3/2) and (max-height: 520px) {
+  .extra-keys.typing-on { grid-template-columns: minmax(170px, 34%) minmax(0, 1fr) auto; grid-template-areas: "type keys hide"; }
+}
+.xk-keys { grid-area: keys; min-width: 0; display: flex; gap: 5px; overflow-x: auto; scrollbar-width: none; touch-action: pan-x; overscroll-behavior-x: contain; }
 .xk-keys::-webkit-scrollbar { display: none; }
-.xk-end { flex: none; display: flex; gap: 10px; margin-left: 6px; padding-left: 6px; box-shadow: inset 1px 0 0 var(--rim-strong); } /* apart: a tap meant for the eye doesn't close the keyboard */
-.xk-end[hidden] { display: none; }
 #extra-keys .xk-icon { display: grid; place-items: center; padding: 0; color: var(--ink-2); } /* (beats the icon-and-label button's start padding) */
 .xk-icon svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.xk-icon[aria-pressed="true"] { color: var(--light); }
+.xk-hide { grid-area: hide; }
+.xk-hide[hidden] { display: none; }
 .xk { flex: 0 0 auto; min-width: 44px; min-height: 40px; height: 40px; padding: 0 10px; border-radius: 10px; background: rgba(238, 241, 246, .09); border: 1px solid transparent; box-shadow: inset 0 1px 0 rgba(255, 255, 255, .06); color: var(--ink); font-size: var(--t-label); font-weight: 500; }
 /* a held modifier is "on": lit */
 .xk.mod[data-state="once"] { background: rgba(169, 220, 255, .22); color: #fff; box-shadow: inset 0 0 0 1px rgba(169, 220, 255, .5); }
@@ -673,30 +678,34 @@ button.task-row:not(:disabled):not([aria-disabled="true"]):active { transform: n
 .xk.xk-wide { min-width: 64px; }
 .xk-sep { flex: 0 0 1px; background: var(--rim-strong); margin: 6px 2px; }
 
-/* what you type on the on-screen keyboard, just above the keys while you type (ui/typing.js) */
+/* what you type on the on-screen keyboard, in a box on top of the keys (ui/typing.js), like a text field: the
+   computer's cursor is at the end of it, and its eye (ui/extrakeys.js) hides the text as dots */
 .typing {
-  /* 8px above the keys, closer when there's little room above them (a phone on its side, in Safari) */
-  position: absolute; z-index: 13; left: 50%; bottom: calc(var(--keys-h, 0px) + clamp(0px, var(--room, 100px) - 42px, 8px));
-  width: min(640px, calc(100% - 16px - var(--sal) - var(--sar))); height: min(42px, var(--room, 42px)); padding: 0 14px;
-  display: flex; align-items: center; border-radius: 12px;
-  background: rgba(12, 15, 21, .88); color: var(--ink); font: 400 var(--t-body)/1.3 var(--font);
-  box-shadow: inset 0 0 0 1px var(--rim), 0 10px 28px rgba(0, 0, 0, .45);
-  backdrop-filter: blur(14px) saturate(150%); -webkit-backdrop-filter: blur(14px) saturate(150%);
-  opacity: 0; visibility: hidden; transform: translateX(-50%);
-  transition: opacity .15s var(--ease-out), transform .15s var(--ease-out), visibility 0s linear .15s;
+  grid-area: type; min-width: 0; display: flex; align-items: center; height: 40px; padding: 0 2px 0 12px;
+  border-radius: 10px; background: rgba(0, 0, 0, .38); box-shadow: inset 0 0 0 1px var(--rim-strong);
+  color: var(--ink); font: 400 var(--t-body)/1.3 var(--font);
 }
-.typing.shown { opacity: 1; visibility: visible; transition-delay: 0s; }
-@media (prefers-reduced-motion: no-preference) { .typing:not(.shown) { transform: translate(-50%, 6px); } }
+.typing[hidden] { display: none; }
 .typed { flex: 1; min-width: 0; overflow: hidden; white-space: pre; }
 .typing.clipped .typed { -webkit-mask-image: linear-gradient(to right, transparent, #000 32px); mask-image: linear-gradient(to right, transparent, #000 32px); }
-.typing.dots .typed { letter-spacing: .14em; } /* hidden text (the eye): dots, spaced like a password field's */
-/* the computer's cursor is at the end of it */
-.typed::after { content: ""; display: inline-block; width: 2px; height: 1.15em; margin-left: 1px; vertical-align: -0.2em; border-radius: 1px; background: var(--light); }
-@media (prefers-reduced-motion: no-preference) { .typing.shown .typed::after { animation: caret 1.06s steps(1) infinite; } }
+.typing.dots .typed { letter-spacing: .14em; } /* hidden (the eye): dots, spaced like a password field's */
+.typed::after, .typing.blank .typed::before {
+  content: ""; display: inline-block; width: 2px; height: 1.15em; margin-left: 1px; vertical-align: -0.2em; border-radius: 1px; background: var(--light);
+}
+.typing.blank .typed::after { content: none; }
+.typing.blank .typed::before { margin: 0 4px 0 0; }
+.typed-hint { color: var(--ink-3); }
+@media (prefers-reduced-motion: no-preference) { .typed::after, .typing.blank .typed::before { animation: caret 1.06s steps(1) infinite; } }
 @keyframes caret { 50% { opacity: 0; } }
 /* a shortcut it sent (a modifier held on the keys bar): a key, lit like the held modifier */
 .typed kbd { display: inline-block; margin: 0 2px; padding: 3px 6px; border-radius: 6px; font: 500 var(--t-meta)/1 var(--font); vertical-align: 1px;
   color: var(--light); background: rgba(169, 220, 255, .14); box-shadow: inset 0 0 0 1px rgba(169, 220, 255, .45); }
+.xk-eye {
+  flex: none; width: 36px; height: 36px; min-height: 36px; padding: 0; border: 0; border-radius: 8px; background: transparent;
+  display: grid; place-items: center; color: var(--ink-2);
+}
+.xk-eye svg { width: 22px; height: 22px; stroke-width: 1.8; }
+.xk-eye[aria-pressed="true"] { color: var(--light); } /* hiding the text is on */
 
 .stats {
   position: absolute; left: calc(8px + var(--sal)); bottom: calc(8px + max(var(--sab), var(--inset-bottom, 0px))); z-index: 11; pointer-events: none;
