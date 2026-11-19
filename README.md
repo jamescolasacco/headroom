@@ -246,7 +246,8 @@ docs/PROTOCOL.md              wire protocol (the contract for other hosts)
 docs/ACCOUNTS.md              accounts: setup, trust model, API
 docs/RELAY.md                 the relay, guest codes, putting the server on the internet
 tools/                        publish / install / uninstall scripts (Windows .ps1, macOS .sh), icon generator,
-                              protocol-check.mjs and account-check.mjs (headless end-to-end tests of any host)
+                              protocol-check.mjs, account-check.mjs and stream-check.mjs (headless end-to-end
+                              tests of any host)
 ```
 
 ## Development
@@ -274,7 +275,11 @@ Development switches:
 `node tools/protocol-check.mjs` (run on the host) connects as a guest with a code through the relay, accepts
 itself, streams video, checks keyframes, epochs, acks, pings, stats, permission changes, resuming and Stop, and
 validates the received H.264 with ffprobe. `node tools/account-check.mjs` signs the host in to an account and
-connects through the relay as one of your devices. Both work against either host.
+connects through the relay as one of your devices. `node tools/stream-check.mjs` measures what a viewer gets:
+frame rate, bitrate and the host's target, delay, resolution and the encoder's QP (with ffmpeg), optionally on
+a simulated longer path (`--ack-delay`, `--link-kbps`); the Mac host started with `--test-pattern` and
+`HEADROOM_TEST_PATTERN_STYLE=desktop` shows a scrolling page of text instead of colour bars. All three work against
+either host.
 
 ## Roadmap
 

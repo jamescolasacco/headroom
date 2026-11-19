@@ -123,6 +123,10 @@ jobs:
         run: node tools/account-check.mjs --account=http://127.0.0.1:8780 --email=ci-test@example.com --password=quartz-lantern-ferry-81 --register
       - name: Guest code and protocol check
         run: node tools/protocol-check.mjs --url=http://127.0.0.1:7080 --seconds=4 --out="$RUNNER_TEMP/check.h264"
+      - name: Stream check (a viewer on an 80 ms path keeps its bitrate)
+        # A stream that sends little (the screen barely changes) on a path over ~60 ms once looked congested and
+        # fell to its 800 kbps floor: blurry over any relay. Fails if the host's target drops under 6 Mb/s.
+        run: node tools/stream-check.mjs --url=http://127.0.0.1:7080 --seconds=10 --ack-delay=80 --ack-jitter=10 --link-kbps=20000 --min-target-kbps=6000 --out="$RUNNER_TEMP/stream.h264" --quiet
       - name: Host log
         if: always()
         run: tail -n 60 "$RUNNER_TEMP/host.log" || true
