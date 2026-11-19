@@ -309,6 +309,8 @@ function serveStatic(req, res) {
   if (p.endsWith('/')) p += 'index.html';
   // The settings page belongs to the computers, not here.
   if (p === '/admin.html' || p === '/js/admin.js' || p === '/css/admin.css') return false;
+  // Where iPhones (and link previews) look for the home screen icon before reading the page.
+  if (p === '/apple-touch-icon.png' || p === '/apple-touch-icon-precomposed.png') p = '/icons/apple-touch-icon.png';
   let file = path.join(WEB_ROOT, path.normalize(p));
   if (!file.startsWith(WEB_ROOT + path.sep)) return false;
   if (!fs.existsSync(file) || fs.statSync(file).isDirectory()) {

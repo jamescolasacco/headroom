@@ -183,6 +183,20 @@ def macos_icns(out_path):
     print("wrote", out_path)
 
 
+def inline_manifest_icon(png_path, manifest_path):
+    """The web app manifest carries the 180 px icon inside it (a data: URL), first in its list. iPhones make the Home
+    Screen icon from the manifest, and fetch a file icon only when Add to Home Screen opens: until it arrives they show
+    a letter tile, and Add tapped before then keeps that letter for good. Inline, it's there at once."""
+    import base64
+    import json
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    data = "data:image/png;base64," + base64.b64encode(png_path.read_bytes()).decode()
+    icons = [i for i in manifest.get("icons", []) if not i["src"].startswith("data:")]
+    manifest["icons"] = [{"src": data, "sizes": "180x180", "type": "image/png", "purpose": "any"}] + icons
+    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print("wrote", manifest_path, "(its inline icon)")
+
+
 def main():
     import sys
     if "--macos" in sys.argv:  # only the macOS icon (fast path for tools/build-macos.sh)
@@ -197,6 +211,7 @@ def main():
     ]:
         png(OUT / name, size, size, render(size, maskable, rounded))
         print("wrote", OUT / name)
+    inline_manifest_icon(OUT / "apple-touch-icon.png", OUT.parent / "manifest.webmanifest")
     # Windows app / tray icons
     assets = OUT.parent.parent / "assets"
     assets.mkdir(exist_ok=True)
