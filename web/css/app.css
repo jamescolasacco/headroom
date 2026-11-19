@@ -695,6 +695,9 @@ button.task-row:not(:disabled):not([aria-disabled="true"]):active { transform: n
 .typing.blank .typed::after { content: none; }
 .typing.blank .typed::before { margin: 0 4px 0 0; }
 .typed-hint { color: var(--ink-3); }
+.typing:not(.blank) .typed { cursor: copy; } /* a tap on the text copies it */
+.typed-flash { color: var(--light); font-weight: 500; }
+.typing.flash .typed::after { content: none; }
 @media (prefers-reduced-motion: no-preference) { .typed::after, .typing.blank .typed::before { animation: caret 1.06s steps(1) infinite; } }
 @keyframes caret { 50% { opacity: 0; } }
 /* a shortcut it sent (a modifier held on the keys bar): a key, lit like the held modifier */

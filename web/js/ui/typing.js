@@ -3,7 +3,7 @@
 // what went to the computer since you last put the cursor somewhere, ending where the cursor is, and starts over
 // when you click or tap the screen, press Enter, Esc, Tab or an arrow key, or close the keyboard. Shortcuts (a held
 // Ctrl or ⌘ with a letter) show as keys, so a modifier left on is easy to spot. The eye in the box (ui/extrakeys.js)
-// hides the text itself (dots instead, as in a password field) and shows it again.
+// hides the text itself (dots instead, as in a password field) and shows it again; a tap on the text copies it.
 import { h } from './dom.js';
 
 const MAX_UNITS = 200;     // it shows the end of what you typed; older characters are dropped
@@ -78,7 +78,22 @@ export class TypingPreview {
     this._render();
   }
 
+  /** What's shown, as text (the shortcuts left out): what a tap on it copies. Hidden or not, it's the real text. */
+  plain() {
+    return this.units.filter(u => typeof u === 'string').join('');
+  }
+
+  /** A word in place of the text for a moment ("Copied"), then the text again. */
+  flash(word) {
+    clearTimeout(this.flashTimer);
+    this.el.classList.add('flash');
+    this.line.replaceChildren(h('span', { class: 'typed-flash' }, word));
+    this.flashTimer = setTimeout(() => this._render(), 1500);
+  }
+
   _render() {
+    clearTimeout(this.flashTimer);
+    this.el.classList.remove('flash');
     if (this.units.length > MAX_UNITS) this.units.splice(0, this.units.length - MAX_UNITS);
     const empty = !this.units.length;
     this.el.classList.toggle('blank', empty);

@@ -115,6 +115,7 @@ export class Session {
       onLayout: () => this.layoutChrome(),
       onKey: code => this.typing.key(code),
       typingEl: $('typing'),
+      onCopyText: () => this._copyTyped(),
       onHideText: on => this._hideTypedText(on),
       onHideKeyboard: () => this.softkbd.hide(),
       keyboardUp: () => this.softkbd.open && document.activeElement === sink,
@@ -503,6 +504,14 @@ export class Session {
     }
     if (!this._safeProbe.isConnected) document.body.append(this._safeProbe);
     return this._safeProbe.offsetHeight;
+  }
+
+  /** A tap on what you typed copies it, on this device. The box says so for a moment, instead of the text. */
+  _copyTyped() {
+    const text = this.typing.plain();
+    if (!text) return;
+    const done = () => this.typing.flash('Copied'), failed = () => this.typing.flash('Couldn\'t copy');
+    try { navigator.clipboard.writeText(text).then(done, failed); } catch { failed(); }
   }
 
   /** The eye in the typing box: what you type shows as dots (a password), or as text. Kept for every computer. */

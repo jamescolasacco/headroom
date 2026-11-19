@@ -255,7 +255,7 @@ const errorText = ex => {
  * "Got a code?": someone at another computer clicked "Let someone connect" and gave you a 9-digit code (or a
  * link with it). No account needed; they accept you on their screen.
  */
-function codeForm({ inline = false, code = '', onDone, onCancel } = {}) {
+function codeForm({ inline = false, code = '', onDone } = {}) {
   const err = formError();
   const codeIn = h('input', {
     type: 'text', inputmode: 'numeric', autocomplete: 'off', name: 'guest-code', placeholder: '123 456 789', class: 'code-input',
@@ -283,7 +283,7 @@ function codeForm({ inline = false, code = '', onDone, onCancel } = {}) {
     h('h2', {}, 'Got a code?'),
     h('p', { class: 'muted small' }, 'Enter the code from the person at the other computer. They\'ll be asked to accept.'),
     ...(inline ? [codeLabel, codeRow, codeErr] : codeField.nodes), nameWrap, err,
-    inline ? null : h('div', { class: 'actions' }, h('button', { type: 'button', onclick: () => onCancel?.() }, 'Cancel'), submit));
+    inline ? null : h('div', { class: 'actions' }, submit)); // (the dialog's own close button cancels)
   form.addEventListener('submit', async e => {
     e.preventDefault();
     err.textContent = '';
@@ -316,7 +316,7 @@ function codeForm({ inline = false, code = '', onDone, onCancel } = {}) {
 
 function codeFlow(code = '') {
   return dialog((dlg, done) => {
-    const form = codeForm({ code, onDone: () => done(true), onCancel: () => done() });
+    const form = codeForm({ code, onDone: () => done(true) });
     (code ? (form.querySelector('input[name=name]').value ? form.querySelector('button[type=submit]') : form.querySelector('input[name=name]')) : form.querySelector('.code-input')).autofocus = true;
     dlg.append(form);
   });
@@ -854,8 +854,7 @@ function accountPage() {
       h('p', { class: 'muted small' }, 'Computers signed in with Headroom Server. Rename one in Headroom Server on it.'), devices,
       h('h3', { class: 'sub-h' }, 'Settings'), tasks,
       h('div', { class: 'actions' },
-        h('button', { type: 'button', onclick: async () => { done(); await Account.signOut(); signedOutNotice = 'Signed out.'; rebuildSignIn(); renderHome(); $('signin-slot').querySelector('input')?.focus(); } }, 'Sign out'),
-        h('button', { type: 'button', onclick: () => done() }, 'Done'))));
+        h('button', { type: 'button', onclick: async () => { done(); await Account.signOut(); signedOutNotice = 'Signed out.'; rebuildSignIn(); renderHome(); $('signin-slot').querySelector('input')?.focus(); } }, 'Sign out'))));
     if (a.passwordWeak) openTask = 'password';
     drawTasks();
     load();

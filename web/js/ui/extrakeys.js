@@ -4,7 +4,7 @@
 // still repeats it). Labels follow the host: a Mac host gets control/option/⌘ and Force Quit instead of Ctrl+Alt+Del.
 // While the on-screen keyboard is up, the bar is a dock of two rows, as in VNC Viewer: on top what you type
 // (ui/typing.js), in a box with the eye inside it (shows the text as dots, for a password) and Hide keyboard beside
-// it; under it the keys. The picture sits above the whole dock. A phone on its side puts all of it in one row.
+// it (a tap on the text copies it); under it the keys. The picture sits above the whole dock. A phone on its side puts all of it in one row.
 import { h, svg } from './dom.js';
 
 const LOCK_TAP_MS = 500;        // two taps on a modifier this close lock it (a double-click's time on the computer)
@@ -94,10 +94,11 @@ const KEYS = [
 export class ExtraKeysBar {
   /**
    * @param {object} o { keyboard, mods, conn, onLayout(px), onKey(code) (a key went to the computer), typingEl (the
-   *   box what you type shows in: ui/typing.js), onHideText(on) (the eye), onHideKeyboard(), keyboardUp() (the
-   *   on-screen keyboard's input has focus), reopenKeyboard() (focus it again, from inside a tap) }
+   *   box what you type shows in: ui/typing.js), onCopyText() (a tap on the text in it), onHideText(on) (the eye),
+   *   onHideKeyboard(), keyboardUp() (the on-screen keyboard's input has focus), reopenKeyboard() (focus it again,
+   *   from inside a tap) }
    */
-  constructor(el, { keyboard, mods, conn, onLayout, onKey, typingEl, onHideText, onHideKeyboard, keyboardUp, reopenKeyboard }) {
+  constructor(el, { keyboard, mods, conn, onLayout, onKey, typingEl, onCopyText, onHideText, onHideKeyboard, keyboardUp, reopenKeyboard }) {
     this.el = el;
     this.keyboard = keyboard;
     this.mods = mods;
@@ -113,6 +114,8 @@ export class ExtraKeysBar {
     this.typeBox.hidden = true;
     this.eyeBtn = this._endButton('Hide typed text', () => onHideText?.(!this.textHidden), null, 'xk-eye');
     this.typeBox.append(this.eyeBtn);
+    const line = this.typeBox.querySelector('.typed');
+    if (line) { line.title = 'Tap to copy'; this._onTap(line, () => onCopyText?.()); }
     this.hideBtn = this._endButton('Hide keyboard', () => { this.hideAsked = true; onHideKeyboard?.(); }, HIDE_KEYBOARD, 'xk xk-icon xk-hide');
     this.hideBtn.hidden = true;
     el.replaceChildren(this.typeBox, this.keys, this.hideBtn);
@@ -137,17 +140,22 @@ export class ExtraKeysBar {
    */
   _endButton(label, onClick, icon, cls) {
     const b = h('button', { type: 'button', class: cls, 'aria-label': label, title: label }, icon ? svg(icon) : null);
+    this._onTap(b, onClick);
+    return b;
+  }
+
+  /** `fn` on a tap that ends on `el` (on touchend: its click is cancelled), or on a click from a mouse or keyboard. */
+  _onTap(el, fn) {
     let tappedAt = -1e9;
-    b.addEventListener('pointerdown', e => e.preventDefault());
-    b.addEventListener('touchend', e => {
-      const t = e.changedTouches[0], r = b.getBoundingClientRect();
+    el.addEventListener('pointerdown', e => e.preventDefault());
+    el.addEventListener('touchend', e => {
+      const t = e.changedTouches[0], r = el.getBoundingClientRect();
       if (!t || t.clientX < r.left || t.clientX > r.right || t.clientY < r.top || t.clientY > r.bottom) return; // slid off it
       tappedAt = performance.now();
-      onClick();
+      fn();
     });
     // (A click right after a tap is that tap's own, should a browser send it anyway: the eye mustn't flip back.)
-    b.addEventListener('click', () => { if (performance.now() - tappedAt > 700) onClick(); });
-    return b;
+    el.addEventListener('click', () => { if (performance.now() - tappedAt > 700) fn(); });
   }
 
   /** The eye: open while the text you type shows, struck through while it's hidden as dots. */
