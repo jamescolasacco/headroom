@@ -62,8 +62,8 @@ export class Toolbar {
     }
   }
 
-  btn(icon, label, onClick, { pressed, danger, text } = {}) {
-    const b = h('button', { class: 'tb' + (danger ? ' danger' : ''), type: 'button', title: label, 'aria-label': label, 'aria-pressed': pressed != null ? String(!!pressed) : null },
+  btn(icon, label, onClick, { pressed, danger, muted, text } = {}) {
+    const b = h('button', { class: 'tb' + (danger ? ' danger' : '') + (muted ? ' muted' : ''), type: 'button', title: label, 'aria-label': label, 'aria-pressed': pressed != null ? String(!!pressed) : null },
       svg(icon), text ? h('span', {}, text) : null);
     b.addEventListener('click', e => { e.stopPropagation(); onClick(e); this.peek(4000); });
     return b;
@@ -105,7 +105,12 @@ export class Toolbar {
     }
     if (s.permissions.clipboard) t.push({ icon: I.clipboard, label: 'Clipboard', onClick: () => this.clipboardSheet() });
     if (s.permissions.files) t.push({ icon: I.files, label: 'Files', onClick: () => this.filesSheet() });
-    if (s.permissions.audio && s.audio.supported) t.push({ icon: s.prefs.audio ? I.sound : I.mute, label: s.prefs.audio ? 'Mute' : 'Unmute', onClick: () => s.setPref('audio', !s.prefs.audio) });
+    // Sound starts off in every session: the red speaker turns it on.
+    if (s.permissions.audio && s.audio.supported) {
+      t.push(s.audioOn
+        ? { always: true, icon: I.sound, label: 'Mute', onClick: () => s.setAudio(false) }
+        : { always: true, icon: I.mute, label: 'Unmute', muted: true, onClick: () => s.setAudio(true) });
+    }
     if (canFullscreen()) t.push({ icon: s.fullscreen ? I.exitFullscreen : I.fullscreen, label: s.fullscreen ? 'Exit full screen' : 'Full screen', onClick: () => s.toggleFullscreen() });
     t.push({ icon: I.settings, label: 'Settings', onClick: () => this.settingsSheet() });
     return t;
@@ -130,11 +135,14 @@ export class Toolbar {
       const shown = this._compact ? tools.filter(t => t.always) : tools;
       const more = this._compact ? tools.filter(t => !t.always) : [];
       items.push(h('span', { class: 'tb-sep' }));
-      for (const t of shown) items.push(t.el || this.btn(t.icon, t.label, t.onClick, { pressed: t.pressed, text: t.text }));
+      for (const t of shown) items.push(t.el || this.btn(t.icon, t.label, t.onClick, { pressed: t.pressed, muted: t.muted, text: t.text }));
       if (more.length) items.push(this.btn(MORE, 'More', () => this.moreSheet(more)));
     }
     if (this.touchUi) items.push(h('span', { class: 'tb-sep' }), this.btn(FOLD, 'Hide tools', () => this.setCollapsed(true)));
+    // Used from the keyboard, a button that redraws the bar (Unmute, Keyboard…) keeps focus where it was.
+    const at = this.el.classList.contains('kbd') ? [...this.el.querySelectorAll('button')].indexOf(document.activeElement) : -1;
     this.el.replaceChildren(...items);
+    if (at >= 0) { const b = this.el.querySelectorAll('button'); b[Math.min(at, b.length - 1)]?.focus({ preventScroll: true }); }
     this.s.layoutChrome?.();
   }
 

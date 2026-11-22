@@ -1,6 +1,7 @@
 // System audio: Opus packets -> WebCodecs AudioDecoder -> AudioWorklet ring buffer.
-// The AudioContext must be created/resumed inside a user gesture (iOS), so unlock() is called from the
-// "connect" tap. navigator.audioSession 'playback' makes iOS ignore the silent switch.
+// The AudioContext must be created/resumed inside a user gesture (iOS), so unlock() is called from the toolbar's
+// Unmute tap, and close() (Mute) lets go of the device's audio. navigator.audioSession 'playback' makes iOS
+// ignore the silent switch.
 import { hasAudioDecoder } from '../platform.js';
 
 export class AudioPlayer {
@@ -25,26 +26,29 @@ export class AudioPlayer {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) { this.supported = false; return; }
       this.ctx = new AC({ sampleRate: 48000, latencyHint: 'interactive' });
-      this.ready = this._init();
+      this.ready = this._init(this.ctx);
     }
     // Don't await: resume() can hang during an iOS audio interruption.
     this.ctx.resume?.().catch(() => { });
   }
 
-  async _init() {
-    await this.ctx.audioWorklet.addModule(new URL('./worklet.js', import.meta.url));
-    this.node = new AudioWorkletNode(this.ctx, 'headroom-pcm', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2] });
-    this.gain = this.ctx.createGain();
-    this.node.connect(this.gain).connect(this.ctx.destination);
+  /** Sets up `ctx`, unless it was closed meanwhile (muted again before it was ready). */
+  async _init(ctx) {
+    await ctx.audioWorklet.addModule(new URL('./worklet.js', import.meta.url));
     const ok = await AudioDecoder.isConfigSupported({ codec: 'opus', sampleRate: 48000, numberOfChannels: 2 }).catch(() => ({ supported: false }));
+    if (ctx !== this.ctx) return;
     if (!ok.supported) { this.supported = false; throw new Error('opus AudioDecoder unsupported'); }
+    this.node = new AudioWorkletNode(ctx, 'headroom-pcm', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2] });
+    this.gain = ctx.createGain();
+    this.gain.gain.value = this.enabled ? 1 : 0;
+    this.node.connect(this.gain).connect(ctx.destination);
     this._createDecoder();
   }
 
   _createDecoder() {
     this.decoder = new AudioDecoder({
       output: data => this._output(data),
-      error: e => { console.warn('[audio] decoder error', e); setTimeout(() => this._createDecoder(), 100); },
+      error: e => { console.warn('[audio] decoder error', e); setTimeout(() => { if (this.node) this._createDecoder(); }, 100); },
     });
     // No description: each chunk is a raw Opus packet (Chrome rejects an empty description).
     this.decoder.configure({ codec: 'opus', sampleRate: 48000, numberOfChannels: 2 });
@@ -86,11 +90,18 @@ export class AudioPlayer {
   }
 
   close() {
+    this.enabled = false;
     try { this.decoder?.close(); } catch { }
     this.decoder = null;
     this.node?.disconnect();
     this.ctx?.close().catch(() => { });
     this.ctx = null;
     this.node = null;
+    this.gain = null;
+    this.ready = null;
+    this.lastSeq = 0;
+    try {
+      if (navigator.audioSession) navigator.audioSession.type = 'auto';
+    } catch { }
   }
 }

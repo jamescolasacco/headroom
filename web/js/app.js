@@ -301,7 +301,6 @@ function connect(host, face = null) {
     onUnauthorized: () => refreshAccount(),
   });
   globalThis.__headroomSession = s; // handy for debugging from the console
-  s.unlockFromGesture(); // audio must be unlocked inside this tap (iOS): before any await
   // At once: the screen wakes up while the connection is found (and nothing changes the page before it has).
   const shown = morph(() => s.prepare(), { from: face });
   (async () => {

@@ -48,7 +48,6 @@ export const DEFAULT_PREFS = {
   maxFps: 15,               // a quarter of 60's frames to send; the hosts sharpen the picture once it stops moving
   maxBitrateKbps: 0,        // 0 = host maximum (adaptive)
   resolution: 'auto',       // auto (as big as it's shown here: see Session._autoSize) | native | 1440 | 1080 | 720
-  audio: true,
   stats: false,
   renderer: 'auto',         // auto | video | canvas
   pointerSpeed: 1.0,

@@ -598,8 +598,13 @@ button.task-row:not(:disabled):not([aria-disabled="true"]):active { transform: n
    always shows it (.kbd), whatever the browser guesses */
 .toolbar button:focus-visible, .toolbar.kbd button:focus { outline: 2px solid var(--focus); outline-offset: -2px; }
 .tb[aria-pressed="true"] { background: rgba(238, 241, 246, .13); box-shadow: inset 0 0 0 1px var(--rim); }
-@media (hover: hover) and (pointer: fine) { :where(html:not([data-bg])) .tb:hover { background: rgba(238, 241, 246, .1); } }
 .tb.danger { color: var(--stop-ink); }
+/* sound is off (every session starts that way): a red speaker, lit, that turns it on */
+.tb.muted { color: var(--stop-ink); background: var(--stop-wash); }
+@media (hover: hover) and (pointer: fine) {
+  :where(html:not([data-bg])) .tb:hover { background: rgba(238, 241, 246, .1); }
+  :where(html:not([data-bg])) .tb.muted:hover { background: color-mix(in srgb, var(--stop) 22%, transparent); }
+}
 .tb-sep { width: 1px; align-self: stretch; background: var(--rim-strong); margin: 7px 3px; flex: none; }
 /* which computer this is: its screen, lit, and its name */
 .tb-screen { display: inline-flex; align-items: center; gap: 8px; padding: 0 10px 0 8px; font-size: var(--t-small); font-weight: 500; color: var(--ink-2); white-space: nowrap; max-width: 220px; }
@@ -615,6 +620,7 @@ button.task-row:not(:disabled):not([aria-disabled="true"]):active { transform: n
   .tb-sep { margin: 7px 1px; }
 }
 @media (max-width: 720px) { .tb-screen .tb-name { display: none; } .tb-screen { padding: 0 6px; } }
+@media (max-width: 374px) { .toolbar.pinned .tb { min-width: 40px; } } /* a 360 px phone still fits the whole bar */
 
 /* sheets (option panels under the toolbar) */
 .sheet-backdrop { position: absolute; inset: 0; z-index: 29; background: rgba(0, 0, 0, .25); }

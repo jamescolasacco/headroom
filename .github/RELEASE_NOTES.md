@@ -1,5 +1,9 @@
 Remote desktop for your own computers, and quick help with a code: **Headroom Server** on the computer you want to reach; **Headroom Viewer**, any browser, or an iPhone/iPad on the device you use.
 
+## New in 0.4.11
+
+- **Sound starts off.** Joining a session no longer plays the computer's sound, or stops the music on your phone. A red speaker in the toolbar turns it on, and the computer sends no sound until you do.
+
 ## New in 0.4.10: sharp right after you scroll
 
 - **No more smudge after scrolling.** Through Headroom's relay, Headroom Server took the time its own first big picture needed to send for a slow network: within seconds of connecting it cut the picture to its lowest quality (0.8 Mb/s) and kept it there, so whatever changed came out smudged and took seconds to clear. It now judges the network only by what really tells, never drops to what it happened to send while the screen was still, and raises the quality only while the picture uses it. Measured through the relay on a 1920×1080 screen: 13–31 Mb/s instead of 0.8, and the picture sharp within a tenth of a second of a scroll stopping, where with 0.4.9 it stayed smudged.

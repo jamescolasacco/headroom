@@ -40,9 +40,11 @@ JSON control messages, and binary frames carry media and input. Binary layouts a
 3. The client starts or changes the stream with `start`. It can send `start` again at any time to switch
    monitor, fps or resolution:
    ```json
-   { "t": "start", "monitor": "\\\\.\\DISPLAY1", "maxFps": 60, "maxBitrateKbps": 20000,
-     "maxWidth": 0, "maxHeight": 0, "audio": true }
+   { "t": "start", "monitor": "\\\\.\\DISPLAY1", "maxFps": 15, "maxBitrateKbps": 20000,
+     "maxWidth": 0, "maxHeight": 0, "audio": false }
    ```
+   Headroom's own viewers start every session muted: `audio` stays false until the person unmutes (then
+   `{"t":"audio","enabled":true}`, and true in later `start`s), so the host sends no sound before that.
 
 Tokens come from an account ([ACCOUNTS.md](ACCOUNTS.md)) or an accepted guest's resume key, and are never placed
 in URLs. Through the relay, the same protocol runs under `https://<relay>/r/<relay id>/`.

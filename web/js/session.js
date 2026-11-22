@@ -41,11 +41,8 @@ export class Session {
     this.relative = false;
     this.disposed = false;
     this.audio = new AudioPlayer();
-  }
-
-  /** Must run inside the user's tap (audio unlock + fullscreen need a gesture). */
-  unlockFromGesture() {
-    if (this.prefs.audio) this.audio.unlock();
+    // Every session starts muted: nothing plays, or stops this device's own music, until Unmute (setAudio).
+    this.audioOn = false;
   }
 
   /**
@@ -170,7 +167,6 @@ export class Session {
     this.keyboard.attach();
     this.mouse.attach();
     this.touch.attach();
-    this.audio.setEnabled(this.prefs.audio);
     if (!isTouchPrimary) sink.focus({ preventScroll: true });
     this._overlay('Connecting…', this.host.support ? '' : this.host.name, true);
     // Headroom Viewer for Windows: its keyboard hook captures Win/Alt+Tab/PrtScn while a session is up. (The Mac
@@ -202,14 +198,32 @@ export class Session {
       case 'inputMode': this.touch.setMode(this.inputMode); break;
       case 'keyboardProfile': this.keyboard.setProfile(value, this.hostOs); break;
       case 'scaling': this.viewport.setMode(value); break;
-      case 'audio':
-        if (value) this.audio.unlock();
-        this.audio.setEnabled(value);
-        this.conn.sendJson({ t: 'audio', enabled: value });
-        break;
       case 'stats': this.stats.setVisible(value); break;
       case 'maxFps': case 'maxBitrateKbps': case 'resolution': this.sendStart(); break;
     }
+    this.toolbar?.refresh();
+  }
+
+  /**
+   * The toolbar's Unmute and Mute. Unmuting runs inside that tap: a browser starts sound only from one. Muting
+   * lets go of this device's audio altogether, so its own music can play again; the computer stops sending sound.
+   */
+  setAudio(on) {
+    on = !!on && this.audio.supported;
+    if (on === this.audioOn) return;
+    this.audioOn = on;
+    if (on) {
+      this.audio.unlock();
+      this.audio.setEnabled(true);
+      this.audio.ready?.catch(() => {
+        if (!this.audioOn || this.disposed) return;
+        toast('This browser can\'t play the computer\'s sound');
+        this.setAudio(false);
+      });
+    } else {
+      this.audio.close();
+    }
+    this.conn?.sendJson({ t: 'audio', enabled: on });
     this.toolbar?.refresh();
   }
 
@@ -367,7 +381,7 @@ export class Session {
       maxFps: this.prefs.maxFps,
       maxBitrateKbps: this.prefs.maxBitrateKbps || undefined,
       maxWidth, maxHeight,
-      audio: !!this.prefs.audio && this.audio.supported,
+      audio: this.audioOn,
     });
   }
 
