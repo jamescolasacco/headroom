@@ -17,6 +17,7 @@ export class Connection extends EventTarget {
     this._pings = new Map();
     this._assembly = null;        // { frameId, epoch, buf, received, flags, captureUs, encodeMs, firstAt }
     this._timers = [];
+    this.helloTimer = null;
     this.bytesIn = 0;
   }
 
@@ -67,6 +68,7 @@ export class Connection extends EventTarget {
       // A guest: the first connection uses the code; reconnects use the key from welcome.
       const credentials = this.host.support && !this.host.token ? { support: this.host.support } : { token: this.host.token };
       ws.send(JSON.stringify({ t: 'hello', ...credentials, client }));
+      this._waitForWelcome();
     };
     ws.onmessage = ev => { if (this.ws === ws && !this._fatal) this._onMessage(ev.data); };
     ws.onerror = () => { /* onclose follows */ };
@@ -80,6 +82,18 @@ export class Connection extends EventTarget {
       if (this._fatal) { this.setState('closed', { reason: this._fatal.code, message: this._fatal.message }); return; }
       this._scheduleReconnect(ev.reason || `code ${ev.code}`);
     };
+  }
+
+  _waitForWelcome() {
+    // A guest waiting for approval receives a pending message every 20 seconds.
+    clearTimeout(this.helloTimer);
+    this.helloTimer = setTimeout(() => this.reconnectNow(), 35000);
+  }
+
+  resume() {
+    if (this.closedByUser || this._fatal || this.state === 'idle') return;
+    if (this.isOpen) this.sendJson({ t: 'keyframe' });
+    else if (!this.ws || this.ws.readyState >= WebSocket.CLOSING) this.reconnectNow();
   }
 
   _scheduleReconnect(reason) {
@@ -106,6 +120,7 @@ export class Connection extends EventTarget {
   }
 
   _clearTimers() {
+    clearTimeout(this.helloTimer);
     for (const t of this._timers) { clearTimeout(t); clearInterval(t); }
     this._timers = [];
   }
@@ -155,9 +170,11 @@ export class Connection extends EventTarget {
   _onJson(msg) {
     switch (msg.t) {
       case 'pending':
+        this._waitForWelcome();
         this.emit('pending', msg);
         break;
       case 'welcome':
+        clearTimeout(this.helloTimer);
         if (msg.resumeToken) this.host.token = msg.resumeToken;
         // A guest code is used up once accepted: reconnects and file transfers go to the device's own relay path.
         if (msg.relayPath && this.host.support) this.host.url = new URL(msg.relayPath, this.host.url).toString().replace(/\/$/, '');

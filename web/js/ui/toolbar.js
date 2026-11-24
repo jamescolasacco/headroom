@@ -219,8 +219,10 @@ export class Toolbar {
   _sheet(label, build) {
     clearTimeout(this.hideTimer);
     if (sheetOpen() && this._sheetLabel === label) { closeSheet(); return; }
-    this._sheetLabel = label;
-    openSheet(build, { label, onClose: () => { this._sheetLabel = null; this.peek(1500); } });
+    const life = new AbortController();
+    openSheet(el => { this._sheetLabel = label; build(el, life.signal); }, {
+      label, onClose: () => { life.abort(); this._sheetLabel = null; this.peek(1500); },
+    });
   }
 
   // ------------------------------------------------------------------ displays
@@ -273,7 +275,7 @@ export class Toolbar {
   // ------------------------------------------------------------------ clipboard
   clipboardSheet() {
     const s = this.s;
-    this._sheet('Clipboard', el => {
+    this._sheet('Clipboard', (el, signal) => {
       el.append(h('h3', {}, 'Remote clipboard'));
       const remote = h('textarea', { class: 'local-input', readonly: true, 'aria-label': 'Remote clipboard' }, s.clipboard.remote || '');
       el.append(h('div', { class: 'row' }, remote, h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap' } },
@@ -285,7 +287,7 @@ export class Toolbar {
         }, 'Copy to this device'),
         h('button', { type: 'button', onclick: () => s.conn.sendJson({ t: 'clip-get' }) }, 'Refresh'))));
       const onRemote = e => { remote.value = e.detail; };
-      s.clipboard.addEventListener('remote', onRemote);
+      s.clipboard.addEventListener('remote', onRemote, { signal });
       el.append(h('h3', {}, 'Send to remote'));
       const local = h('textarea', { class: 'local-input', 'aria-label': 'Text to send to the remote clipboard', placeholder: 'Paste or type here…' });
       el.append(h('div', { class: 'row' }, local, h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap' } },
@@ -341,16 +343,25 @@ export class Toolbar {
 
   download(entry) {
     const s = this.s;
-    const id = Math.random().toString(36).slice(2);
+    if (!s.conn.isOpen || !s.permissions.files) return;
+    // Numeric IDs are echoed by both current hosts and older Windows versions.
+    this.downloadId = (this.downloadId || 0) + 1;
+    const id = this.downloadId;
     const onToken = e => {
-      if (e.detail.id !== id && e.detail.path !== entry.path) return;
+      if (e.detail.id !== id || e.detail.path !== entry.path) return;
+      clearTimeout(timeout);
       s.conn.removeEventListener('file-token', onToken);
+      if (!s.permissions.files) return;
       const url = `${s.host.url}/api/files/download?t=${encodeURIComponent(e.detail.token)}`;
       const a = h('a', { href: url, download: entry.name, rel: 'noopener' });
       document.body.append(a); a.click(); a.remove();
       toast(`Downloading ${entry.name}`);
     };
-    s.conn.addEventListener('file-token', onToken);
+    const timeout = setTimeout(() => {
+      s.conn.removeEventListener('file-token', onToken);
+      if (!s.disposed && s.permissions.files) toast('The computer did not answer the download request');
+    }, 15000);
+    s.conn.addEventListener('file-token', onToken, { signal: s.life.signal });
     s.conn.sendJson({ t: 'file-token', path: entry.path, id });
   }
 

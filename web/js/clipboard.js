@@ -5,9 +5,10 @@
 //  new clipboard arrives — the only way Safari lets a page write clipboard data that arrives later.
 
 export class ClipboardSync extends EventTarget {
-  constructor(conn) {
+  constructor(conn, allowed) {
     super();
     this.conn = conn;
+    this.allowed = allowed;
     this.remote = '';
     this.pending = null;
     this.lastPushed = null;
@@ -18,12 +19,26 @@ export class ClipboardSync extends EventTarget {
   }
 
   dispose() {
+    this.clear();
     window.removeEventListener('focus', this._onFocus);
     document.removeEventListener('visibilitychange', this._onFocus);
   }
 
+  clear() {
+    this.remote = '';
+    this.pending = null;
+    this.lastPushed = null;
+    if (this.waiting) {
+      clearTimeout(this.waiting.timer);
+      this.waiting.reject(new Error('clipboard sync ended'));
+      this.waiting = null;
+    }
+  }
+
   /** Host clipboard changed. */
   onRemote(text) {
+    if (!this.allowed()) return;
+    this.lastPushed = null;
     this.remote = text;
     this.dispatchEvent(new CustomEvent('remote', { detail: text }));
     if (this.waiting) {
@@ -46,7 +61,7 @@ export class ClipboardSync extends EventTarget {
 
   /** Call from keydown/pointerdown handlers (transient user activation). */
   onUserGesture() {
-    if (this.pending == null || !navigator.clipboard?.writeText) return;
+    if (!this.allowed() || this.pending == null || !navigator.clipboard?.writeText) return;
     const text = this.pending;
     navigator.clipboard.writeText(text).then(() => {
       if (this.pending === text) this.pending = null;
@@ -56,7 +71,7 @@ export class ClipboardSync extends EventTarget {
 
   /** Cmd/Ctrl+C or X was just pressed (inside the keydown handler). */
   expectRemoteCopy() {
-    if (typeof ClipboardItem === 'undefined' || !navigator.clipboard?.write) return;
+    if (!this.allowed() || typeof ClipboardItem === 'undefined' || !navigator.clipboard?.write) return;
     if (this.waiting) { clearTimeout(this.waiting.timer); this.waiting.reject(new Error('superseded')); }
     const p = new Promise((resolve, reject) => {
       this.waiting = { resolve, reject, timer: setTimeout(() => { this.waiting = null; reject(new Error('no clipboard change')); }, 1500) };
@@ -70,16 +85,16 @@ export class ClipboardSync extends EventTarget {
 
   /** Local clipboard text to put on the host (from paste events / manual panel). */
   pushLocal(text) {
-    if (text == null || text === this.lastPushed || text === this.remote) return;
+    if (!this.allowed() || text == null || text === this.lastPushed || text === this.remote) return;
     this.lastPushed = text;
     this.conn.sendJson({ t: 'clip', text });
   }
 
   async _readLocalIfGranted() {
-    if (document.visibilityState !== 'visible' || !navigator.clipboard?.readText || !navigator.permissions) return;
+    if (!this.allowed() || document.visibilityState !== 'visible' || !navigator.clipboard?.readText || !navigator.permissions) return;
     try {
       const st = await navigator.permissions.query({ name: 'clipboard-read' });
-      if (st.state !== 'granted') return; // never prompt on focus
+      if (!this.allowed() || st.state !== 'granted') return; // never prompt on focus
       const text = await navigator.clipboard.readText();
       if (text) this.pushLocal(text);
     } catch { /* Safari has no clipboard-read permission name */ }
@@ -87,7 +102,9 @@ export class ClipboardSync extends EventTarget {
 
   /** Explicit "send my clipboard" (button): prompts in Chromium, shows the Paste callout in Safari. */
   async readLocalExplicit() {
+    if (!this.allowed()) throw new Error('clipboard unavailable');
     const text = await navigator.clipboard.readText();
+    if (!this.allowed()) throw new Error('clipboard unavailable');
     this.lastPushed = null;
     this.pushLocal(text);
     return text;

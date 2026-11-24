@@ -8,6 +8,7 @@ const { SoftKeyboard } = await import('../web/js/input/softkbd.js');
 
 class Socket {
   static OPEN = 1;
+  static CLOSING = 2;
   constructor() { this.readyState = 0; this.sent = []; }
   open() { this.readyState = Socket.OPEN; this.onopen(); }
   message(obj) { this.onmessage({ data: JSON.stringify(obj) }); }
@@ -120,4 +121,19 @@ test('closing a failed decoder cancels its queued recovery', async () => {
   core.close();
   await new Promise(resolve => setTimeout(resolve, 150));
   assert.equal(reopened, false);
+});
+
+test('switching apps while a guest is waiting keeps the same approval request', t => {
+  const c = new Connection({ url: 'https://host.test', support: 'guest' });
+  t.after(() => c.close());
+  c.connect();
+  const socket = c.ws;
+  socket.open();
+  socket.message({ t: 'pending' });
+  c.resume();
+  assert.equal(c.ws, socket);
+  assert.equal(socket.sent.length, 1);
+  socket.message({ t: 'welcome' });
+  c.resume();
+  assert.equal(JSON.parse(socket.sent.at(-1)).t, 'keyframe');
 });

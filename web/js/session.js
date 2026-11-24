@@ -86,7 +86,7 @@ export class Session {
     this.cursor = new CursorRenderer(layer, $('remote-cursor'), this.viewport);
     this.presenter = new VideoPresenter({ video: $('video'), canvas: $('canvas'), preference: this.prefs.renderer });
     this.conn = new Connection(this.host);
-    this.clipboard = new ClipboardSync(this.conn);
+    this.clipboard = new ClipboardSync(this.conn, () => !this.disposed && this.conn.isOpen && this.permissions.clipboard);
     this.mods = new StickyModifiers(null);
 
     const inputAllowed = () => this.permissions.input && this.conn.isOpen;
@@ -300,6 +300,9 @@ export class Session {
       const p = e.detail.permissions || {};
       const was = this.permissions;
       this.permissions = { ...this.permissions, ...p };
+      if (was.clipboard && !this.permissions.clipboard) this.clipboard.clear();
+      if ((was.clipboard && !this.permissions.clipboard) || (was.files && !this.permissions.files)) closeSheet();
+      if (was.audio && !this.permissions.audio) this.setAudio(false);
       if (was.input && !this.permissions.input) { this.keyboard?.releaseAll(); toast('View only: they turned off control.', 5000); }
       else if (!was.input && this.permissions.input) toast('You can control the screen now.', 4000);
       this.toolbar?.refresh();
@@ -355,6 +358,7 @@ export class Session {
       if (state === 'reconnecting') {
         this.keyboard?.releaseAll();
         this.typing?.reset();
+        this.clipboard.clear();
         if (!this._opened && this.host.account) {
           // It was listed as there, but it doesn't answer: it just fell asleep. It's tried again until it's back.
           if (attempt > 2) this.waitingFor('It isn\'t answering.');
@@ -450,11 +454,10 @@ export class Session {
         this.mouse.releaseAll();
       } else {
         this._requestWakeLock();
-        if (this.conn.state !== 'open' && !this.conn.closedByUser) this.conn.reconnectNow();
-        else this.conn.sendJson({ t: 'keyframe' });
+        this.conn.resume();
       }
     };
-    this._onPageShow = e => { if (e.persisted && !this.conn.isOpen) this.conn.reconnectNow(); };
+    this._onPageShow = e => { if (e.persisted) this.conn.resume(); };
     this._onGesture = e => e.preventDefault();
     this._onTouchMove = e => { if (!e.target.closest?.('#sheet, #extra-keys, #toolbar')) e.preventDefault(); };
     this._onFs = () => this._fullscreenChanged();
@@ -718,7 +721,6 @@ export class Session {
     if (this.disposed) return;
     this.disposed = true;
     this.life.abort();
-    clearTimeout(this.toolbar?.hideTimer);
     clearTimeout(this._sizeTimer);
     clearTimeout(this._lateCursorTimer);
     this._offNative?.();
@@ -728,6 +730,7 @@ export class Session {
     try { this.mouse?.detach(); } catch { }
     try { this.touch?.detach(); } catch { }
     this.softkbd?.hide();
+    clearTimeout(this.toolbar?.hideTimer);
     this.extraKeys?.hide();
     this.typing?.reset();
     this._safeProbe?.remove();
