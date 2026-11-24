@@ -109,6 +109,17 @@ enum FileApi {
 
         func write(_ bytes: [UInt8]) throws { try handle.write(contentsOf: bytes) }
 
+        /// Some external volumes do not implement RENAME_EXCL. Reserve an unused name there before replacing it.
+        static func moveWithReservation(_ source: String, to destination: String) -> Int32 {
+            let fd = open(destination, O_CREAT | O_EXCL | O_WRONLY, 0o600)
+            guard fd >= 0 else { return errno }
+            defer { close(fd) }
+            if rename(source, destination) == 0 { return 0 }
+            let failure = errno
+            unlink(destination)
+            return failure
+        }
+
         func finish() -> HttpResponse {
             let fm = FileManager.default
             let ext = (name as NSString).pathExtension
@@ -119,12 +130,16 @@ enum FileApi {
                 while true {
                     let candidate = i == 0 ? name : "\(stem) (\(i))" + (ext.isEmpty ? "" : ".\(ext)")
                     let final = (dir as NSString).appendingPathComponent(candidate)
-                    do {
-                        try fm.moveItem(atPath: temp, toPath: final)
-                    } catch let error as CocoaError where error.code == .fileWriteFileExists {
+                    var failure: Int32 = 0
+                    if renamex_np(temp, final, UInt32(RENAME_EXCL)) != 0 {
+                        failure = errno
+                        if failure == ENOTSUP { failure = Self.moveWithReservation(temp, to: final) }
+                    }
+                    if failure == EEXIST {
                         i += 1
                         continue
                     }
+                    if failure != 0 { throw NSError(domain: NSPOSIXErrorDomain, code: Int(failure)) }
                     Log.info("files", "upload \(final) from \(remote ?? "?")")
                     return .json(["path": final, "name": candidate])
                 }
