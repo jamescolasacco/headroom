@@ -13,6 +13,7 @@ public static class Program
     public static Updater Updates { get; } = new(Updater.App.Viewer);
     private static readonly List<ViewerWindow> Windows = new();
     private static readonly ApplicationContext Context = new();
+    private static bool _restartingBrowser;
     private static readonly KeyboardHook Hook = new(hwnd => Windows.FirstOrDefault(w => w.SessionActive && w.IsHandleCreated && w.Handle == hwnd));
 
     /// <summary>The system-shortcut hook only runs while at least one window has a live session.</summary>
@@ -78,6 +79,7 @@ public static class Program
             if (Windows.Count == 0) { Hook.Dispose(); Context.ExitThread(); }
         };
         w.Show();
+        if (!_restartingBrowser) _ = w.AttachWebViewAsync();
         return w;
     }
 
@@ -86,13 +88,25 @@ public static class Program
     /// <summary>Restart WebView2 so newly pinned certificates apply; the requesting window reloads at <paramref name="url"/>.</summary>
     public static async Task RestartBrowserAsync(ViewerWindow requester, string url)
     {
-        foreach (var w in Windows) w.DetachWebView();
-        UpdateHook();
-        await ViewerEnvironment.RestartAsync();
-        foreach (var w in Windows.ToList())
+        if (_restartingBrowser)
         {
-            if (w == requester) w.Navigate(url);
-            await w.AttachWebViewAsync();
+            requester.Navigate(url);
+            return;
         }
+        _restartingBrowser = true;
+        try
+        {
+            await ViewerEnvironment.RestartAsync(() =>
+            {
+                foreach (var w in Windows) w.DetachWebView();
+                requester.Navigate(url);
+                UpdateHook();
+            });
+        }
+        finally
+        {
+            _restartingBrowser = false;
+        }
+        foreach (var w in Windows.ToList()) await w.AttachWebViewAsync();
     }
 }

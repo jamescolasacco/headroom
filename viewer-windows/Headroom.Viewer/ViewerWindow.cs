@@ -15,6 +15,7 @@ namespace Headroom.Viewer;
 public sealed class ViewerWindow : Form
 {
     private WebView2? _web;
+    private Label? _startupError;
     private string _startUrl;
     private bool _fullscreen;
     private FormBorderStyle _savedBorder;
@@ -35,7 +36,6 @@ public sealed class ViewerWindow : Form
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = Color.FromArgb(9, 11, 16);
         KeyPreview = false;
-        _ = AttachWebViewAsync();
     }
 
     protected override void OnHandleCreated(EventArgs e)
@@ -48,24 +48,35 @@ public sealed class ViewerWindow : Form
 
     public async Task AttachWebViewAsync()
     {
+        if (IsDisposed || Disposing || _web != null) return;
+        _startupError?.Dispose();
+        _startupError = null;
         var web = new WebView2 { Dock = DockStyle.Fill, DefaultBackgroundColor = Color.FromArgb(9, 11, 16) };
         Controls.Add(web);
         _web = web;
+        bool IsCurrent() => !IsDisposed && !Disposing && _web == web && !web.IsDisposed;
         try
         {
             var env = await ViewerEnvironment.GetAsync();
+            if (!IsCurrent()) return;
             await web.EnsureCoreWebView2Async(env);
         }
-        catch (WebView2RuntimeNotFoundException)
+        catch (Exception error)
         {
-            Controls.Remove(web);
-            Controls.Add(new Label
+            if (!IsCurrent()) return;
+            _web = null;
+            web.Dispose();
+            _startupError = new Label
             {
                 Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.White,
-                Text = "Headroom Viewer needs the Microsoft Edge WebView2 Runtime.\nInstall it from https://developer.microsoft.com/microsoft-edge/webview2/",
-            });
+                Text = error is WebView2RuntimeNotFoundException
+                    ? "Headroom Viewer needs the Microsoft Edge WebView2 Runtime.\nInstall it from https://developer.microsoft.com/microsoft-edge/webview2/"
+                    : $"Couldn't start the viewer.\n{error.Message}",
+            };
+            Controls.Add(_startupError);
             return;
         }
+        if (!IsCurrent()) return;
         var core = web.CoreWebView2;
         core.SetVirtualHostNameToFolderMapping(ViewerEnvironment.VirtualHost, ViewerEnvironment.ClientFolder, CoreWebView2HostResourceAccessKind.Allow);
         var s = core.Settings;
@@ -106,6 +117,7 @@ public sealed class ViewerWindow : Form
     {
         if (_web == null) return;
         _startUrl = _web.Source?.ToString() ?? _startUrl;
+        UseWaitCursor = false;
         Controls.Remove(_web);
         _web.Dispose();
         _web = null;
@@ -192,7 +204,9 @@ public sealed class ViewerWindow : Form
             return;
         }
         UseWaitCursor = true;
+        var web = _web;
         var probe = await TrustStore.ProbeAsync(uri);
+        if (IsDisposed || Disposing || web != _web) return;
         UseWaitCursor = false;
         if (probe.PubliclyTrusted)
         {

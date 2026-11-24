@@ -19,7 +19,11 @@ public static class ViewerEnvironment
     /// <summary>The pinned keys the running browser process was started with.</summary>
     public static string ActiveSpkiList { get; private set; } = "";
 
-    public static Task<CoreWebView2Environment> GetAsync() => _env ??= CreateAsync();
+    public static Task<CoreWebView2Environment> GetAsync()
+    {
+        if (_env == null || _env.IsFaulted || _env.IsCanceled) _env = CreateAsync();
+        return _env;
+    }
 
     private static async Task<CoreWebView2Environment> CreateAsync()
     {
@@ -38,17 +42,28 @@ public static class ViewerEnvironment
         return await CoreWebView2Environment.CreateAsync(null, Path.Combine(Program.DataDir, "WebView2"), options);
     }
 
-    /// <summary>Restarts the browser process (call after the windows have released their WebViews).</summary>
-    public static async Task RestartAsync()
+    /// <summary>Observe process exit before closing the final WebView so an early exit is remembered.</summary>
+    public static async Task RestartAsync(Action detachWindows)
     {
-        if (_env != null)
+        var previous = _env;
+        _env = null;
+        if (previous is not { IsCompletedSuccessfully: true })
         {
-            var env = await _env;
-            var exited = new TaskCompletionSource();
-            env.BrowserProcessExited += (_, _) => exited.TrySetResult();
+            detachWindows();
+            return;
+        }
+        var env = await previous;
+        var exited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        void OnExited(object? sender, CoreWebView2BrowserProcessExitedEventArgs args) => exited.TrySetResult();
+        env.BrowserProcessExited += OnExited;
+        try
+        {
+            detachWindows();
             await Task.WhenAny(exited.Task, Task.Delay(5000));
         }
-        _env = CreateAsync();
-        await _env;
+        finally
+        {
+            env.BrowserProcessExited -= OnExited;
+        }
     }
 }
