@@ -1,6 +1,7 @@
 // Offline-capable app shell. Network-first so an update is picked up immediately; the cache lets the home-screen
 // app open when the network is flaky.
-const CACHE = 'headroom-shell-v12';
+const PREFIX = 'headroom-shell-';
+const CACHE = PREFIX + 'v13';
 const SHELL = [
   '/', '/index.html', '/manifest.webmanifest', '/css/app.css',
   '/js/app.js', '/js/account.js', '/js/config.js', '/js/qr.js', '/js/api.js', '/js/store.js', '/js/platform.js', '/js/protocol.js', '/js/connection.js',
@@ -9,8 +10,8 @@ const SHELL = [
   '/js/audio/player.js', '/js/audio/worklet.js',
   '/js/input/keyboard.js', '/js/input/keymap.js', '/js/input/mouse.js', '/js/input/touch.js', '/js/input/softkbd.js',
   '/js/ui/dom.js', '/js/ui/icons.js', '/js/ui/light.js', '/js/ui/toolbar.js', '/js/ui/stats.js', '/js/ui/extrakeys.js', '/js/ui/typing.js', '/js/ui/updates.js',
-  '/icons/icon.svg', '/icons/icon-192.png', '/icons/apple-touch-icon.png',
-  '/fonts/FunnelSans-latin.woff2', '/fonts/FunnelDisplay-latin.woff2', '/fonts/AtkinsonHyperlegibleMono-latin.woff2',
+  '/icons/icon-512.png', '/icons/icon-maskable-512.png', '/icons/icon.svg', '/icons/icon-192.png', '/icons/apple-touch-icon.png',
+  '/fonts/FunnelSans-latin-ext.woff2', '/fonts/FunnelDisplay-latin-ext.woff2', '/fonts/FunnelSans-latin.woff2', '/fonts/FunnelDisplay-latin.woff2', '/fonts/AtkinsonHyperlegibleMono-latin.woff2',
 ];
 
 self.addEventListener('install', e => {
@@ -19,28 +20,30 @@ self.addEventListener('install', e => {
 
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys()
-    .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+    .then(keys => Promise.all(keys.filter(k => k.startsWith(PREFIX) && k !== CACHE).map(k => caches.delete(k))))
     .then(() => self.clients.claim()));
 });
 
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET' || url.origin !== location.origin) return;
-  // Only the app's own files: never the API, sessions, or anything relayed to a device (/r/…, /c/…).
-  if (/^\/(api|r|c)\//.test(url.pathname) || url.pathname === '/ws') return;
+  // Only public shell assets belong in this cache. Other apps may share the origin.
+  if (!SHELL.includes(url.pathname) || e.request.headers.has('range') || e.request.headers.has('authorization')) return;
   e.respondWith((async () => {
+    let fresh;
     try {
-      const fresh = await fetch(e.request);
-      if (fresh.ok) {
-        const c = await caches.open(CACHE);
-        c.put(e.request, fresh.clone());
-      }
-      return fresh;
-    } catch {
-      const cached = await caches.match(e.request, { ignoreSearch: true });
+      fresh = await fetch(e.request);
+    } catch (networkError) {
+      const cache = await caches.open(CACHE);
+      const cached = await cache.match(url.pathname);
       if (cached) return cached;
-      if (e.request.mode === 'navigate') return caches.match('/index.html');
-      throw new Error('offline');
+      throw networkError;
     }
+    if (fresh.ok && fresh.status !== 206 && !fresh.redirected && !/\bno-store\b/i.test(fresh.headers.get('cache-control') || '')) {
+      const copy = fresh.clone();
+      // The network response remains usable even if storage is full or private browsing refuses the write.
+      e.waitUntil(caches.open(CACHE).then(cache => cache.put(url.pathname, copy)).catch(() => {}));
+    }
+    return fresh;
   })());
 });
