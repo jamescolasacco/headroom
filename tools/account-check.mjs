@@ -14,6 +14,10 @@
 //
 // Run it on the host itself (the settings API is loopback-only). The host stays signed in if a check fails midway;
 // `curl -X POST http://127.0.0.1:7080/api/admin/account/leave` undoes it.
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+
 const arg = (name, def) => {
   const a = process.argv.find(x => x.startsWith(`--${name}=`));
   return a ? a.slice(name.length + 3) : def;
@@ -136,6 +140,35 @@ check(s1.welcome?.permissions?.input === true && s1.welcome?.permissions?.files 
 if (wantFrames) check(s1.frames >= wantFrames, `video streams through the relay (${s1.frames} frames, ${at()})`);
 const files = await json(`${rbase}/api/files/list`, { token: computer.token });
 check(files.status === 200 && Array.isArray(files.body.entries), `files list through the relay (${files.status}, ${files.body.entries?.length ?? 0} entries)`);
+// This check runs on the host itself. Exercise streamed uploads through the relay and verify the actual files.
+if (process.argv.includes('--check-uploads')) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'headroom-transfers-'));
+  try {
+    const name = 'shared notes.txt';
+    await fs.writeFile(path.join(dir, name), 'original');
+    const url = `${rbase}/api/files/upload?${new URLSearchParams({ dir, name })}`;
+    const bodies = Array.from({ length: 6 }, (_, i) => Buffer.alloc(256 * 1024, i));
+    const results = await Promise.allSettled(bodies.map(async body => {
+      const r = await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${computer.token}` }, body });
+      if (!r.ok) throw new Error(`upload returned ${r.status}`);
+      const result = await r.json();
+      const bytes = await fs.readFile(path.join(dir, path.basename(result.name)));
+      check(bytes.equals(body), `uploaded contents match for ${result.name}`);
+      return result.name;
+    }));
+    const names = results.map(result => {
+      if (result.status === 'rejected') throw result.reason;
+      return result.value;
+    });
+    check(new Set(names).size === bodies.length, 'simultaneous uploads receive distinct names');
+    check(await fs.readFile(path.join(dir, name), 'utf8') === 'original', 'existing file survives the uploads');
+    check((await fs.readdir(dir)).length === bodies.length + 1, 'no partial files are left behind');
+  } catch (e) {
+    check(false, `concurrent uploads: ${e.message}`);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+}
 for (const p of ['/admin.html', '/api/admin/status', '/']) {
   const r = await fetch(`${rbase}${p}`);
   check(r.status === 403, `the relay doesn't reach ${p} (${r.status})`);

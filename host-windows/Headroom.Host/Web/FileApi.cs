@@ -64,20 +64,22 @@ public static class FileApi
             var fileName = SanitizeName(name);
             if (targetDir == null || fileName == null) return Results.Json(new { error = "bad target" }, statusCode: 400);
             Directory.CreateDirectory(targetDir);
-            var final = UniquePath(Path.Combine(targetDir, fileName));
-            var temp = final + ".headroom-part";
+            var temp = Path.Combine(targetDir, $".headroom-{Guid.NewGuid():N}.headroom-part");
+            var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1 << 16, FileOptions.Asynchronous);
+            string final;
             try
             {
-                await using (var fs = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1 << 16, FileOptions.Asynchronous))
-                    await ctx.Request.Body.CopyToAsync(fs, 1 << 16, ctx.RequestAborted);
-                File.Move(temp, final);
+                await using (stream)
+                    await ctx.Request.Body.CopyToAsync(stream, 1 << 16, ctx.RequestAborted);
+                ctx.RequestAborted.ThrowIfCancellationRequested();
+                final = PublishUpload(temp, targetDir, fileName);
             }
-            catch
+            finally
             {
-                try { File.Delete(temp); } catch { }
-                throw;
+                // Only this request created the staging file.
+                try { File.Delete(temp); } catch (IOException) { }
             }
-            Log.Info("files", $"upload {final} ({new FileInfo(final).Length} bytes) from {ctx.Connection.RemoteIpAddress}");
+            Log.Info("files", $"upload {final} from {ctx.Connection.RemoteIpAddress}");
             return Results.Json(new { path = final, name = Path.GetFileName(final) });
         });
 
@@ -118,16 +120,23 @@ public static class FileApi
         return name.Length == 0 || name is "." or ".." ? null : name;
     }
 
-    private static string UniquePath(string path)
+    private static string PublishUpload(string temp, string dir, string name)
     {
-        if (!File.Exists(path) && !Directory.Exists(path)) return path;
-        var dir = Path.GetDirectoryName(path)!;
-        var stem = Path.GetFileNameWithoutExtension(path);
-        var ext = Path.GetExtension(path);
-        for (int i = 1; ; i++)
+        var stem = Path.GetFileNameWithoutExtension(name);
+        var ext = Path.GetExtension(name);
+        for (int i = 0; ; i++)
         {
-            var p = Path.Combine(dir, $"{stem} ({i}){ext}");
-            if (!File.Exists(p) && !Directory.Exists(p)) return p;
+            var candidate = Path.Combine(dir, i == 0 ? name : $"{stem} ({i}){ext}");
+            if (Directory.Exists(candidate)) continue;
+            try
+            {
+                File.Move(temp, candidate, overwrite: false);
+                return candidate;
+            }
+            catch (IOException e) when ((e.HResult & 0xffff) is 80 or 183 || Directory.Exists(candidate))
+            {
+                // Another upload already published this name.
+            }
         }
     }
 

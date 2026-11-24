@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import NIOHTTP1
 
@@ -86,37 +87,51 @@ enum FileApi {
         return a <= b ? (a, b) : nil
     }
 
-    /// Uploads stream straight to "<name>.headroom-part", renamed when complete.
+    /// Each request owns its staging file until it publishes the completed upload.
     final class UploadSink: HttpBodySink {
-        let final: String
+        let dir: String
+        let name: String
         let temp: String
         let handle: FileHandle
         let remote: String?
 
         init(dir: String, name: String, remote: String?) throws {
-            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-            final = FileApi.uniquePath((dir as NSString).appendingPathComponent(name))
-            temp = final + ".headroom-part"
-            guard FileManager.default.createFile(atPath: temp, contents: nil), let h = FileHandle(forWritingAtPath: temp) else {
-                throw CocoaError(.fileWriteNoPermission)
-            }
-            handle = h
+            self.dir = dir
+            self.name = name
             self.remote = remote
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            var template = Array((dir as NSString).appendingPathComponent(".headroom-upload-XXXXXX").utf8CString)
+            let fd = mkstemp(&template)
+            guard fd >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+            temp = String(cString: template)
+            handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         }
 
         func write(_ bytes: [UInt8]) throws { try handle.write(contentsOf: bytes) }
 
         func finish() -> HttpResponse {
-            try? handle.close()
+            let fm = FileManager.default
+            let ext = (name as NSString).pathExtension
+            let stem = (name as NSString).deletingPathExtension
             do {
-                try FileManager.default.moveItem(atPath: temp, toPath: final)
+                try handle.close()
+                var i = 0
+                while true {
+                    let candidate = i == 0 ? name : "\(stem) (\(i))" + (ext.isEmpty ? "" : ".\(ext)")
+                    let final = (dir as NSString).appendingPathComponent(candidate)
+                    do {
+                        try fm.moveItem(atPath: temp, toPath: final)
+                    } catch let error as CocoaError where error.code == .fileWriteFileExists {
+                        i += 1
+                        continue
+                    }
+                    Log.info("files", "upload \(final) from \(remote ?? "?")")
+                    return .json(["path": final, "name": candidate])
+                }
             } catch {
-                try? FileManager.default.removeItem(atPath: temp)
+                try? fm.removeItem(atPath: temp)
                 return .json(["error": "could not save: \(error.localizedDescription)"], status: .internalServerError)
             }
-            let size = (try? FileManager.default.attributesOfItem(atPath: final)[.size] as? NSNumber)?.intValue ?? 0
-            Log.info("files", "upload \(final) (\(size) bytes) from \(remote ?? "?")")
-            return .json(["path": final, "name": (final as NSString).lastPathComponent])
         }
 
         func abort() {
@@ -162,20 +177,6 @@ enum FileApi {
         guard var n = name?.replacingOccurrences(of: "\\", with: "/").split(separator: "/").last.map(String.init) else { return nil }
         n = n.replacingOccurrences(of: ":", with: "_").replacingOccurrences(of: "\0", with: "_").trimmingCharacters(in: .whitespacesAndNewlines)
         return n.isEmpty || n == "." || n == ".." ? nil : n
-    }
-
-    static func uniquePath(_ path: String) -> String {
-        let fm = FileManager.default
-        if !fm.fileExists(atPath: path) { return path }
-        let dir = (path as NSString).deletingLastPathComponent
-        let ext = (path as NSString).pathExtension
-        let stem = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
-        var i = 1
-        while true {
-            let p = (dir as NSString).appendingPathComponent(ext.isEmpty ? "\(stem) (\(i))" : "\(stem) (\(i)).\(ext)")
-            if !fm.fileExists(atPath: p) { return p }
-            i += 1
-        }
     }
 
     static var defaultUploadDir: String {

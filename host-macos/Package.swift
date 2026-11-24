@@ -31,6 +31,7 @@ let package = Package(
                 .product(name: "SwiftASN1", package: "swift-asn1"),
             ]
         ),
+        .testTarget(name: "HeadroomKitTests", dependencies: ["HeadroomKit"]),
         .executableTarget(name: "headroom", dependencies: ["HeadroomKit"]),
         // Menu-bar app: status item, notifications, settings window (the engine's admin page in a WKWebView),
         // and updates (../update-macos).
