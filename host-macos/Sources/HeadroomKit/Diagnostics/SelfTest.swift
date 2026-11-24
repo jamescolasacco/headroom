@@ -56,7 +56,10 @@ public enum SelfTest {
     }
 
     public static func run(_ args: [String]) -> Int32 {
-        let seconds = args.first.flatMap(Double.init) ?? 5
+        guard let seconds = Double(args.first ?? "5"), seconds.isFinite, seconds > 0 else {
+            print("selftest duration must be a positive number of seconds.")
+            return 2
+        }
         let app = NSApplication.shared
         app.setActivationPolicy(.prohibited)
         guard let monitor = Displays.enumerate().first else {
@@ -80,7 +83,12 @@ public enum SelfTest {
             sink.lock.lock()
             let elapsed = Date().timeIntervalSince(start)
             let path = (FileManager.default.currentDirectoryPath as NSString).appendingPathComponent("headroom-selftest.h264")
-            try? sink.out.write(to: URL(fileURLWithPath: path))
+            do {
+                try sink.out.write(to: URL(fileURLWithPath: path), options: .atomic)
+            } catch {
+                print("Could not write \(path): \(error.localizedDescription)")
+                exit(1)
+            }
             if let c = sink.config {
                 print("encoder:   \(c.encoderName) (\(c.hardware ? "hardware" : "software")), \(c.codec), \(c.width)x\(c.height) from \(c.sourceWidth)x\(c.sourceHeight)")
             }

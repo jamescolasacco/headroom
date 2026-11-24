@@ -21,7 +21,7 @@ extension String {
     }
 }
 
-let command = args.first.map { $0.hasPrefix("-") ? "run" : $0.lowercased() } ?? "run"
+let command = args.first.map { ["--help", "-h"].contains($0) ? "help" : ($0.hasPrefix("-") ? "run" : $0.lowercased()) } ?? "run"
 let rest = args.first.map { $0.hasPrefix("-") ? args : Array(args.dropFirst()) } ?? []
 if ProcessInfo.processInfo.environment["HEADROOM_DEBUG"] == "1" { Log.minLevel = .debug }
 if command == "agent" { Log.consoleEnabled = false }

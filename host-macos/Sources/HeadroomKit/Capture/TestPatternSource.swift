@@ -17,13 +17,30 @@ final class TestPatternSource: CaptureSource {
     override func start() {
         super.start()
         let w = monitor.width, h = monitor.height
-        let attrs: [CFString: Any] = [
+        var attrs: [CFString: Any] = [
             kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
             kCVPixelBufferWidthKey: w, kCVPixelBufferHeightKey: h,
             kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
             kCVPixelBufferCGBitmapContextCompatibilityKey: true,
         ]
-        CVPixelBufferPoolCreate(nil, [kCVPixelBufferPoolMinimumBufferCountKey: 4] as CFDictionary, attrs as CFDictionary, &pool)
+        // Some headless Macs can create an IOSurface pool but cannot allocate from it.
+        func preparePool() -> CVReturn {
+            var candidate: CVPixelBufferPool?
+            let status = CVPixelBufferPoolCreate(nil, [kCVPixelBufferPoolMinimumBufferCountKey: 4] as CFDictionary, attrs as CFDictionary, &candidate)
+            guard status == kCVReturnSuccess, let candidate else { return status }
+            var first: CVPixelBuffer?
+            let allocated = CVPixelBufferPoolCreatePixelBuffer(nil, candidate, &first)
+            if allocated == kCVReturnSuccess { pool = candidate }
+            return allocated
+        }
+        if preparePool() != kCVReturnSuccess {
+            attrs.removeValue(forKey: kCVPixelBufferIOSurfacePropertiesKey)
+            let status = preparePool()
+            guard status == kCVReturnSuccess else {
+                setStatus(.unavailable, detail: "Could not allocate test pattern buffers (Core Video \(status)).")
+                return
+            }
+        }
         setStatus(.ok)
         let t = DispatchSource.makeTimerSource(queue: queue)
         t.schedule(deadline: .now(), repeating: .nanoseconds(1_000_000_000 / 60), leeway: .milliseconds(1))
