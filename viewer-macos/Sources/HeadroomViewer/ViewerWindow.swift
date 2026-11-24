@@ -278,6 +278,9 @@ final class ViewerWindow: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUI
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         // The page process crashed or was reclaimed: reload rather than show a blank window.
+        sessionActive = false
+        sessionHost = nil
+        updateShortcutCapture()
         webView.reload()
     }
 
