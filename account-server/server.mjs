@@ -70,7 +70,17 @@ export class Store {
   constructor(dir) {
     this.file = path.join(dir, 'db.json');
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    this.data = fs.existsSync(this.file) ? JSON.parse(fs.readFileSync(this.file, 'utf8')) : null;
+    this.data = null;
+    if (fs.existsSync(this.file)) {
+      const data = JSON.parse(fs.readFileSync(this.file, 'utf8'));
+      if (!data || !['accounts', 'devices', 'computers'].every(k => Array.isArray(data[k]))) {
+        throw new Error('Invalid account database. Check db.json before starting the server.');
+      }
+      const legacy = data.version === 1 || (data.version === undefined &&
+        data.accounts.every(a => typeof a?.username === 'string' && !a.email));
+      if (data.version !== 2 && !legacy) throw new Error('Unsupported account database version. Check the server version before continuing.');
+      this.data = data;
+    }
     if (this.data && this.data.version !== 2) {
       // Version 1 had usernames: start fresh, keeping the old file beside it.
       const old = path.join(dir, `db.v1-${Date.now()}.json`);
@@ -81,7 +91,9 @@ export class Store {
     this.data ||= { version: 2, accounts: [], devices: [], computers: [] };
     const keyFile = path.join(dir, 'secret.key');
     if (!fs.existsSync(keyFile)) fs.writeFileSync(keyFile, crypto.randomBytes(32).toString('hex'), { mode: 0o600 });
-    this.key = Buffer.from(fs.readFileSync(keyFile, 'utf8').trim(), 'hex');
+    const key = fs.readFileSync(keyFile, 'utf8').trim();
+    if (!/^[a-f0-9]{64}$/i.test(key)) throw new Error('Invalid secret.key. Restore the original key before starting the server.');
+    this.key = Buffer.from(key, 'hex');
     this.dirty = false;
   }
   save() {
@@ -171,8 +183,9 @@ async function breached(password) {
  */
 export async function passwordProblem(password, username /* the email's name part */, { breach = true } = {}) {
   const pw = normalizePassword(password);
-  if ([...pw].length < MIN_PASSWORD) return `Use at least ${MIN_PASSWORD} characters. A few words make a good one; spaces are fine.`;
-  if (pw.length > 256) return 'Use at most 256 characters.';
+  const length = [...pw].length;
+  if (length < MIN_PASSWORD) return `Use at least ${MIN_PASSWORD} characters. A few words make a good one; spaces are fine.`;
+  if (length > 256) return 'Use at most 256 characters.';
   const lower = pw.toLowerCase();
   if (username && username.length >= 3 && lower.includes(username.toLowerCase())) return 'Don\'t include your email address.';
   const compact = lower.replace(/\s+/g, '');
@@ -305,7 +318,9 @@ const TYPES = {
 
 function serveStatic(req, res) {
   if (!WEB_ROOT) return false;
-  let p = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+  let p;
+  try { p = decodeURIComponent(new URL(req.url, 'http://x').pathname); }
+  catch { res.writeHead(400); res.end('bad path'); return true; }
   if (p.endsWith('/')) p += 'index.html';
   // The settings page belongs to the computers, not here.
   if (p === '/admin.html' || p === '/js/admin.js' || p === '/css/admin.css') return false;
@@ -765,8 +780,9 @@ export function createApp({ store, now = () => Date.now(), mail = sendMail }) {
       const problem = await passwordProblem(body.password, email.split('@')[0]);
       if (problem) fail(400, 'weak-password', { message: problem });
       takeCode(req, `signup:${email}`, body.code);
+      const password = await hashPassword(body.password);
       if (store.accountByEmail(email)) fail(409, 'exists', { message: 'That email already has an account. Sign in instead.' });
-      const account = { id: randomId(), email, password: await hashPassword(body.password), created: new Date(now()).toISOString(), totpEnabled: false };
+      const account = { id: randomId(), email, password, created: new Date(now()).toISOString(), totpEnabled: false };
       store.data.accounts.push(account);
       audit(`account created: ${email}`);
       return signIn(req, account, body, 'viewer', { alert: false });
@@ -1076,8 +1092,9 @@ export function createApp({ store, now = () => Date.now(), mail = sendMail }) {
   /** HTTP upgrades: devices' control and tunnel connections, and viewers' WebSockets to /r/… and /c/…. */
   async function upgrade(req, socket, head) {
     socket.on('error', () => socket.destroy());
-    const url = new URL(req.url, 'http://x');
     const proto = String(req.headers.upgrade || '').toLowerCase();
+    let url;
+    try { url = new URL(req.url, 'http://x'); } catch { return rawResponse(socket, 400, 'Bad Request'); }
     try {
       if (url.pathname === '/api/relay/control') {
         if (!RELAY) return rawResponse(socket, 404, 'Not Found', {}, '{"error":"relay-off"}');
@@ -1137,7 +1154,8 @@ export function createApp({ store, now = () => Date.now(), mail = sendMail }) {
   }
 
   async function handle(req, res) {
-    const url = new URL(req.url, 'http://x');
+    let url;
+    try { url = new URL(req.url, 'http://x'); } catch { res.writeHead(400); res.end('bad path'); return; }
     const headers = {
       'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY',
       'Cross-Origin-Opener-Policy': 'same-origin', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=()',
@@ -1338,6 +1356,7 @@ async function cli(cmd, args) {
 async function main() {
   const [cmd, ...args] = process.argv.slice(2);
   if (cmd) process.exit(await cli(cmd, args));
+  if (runningServer()) throw new Error('An account server is already running on this data directory.');
   const store = new Store(DATA_DIR);
   const handler = createApp({ store });
   const tls = env.TLS_CERT && env.TLS_KEY;
