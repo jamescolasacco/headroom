@@ -95,6 +95,8 @@ public final class VideoPipeline {
     private var encoder: H264Encoder?
     private var builtGeneration: Int64 = -1
     private var lastStatus: CaptureStatus = .starting
+    private var encoderRetryAtMs: Int64 = 0
+    private var encoderUnavailable = false
     private var sourceDims = (0, 0)
 
     // Encoder-callback state (VideoToolbox's thread), under `stateLock`.
@@ -195,6 +197,8 @@ public final class VideoPipeline {
             let st = src.status
             if st != lastStatus {
                 lastStatus = st
+                encoderRetryAtMs = 0
+                encoderUnavailable = false
                 sink?.onCaptureStatus(st, detail: src.statusDetail)
                 if st == .ok { keyframeRequested = true }
             }
@@ -239,7 +243,7 @@ public final class VideoPipeline {
             }
 
             guard ensureBuilt(src) else {
-                Thread.sleep(forTimeInterval: 0.1)
+                refinementLeft = 0
                 continue
             }
             // Sharpening has its own bitrate (a whole new picture, more); a new picture goes back to the stream's.
@@ -307,6 +311,7 @@ public final class VideoPipeline {
         pendingSettings = nil
         stateLock.unlock()
         guard let next else { return }
+        encoderRetryAtMs = 0
         let monitorChanged = next.monitor.id != settings.monitor.id
         stateLock.lock(); settings = next; stateLock.unlock()
         tearDownEncoder() // resolution/fps/encoder may differ — rebuild lazily
@@ -339,6 +344,7 @@ public final class VideoPipeline {
 
     private func ensureBuilt(_ src: CaptureSource) -> Bool {
         if encoder != nil && builtGeneration == src.generation { return true }
+        guard Clock.nowMs >= encoderRetryAtMs else { return false }
         tearDownEncoder()
         guard let latest = src.latest else { return false }
         let srcW = CVPixelBufferGetWidth(latest), srcH = CVPixelBufferGetHeight(latest)
@@ -366,9 +372,16 @@ public final class VideoPipeline {
             stateLock.lock(); encoderNameValue = enc.name; stateLock.unlock()
         } catch {
             Log.error("pipeline", "encoder creation failed", error)
-            sink?.onCaptureStatus(.unavailable, detail: "video encoder unavailable: \(error)")
+            if !encoderUnavailable {
+                sink?.onCaptureStatus(.unavailable, detail: "video encoder unavailable: \(error)")
+            }
+            encoderUnavailable = true
+            encoderRetryAtMs = Clock.nowMs + 2000
             return false
         }
+        if encoderUnavailable { sink?.onCaptureStatus(.ok, detail: src.statusDetail) }
+        encoderUnavailable = false
+        encoderRetryAtMs = 0
         builtGeneration = src.generation
         keyframeRequested = true
         sourceDims = (srcW, srcH)

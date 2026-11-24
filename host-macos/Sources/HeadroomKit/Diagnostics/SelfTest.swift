@@ -83,20 +83,24 @@ public enum SelfTest {
             sink.lock.lock()
             let elapsed = Date().timeIntervalSince(start)
             let path = (FileManager.default.currentDirectoryPath as NSString).appendingPathComponent("headroom-selftest.h264")
-            do {
-                try sink.out.write(to: URL(fileURLWithPath: path), options: .atomic)
-            } catch {
-                print("Could not write \(path): \(error.localizedDescription)")
-                exit(1)
-            }
             if let c = sink.config {
                 print("encoder:   \(c.encoderName) (\(c.hardware ? "hardware" : "software")), \(c.codec), \(c.width)x\(c.height) from \(c.sourceWidth)x\(c.sourceHeight)")
             }
             print("status:    \(sink.statusLog.joined(separator: " -> "))")
             print("frames:    \(sink.frames) (\(sink.keyFrames) key) in \(String(format: "%.1f", elapsed)) s = \(String(format: "%.1f", Double(sink.frames) / elapsed)) fps")
             print("bitrate:   \(String(format: "%.0f", Double(sink.bytes) * 8 / 1000 / elapsed)) kbps; mean encode \(String(format: "%.2f", sink.frames > 0 ? sink.encodeMsSum / Double(sink.frames) : 0)) ms")
-            print("wrote:     \(path) (\(sink.out.count) bytes) — inspect with: ffprobe -show_streams \(path)")
-            result = sink.frames > 0 ? 0 : 1
+            if sink.frames == 0 {
+                print("No encoded frames were produced.")
+                result = 1
+            } else {
+                do {
+                    try sink.out.write(to: URL(fileURLWithPath: path), options: .atomic)
+                    print("wrote:     \(path) (\(sink.out.count) bytes) — inspect with: ffprobe -show_streams \(path)")
+                } catch {
+                    print("Could not write \(path): \(error.localizedDescription)")
+                    result = 1
+                }
+            }
             sink.lock.unlock()
             Log.flush()
             exit(result)
