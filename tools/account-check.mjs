@@ -147,7 +147,7 @@ if (process.argv.includes('--check-uploads')) {
     const name = 'shared notes.txt';
     await fs.writeFile(path.join(dir, name), 'original');
     const url = `${rbase}/api/files/upload?${new URLSearchParams({ dir, name })}`;
-    const bodies = Array.from({ length: 6 }, (_, i) => Buffer.alloc(256 * 1024, i));
+    const bodies = Array.from({ length: 6 }, (_, i) => Buffer.from(Uint8Array.from({ length: 256 * 1024 }, (_, n) => (i + n % 251) & 255)));
     const results = await Promise.allSettled(bodies.map(async body => {
       const r = await fetch(url, { method: 'POST', headers: { Authorization: `Bearer ${computer.token}` }, body });
       if (!r.ok) throw new Error(`upload returned ${r.status}`);
@@ -160,6 +160,29 @@ if (process.argv.includes('--check-uploads')) {
       if (result.status === 'rejected') throw result.reason;
       return result.value;
     });
+    const saved = path.join(dir, names[0]);
+    const requestId = 'download-check';
+    const token = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        s1.ws.removeEventListener('message', onMessage);
+        reject(new Error('download token timed out'));
+      }, 10000);
+      function onMessage(event) {
+        if (typeof event.data !== 'string') return;
+        const m = JSON.parse(event.data);
+        if (m.t !== 'file-token' || m.id !== requestId || m.path !== saved) return;
+        clearTimeout(timer);
+        s1.ws.removeEventListener('message', onMessage);
+        resolve(m.token);
+      }
+      s1.ws.addEventListener('message', onMessage);
+      s1.ws.send(JSON.stringify({ t: 'file-token', path: saved, id: requestId }));
+    });
+    const download = await fetch(`${rbase}/api/files/download?t=${encodeURIComponent(token)}`, {
+      headers: { Range: 'bytes=1024-2047' },
+    });
+    check(download.status === 206 && Buffer.from(await download.arrayBuffer()).equals(bodies[0].subarray(1024, 2048)),
+      'a ranged download returns the requested bytes through the relay');
     check(new Set(names).size === bodies.length, 'simultaneous uploads receive distinct names');
     check(await fs.readFile(path.join(dir, name), 'utf8') === 'original', 'existing file survives the uploads');
     check((await fs.readdir(dir)).length === bodies.length + 1, 'no partial files are left behind');

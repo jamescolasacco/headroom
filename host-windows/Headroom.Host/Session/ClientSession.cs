@@ -486,7 +486,8 @@ public sealed class ClientSession : IVideoSink
                 if (path != null && _device != null)
                 {
                     var tok = AuthService.CreateEphemeral(_device.Id, "download", path, TimeSpan.FromMinutes(2));
-                    Enqueue(new { t = "file-token", path, token = tok, id = Int(root, "id") });
+                    object? id = (object?)Str(root, "id") ?? Int(root, "id");
+                    Enqueue(new { t = "file-token", path, token = tok, id });
                 }
                 break;
             }
