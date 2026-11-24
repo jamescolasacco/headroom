@@ -41,6 +41,11 @@ export class Connection extends EventTarget {
 
   _open() {
     this._clearTimers();
+    this.welcome = null;
+    this._assembly = null;
+    this._pings.clear();
+    this._rtts = [];
+    this.rttMs = 0;
     this.setState(this.attempt === 0 ? 'connecting' : 'reconnecting', { attempt: this.attempt });
     let ws;
     try {
@@ -53,15 +58,17 @@ export class Connection extends EventTarget {
     this.ws = ws;
     const openTimeout = setTimeout(() => { if (ws.readyState !== WebSocket.OPEN) ws.close(); }, 8000);
 
+    this._timers.push(openTimeout);
     ws.onopen = () => {
+      if (this.ws !== ws) return;
       clearTimeout(openTimeout);
       this.lastMessageAt = performance.now();
       const client = { name: this.host.deviceName || deviceLabel(), platform: platformId(), ua: navigator.userAgent.slice(0, 200) };
       // A guest: the first connection uses the code; reconnects use the key from welcome.
-      if (this.host.support && !this.host.token) this.sendJson({ t: 'hello', support: this.host.support, client });
-      else this.sendJson({ t: 'hello', token: this.host.token, client });
+      const credentials = this.host.support && !this.host.token ? { support: this.host.support } : { token: this.host.token };
+      ws.send(JSON.stringify({ t: 'hello', ...credentials, client }));
     };
-    ws.onmessage = ev => this._onMessage(ev.data);
+    ws.onmessage = ev => { if (this.ws === ws && !this._fatal) this._onMessage(ev.data); };
     ws.onerror = () => { /* onclose follows */ };
     ws.onclose = ev => {
       clearTimeout(openTimeout);
@@ -84,7 +91,7 @@ export class Connection extends EventTarget {
 
   /** Reconnect immediately (e.g. app came back to the foreground). */
   reconnectNow() {
-    if (this.closedByUser) return;
+    if (this.closedByUser || this._fatal) return;
     if (this.ws) { try { this.ws.close(); } catch { } this.ws = null; }
     this.attempt = Math.max(this.attempt, 1);
     this._open();
@@ -103,14 +110,14 @@ export class Connection extends EventTarget {
     this._timers = [];
   }
 
-  get isOpen() { return this.ws && this.ws.readyState === WebSocket.OPEN && this.welcome; }
+  get isOpen() { return this.ws?.readyState === WebSocket.OPEN && !!this.welcome && !this._fatal; }
 
   sendJson(obj) {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(obj));
+    if (this.isOpen) this.ws.send(JSON.stringify(obj));
   }
 
   sendBinary(buf) {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN && this.welcome) this.ws.send(buf);
+    if (this.isOpen) this.ws.send(buf);
   }
 
   /** Bytes queued in the browser's socket buffer: used to drop redundant mouse moves on slow links. */

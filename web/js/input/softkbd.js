@@ -24,24 +24,25 @@ export class SoftKeyboard extends EventTarget {
     this.open = false;
     this.composing = false;
     const s = ctx.sink;
+    const options = { signal: ctx.signal };
     // While a word is being composed (Asian keyboards, dictation, swipe typing, Android's suggestions) the field
     // holds a draft: what it becomes is sent when the composition ends. Each input event says itself whether it's
     // part of one (isComposing): a composition whose end never came (the keyboard went away mid-word, a browser that
     // skips compositionend) must not leave every later keystroke ignored until the page is reloaded.
-    s.addEventListener('input', e => this._input(e));
-    s.addEventListener('compositionstart', () => { this.composing = true; });
-    s.addEventListener('compositionend', () => { this.composing = false; this._input(); });
+    s.addEventListener('input', e => this._input(e), options);
+    s.addEventListener('compositionstart', () => { this.composing = true; }, options);
+    s.addEventListener('compositionend', () => { this.composing = false; this._input(); }, options);
     s.addEventListener('blur', () => {
       this.composing = false;
       if (this.open) { this.open = false; this.dispatchEvent(new Event('change')); }
-    });
+    }, options);
     s.addEventListener('focus', () => {
       this.composing = false;
       this._reset();
       // On a touch screen the keyboard comes up whenever this field has focus, also when iOS gives it back by
       // itself (after the app switcher, or a hardware keyboard coming and going): say so.
       if (ctx.touch && !this.open) { this.open = true; this.dispatchEvent(new Event('change')); }
-    });
+    }, options);
     this._reset();
   }
 

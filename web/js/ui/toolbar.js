@@ -15,25 +15,26 @@ const NARROW = 560; // narrower than this (a phone held upright): the bar keeps 
 export class Toolbar {
   constructor(session) {
     this.s = session;
+    const options = { signal: session.life.signal };
     this.el = document.getElementById('toolbar');
     this.hideTimer = 0;
     this.hovering = false;
     this.touchUi = isTouchPrimary || isIPad;
     this.el.classList.toggle('pinned', this.touchUi);
     document.getElementById('toolbar-handle').hidden = this.touchUi; // the folded tab takes its place
-    this.el.addEventListener('pointerenter', () => { this.hovering = true; clearTimeout(this.hideTimer); });
-    this.el.addEventListener('pointerleave', () => { this.hovering = false; this.peek(1500); });
+    this.el.addEventListener('pointerenter', () => { this.hovering = true; clearTimeout(this.hideTimer); }, options);
+    this.el.addEventListener('pointerleave', () => { this.hovering = false; this.peek(1500); }, options);
     this.el.addEventListener('pointerdown', e => {
       e.stopPropagation();
       // A tap here mustn't take focus from the remote keyboard (that would close the on-screen keyboard).
       if (e.pointerType === 'touch') e.preventDefault();
-    });
+    }, options);
     // Keyboard: Ctrl+Alt+Shift+M focuses the toolbar; arrows move along it, Escape goes back to the remote screen.
-    this.el.addEventListener('focusin', () => { clearTimeout(this.hideTimer); this.el.classList.remove('hidden'); this.el.inert = false; });
-    this.el.addEventListener('focusout', e => { if (!this.dismissing && !this.el.contains(e.relatedTarget)) this.peek(1500); });
-    this.el.addEventListener('keydown', e => this._key(e));
+    this.el.addEventListener('focusin', () => { clearTimeout(this.hideTimer); this.el.classList.remove('hidden'); this.el.inert = false; }, options);
+    this.el.addEventListener('focusout', e => { if (!this.dismissing && !this.el.contains(e.relatedTarget)) this.peek(1500); }, options);
+    this.el.addEventListener('keydown', e => this._key(e), options);
     // Its focus ring shows when you arrive from the keyboard, even the first time (not after a tap or click).
-    this.el.addEventListener('pointerdown', () => this.el.classList.remove('kbd'), true);
+    this.el.addEventListener('pointerdown', () => this.el.classList.remove('kbd'), { ...options, capture: true });
     this.refresh();
   }
 

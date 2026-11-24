@@ -98,7 +98,7 @@ export class ExtraKeysBar {
    *   onHideKeyboard(), keyboardUp() (the on-screen keyboard's input has focus), reopenKeyboard() (focus it again,
    *   from inside a tap) }
    */
-  constructor(el, { keyboard, mods, conn, onLayout, onKey, typingEl, onCopyText, onHideText, onHideKeyboard, keyboardUp, reopenKeyboard }) {
+  constructor(el, { signal, keyboard, mods, conn, onLayout, onKey, typingEl, onCopyText, onHideText, onHideKeyboard, keyboardUp, reopenKeyboard }) {
     this.el = el;
     this.keyboard = keyboard;
     this.mods = mods;
@@ -126,12 +126,12 @@ export class ExtraKeysBar {
     // (Firefox on iPhone) move focus off the keyboard's hidden input for them, which closes the keyboard: the bar
     // cancels both (a tap here is handled on its own: keys on the lift, the end buttons on touchend). If the keyboard
     // went anyway, it's brought back while the tap still counts as one (iOS opens a keyboard only then).
-    el.addEventListener('mousedown', e => e.preventDefault());
-    el.addEventListener('touchstart', () => { this.upAtTouch = !!keyboardUp?.(); this.hideAsked = false; }, { passive: true });
+    el.addEventListener('mousedown', e => e.preventDefault(), { signal });
+    el.addEventListener('touchstart', () => { this.upAtTouch = !!keyboardUp?.(); this.hideAsked = false; }, { passive: true, signal });
     el.addEventListener('touchend', e => {
       if (e.cancelable) e.preventDefault();
       if (this.upAtTouch && !this.hideAsked && !keyboardUp?.()) reopenKeyboard?.();
-    });
+    }, { signal });
   }
 
   /**

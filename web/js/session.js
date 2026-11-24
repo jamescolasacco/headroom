@@ -40,6 +40,7 @@ export class Session {
     this.wakeLock = null;
     this.relative = false;
     this.disposed = false;
+    this.life = new AbortController();
     this.audio = new AudioPlayer();
     // Every session starts muted: nothing plays, or stops this device's own music, until Unmute (setAudio).
     this.audioOn = false;
@@ -112,9 +113,9 @@ export class Session {
       onPress: () => this.typing.reset(), // a click puts the cursor somewhere else
     });
 
-    this.softkbd = new SoftKeyboard({ sink, conn: this.conn, keyboard: this.keyboard, mods: this.mods, touch: isTouchPrimary || isIPad, echo: this.typing });
+    this.softkbd = new SoftKeyboard({ sink, signal: this.life.signal, conn: this.conn, keyboard: this.keyboard, mods: this.mods, touch: isTouchPrimary || isIPad, echo: this.typing });
     this.extraKeys = new ExtraKeysBar($('extra-keys'), {
-      keyboard: this.keyboard, mods: this.mods, conn: this.conn,
+      signal: this.life.signal, keyboard: this.keyboard, mods: this.mods, conn: this.conn,
       onLayout: () => this.layoutChrome(),
       onKey: code => this.typing.key(code),
       typingEl: $('typing'),
@@ -164,6 +165,7 @@ export class Session {
     this._wireLifecycle();
 
     await this.presenter.start();
+    if (this.disposed) return;
     this.keyboard.attach();
     this.mouse.attach();
     this.touch.attach();
@@ -565,9 +567,14 @@ export class Session {
 
   async _requestWakeLock() {
     try {
-      if (navigator.wakeLock && document.visibilityState === 'visible' && !this.wakeLock) {
-        this.wakeLock = await navigator.wakeLock.request('screen');
-        this.wakeLock.addEventListener('release', () => { this.wakeLock = null; });
+      if (navigator.wakeLock && document.visibilityState === 'visible' && !this.disposed && !this.wakeLock && !this.requestingWakeLock) {
+        this.requestingWakeLock = true;
+        try {
+          const lock = await navigator.wakeLock.request('screen');
+          if (this.disposed) { await lock.release(); return; }
+          this.wakeLock = lock;
+          lock.addEventListener('release', () => { if (this.wakeLock === lock) this.wakeLock = null; });
+        } finally { this.requestingWakeLock = false; }
       }
     } catch { /* not allowed (e.g. low battery) */ }
   }
@@ -709,6 +716,9 @@ export class Session {
   stop() {
     if (this.disposed) return;
     this.disposed = true;
+    this.life.abort();
+    clearTimeout(this.toolbar?.hideTimer);
+    clearTimeout(this._sizeTimer);
     clearTimeout(this._lateCursorTimer);
     this._offNative?.();
     postNative({ cmd: 'session', active: false });
