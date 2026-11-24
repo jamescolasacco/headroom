@@ -98,11 +98,28 @@ sign() { # path...
   codesign "${opts[@]}" "$@"
 }
 
+STAGE="$(mktemp -d "$DIST/.headroom-build.XXXXXXXX")"
+trap 'if [ ! -e "$STAGE/previous" ]; then rm -rf "$STAGE"; fi' EXIT
+
+publish_app() (
+  local name="${1##*/}" dest="$DIST/${1##*/}" lock="$DIST/.${1##*/}.build.lock"
+  shlock -p "$$" -f "$lock" || { echo "Another build is replacing $dest" >&2; exit 1; }
+  trap 'rm -f "$lock"' EXIT
+  if [ -e "$dest" ]; then mv "$dest" "$STAGE/previous"; fi
+  if ! mv "$STAGE/$name" "$dest"; then
+    if [ -e "$STAGE/previous" ]; then
+      mv "$STAGE/previous" "$dest" || echo "Previous build retained at $STAGE/previous" >&2
+    fi
+    return 1
+  fi
+  rm -rf "$STAGE/previous"
+  echo "    $dest"
+)
+
 if [ "$ONLY" != "viewer" ]; then
   echo "==> Headroom Server"
-  BIN="$(build host-macos headroom HeadroomServer)"
-  APP="$DIST/Headroom Server.app"
-  rm -rf "$APP"
+  BIN="$(set -e; build host-macos headroom HeadroomServer)"
+  APP="$STAGE/Headroom Server.app"
   mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
   cp "$BIN/HeadroomServer" "$BIN/headroom" "$APP/Contents/MacOS/"
   cp "$ICON" "$APP/Contents/Resources/AppIcon.icns"
@@ -131,14 +148,13 @@ if [ "$ONLY" != "viewer" ]; then
   sign "$APP/Contents/MacOS/headroom"
   sign "$APP"
   codesign --verify --strict "$APP"
-  echo "    $APP"
+  publish_app "$APP"
 fi
 
 if [ "$ONLY" != "server" ]; then
   echo "==> Headroom Viewer"
-  BIN="$(build viewer-macos HeadroomViewer)"
-  APP="$DIST/Headroom Viewer.app"
-  rm -rf "$APP"
+  BIN="$(set -e; build viewer-macos HeadroomViewer)"
+  APP="$STAGE/Headroom Viewer.app"
   mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
   cp "$BIN/HeadroomViewer" "$APP/Contents/MacOS/"
   cp "$ICON" "$APP/Contents/Resources/AppIcon.icns"
@@ -166,7 +182,7 @@ if [ "$ONLY" != "server" ]; then
   xattr -cr "$APP"
   sign "$APP"
   codesign --verify --strict "$APP"
-  echo "    $APP"
+  publish_app "$APP"
 fi
 
 echo
