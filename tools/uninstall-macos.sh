@@ -7,7 +7,12 @@
 #            resets the Screen Recording / Accessibility permissions macOS granted to Headroom Server
 set -euo pipefail
 PURGE=0
-[ "${1:-}" = "--purge" ] && PURGE=1
+case "$#:${1:-}" in
+  0:) ;;
+  1:--purge) PURGE=1 ;;
+  1:--help|1:-h) echo "usage: $0 [--purge]"; exit 0 ;;
+  *) echo "usage: $0 [--purge]" >&2; exit 2 ;;
+esac
 
 # SIGTERM quits each app (Headroom Server's engine exits with it).
 for exe in HeadroomServer HeadroomViewer; do

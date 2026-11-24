@@ -20,7 +20,8 @@ LAUNCH=1
 VIEWER=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --only) ONLY="$2"; shift 2 ;;
+    --only)
+      case "${2:-}" in server|viewer) ONLY="$2"; shift 2 ;; *) echo "--only needs server or viewer" >&2; exit 2 ;; esac ;;
     --cli) CLI=1; shift ;;
     --no-launch) LAUNCH=0; shift ;;
     --relaunch-viewer) VIEWER=1; shift ;;
@@ -30,7 +31,11 @@ done
 
 DEST="${HEADROOM_INSTALL_DIR:-/Applications}"
 mkdir -p "$DEST" 2>/dev/null || true
-[ -w "$DEST" ] || { DEST="$HOME/Applications"; mkdir -p "$DEST"; }
+if [ ! -w "$DEST" ]; then
+  if [ -n "${HEADROOM_INSTALL_DIR:-}" ]; then echo "Cannot install in $DEST" >&2; exit 1; fi
+  DEST="$HOME/Applications"
+  mkdir -p "$DEST"
+fi
 
 # The updater runs this with HEADROOM_INSTALL_WAIT: whatever happens, Headroom Server must be running afterwards
 # (the new one, or the old one if something failed), or a computer someone reaches from afar would be gone.
@@ -39,13 +44,20 @@ if [ -n "${HEADROOM_INSTALL_WAIT:-}" ] && [ "$LAUNCH" = 1 ] && [ "$ONLY" != "vie
   trap 'open "$DEST/Headroom Server.app" || true' ERR
 fi
 
-install_app() { # name
+install_app() ( # name
   local src="$SRC/$1.app" dst="$DEST/$1.app"
   [ -d "$src" ] || { echo "$src not found: run tools/build-macos.sh first" >&2; exit 1; }
+  local lock="$DEST/.$1.install.lock" stage
+  shlock -p "$$" -f "$lock" || { echo "Another installer is updating $dst" >&2; exit 1; }
+  stage=""
+  trap 'if [ -n "$stage" ] && [ ! -e "$stage/previous" ]; then rm -rf "$stage"; fi; rm -f "$lock"' EXIT
+  stage="$(mktemp -d "$DEST/.headroom-install.XXXXXXXX")"
+  ditto "$src" "$stage/new"
+  xattr -dr com.apple.quarantine "$stage/new" 2>/dev/null || true
   # Stop a running copy (SIGTERM: the app quits and its engine follows). No AppleScript: "tell … to quit"
   # can launch an app that isn't running, and asks for the Automation permission.
   local exe
-  exe="$(defaults read "$src/Contents/Info" CFBundleExecutable)"
+  exe="$(/usr/bin/plutil -extract CFBundleExecutable raw -o - "$src/Contents/Info.plist")"
   if [ -n "${HEADROOM_INSTALL_DIR:-}" ]; then
     # Somewhere else: only stop a copy running from there (after it's had a chance to quit by itself).
     if [ -n "${HEADROOM_INSTALL_WAIT:-}" ]; then
@@ -53,14 +65,16 @@ install_app() { # name
     fi
     if pgrep -f "$dst/Contents/MacOS/$exe" >/dev/null; then pkill -f "$dst/Contents/MacOS/$exe"; sleep 1; fi
   elif pgrep -x "$exe" >/dev/null; then pkill -x "$exe"; sleep 1; fi
-  # The new copy goes next to the old one first, so a failed copy leaves the old app in place.
-  rm -rf "$dst.new"
-  ditto "$src" "$dst.new"
-  xattr -dr com.apple.quarantine "$dst.new" 2>/dev/null || true
-  rm -rf "$dst"
-  mv "$dst.new" "$dst"
+  if [ -e "$dst" ]; then mv "$dst" "$stage/previous"; fi
+  if ! mv "$stage/new" "$dst"; then
+    if [ -e "$stage/previous" ]; then
+      mv "$stage/previous" "$dst" || echo "Previous installation retained at $stage/previous" >&2
+    fi
+    return 1
+  fi
+  rm -rf "$stage/previous"
   echo "Installed $dst"
-}
+)
 
 if [ "$ONLY" != "viewer" ]; then
   install_app "Headroom Server"

@@ -23,7 +23,8 @@ UNIVERSAL=0
 CONFIG=release
 while [ $# -gt 0 ]; do
   case "$1" in
-    --only) ONLY="$2"; shift 2 ;;
+    --only)
+      case "${2:-}" in server|viewer) ONLY="$2"; shift 2 ;; *) echo "--only needs server or viewer" >&2; exit 2 ;; esac ;;
     --universal) UNIVERSAL=1; shift ;;
     --debug) CONFIG=debug; shift ;;
     *) echo "unknown option: $1" >&2; exit 1 ;;
