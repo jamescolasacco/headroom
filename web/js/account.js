@@ -10,10 +10,12 @@ const OLD_SERVER = 'https://relay.colasac.co', NEW_SERVER = 'https://headroom.co
 export function loadAccount() {
   let a;
   try { a = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch { return null; }
-  if (typeof a?.server === 'string' && a.server.replace(/\/+$/, '').toLowerCase() === OLD_SERVER) {
+  if (!a || typeof a.server !== 'string' || !a.server || typeof a.token !== 'string' || !a.token) return null;
+  a.computers = Array.isArray(a.computers) ? a.computers.filter(c => c && typeof c.id === 'string') : [];
+  if (a.server.replace(/\/+$/, '').toLowerCase() === OLD_SERVER) {
     a.server = NEW_SERVER;
     for (const c of a.computers || []) {
-      if (typeof c.lastUrl === 'string' && c.lastUrl.startsWith(OLD_SERVER)) c.lastUrl = NEW_SERVER + c.lastUrl.slice(OLD_SERVER.length);
+      if (c.lastUrl === OLD_SERVER || (typeof c.lastUrl === 'string' && c.lastUrl.startsWith(OLD_SERVER + '/'))) c.lastUrl = NEW_SERVER + c.lastUrl.slice(OLD_SERVER.length);
     }
     saveAccount(a);
   }
@@ -34,19 +36,23 @@ export function forgetOldData() {
 async function call(server, path, { method = 'GET', body, token, timeout = 10000 } = {}) {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), timeout);
-  let r;
+  let r, data;
   try {
     r = await fetch(server + path, {
       method, signal: ctl.signal, cache: 'no-store',
       headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       body: body ? JSON.stringify(body) : undefined,
     });
+    try { data = await r.json(); }
+    catch (err) {
+      if (ctl.signal.aborted || r.ok) throw err;
+      data = {};
+    }
   } catch {
     const e = new Error('Can\'t reach Headroom right now. Check your connection.');
     e.unreachable = true;
     throw e;
   } finally { clearTimeout(t); }
-  const data = await r.json().catch(() => ({}));
   if (!r.ok) {
     const e = new Error(data.message || data.error || `HTTP ${r.status}`);
     e.status = r.status; e.body = data;
@@ -150,8 +156,8 @@ function trustPins(computers) {
 export function accountHosts(a = loadAccount()) {
   if (!a) return [];
   return a.computers.map(c => ({
-    id: c.hostId || c.id, name: c.name, os: c.os, token: c.token, computerId: c.id,
-    urls: c.urls || [], relayUrl: c.relayId ? `${a.server}/r/${c.relayId}` : null, relayOnline: !!c.relayOnline,
+    id: c.hostId || c.id, hostId: c.hostId, name: c.name, os: c.os, token: c.token, computerId: c.id,
+    urls: Array.isArray(c.urls) ? c.urls.filter(u => typeof u === 'string') : [], relayUrl: c.relayId ? `${a.server}/r/${c.relayId}` : null, relayOnline: !!c.relayOnline,
     lastUrl: c.lastUrl, online: c.online, lastSeen: c.lastSeen, account: true,
     deviceId: a.deviceId, deviceName: a.deviceName, lastConnected: c.lastConnected || 0, viewOnly: c.viewOnly,
   }));
@@ -179,6 +185,13 @@ export async function reachableUrl(host) {
   const results = urls.map(() => undefined);
   return new Promise(resolve => {
     let grace = null, settled = false;
+    const probes = [];
+    const finish = url => {
+      settled = true;
+      clearTimeout(grace);
+      for (const probe of probes) probe.abort();
+      resolve(url || null);
+    };
     const pick = () => {
       for (let i = 0; i < urls.length; i++) {
         if (results[i] === true) return urls[i];
@@ -189,17 +202,23 @@ export async function reachableUrl(host) {
     const decide = force => {
       if (settled) return;
       const p = pick();
-      if (p || p === undefined) { settled = true; clearTimeout(grace); resolve(p || null); return; }
-      if (force) { settled = true; resolve(urls.find((u, i) => results[i] === true) || null); }
+      if (p || p === undefined) { finish(p); return; }
+      if (force) finish(urls.find((u, i) => results[i] === true));
     };
     if (!urls.length) { resolve(null); return; }
     urls.forEach((u, i) => {
       const ctl = new AbortController();
+      probes.push(ctl);
       const t = setTimeout(() => ctl.abort(), 3500);
       fetch(`${u}/api/info`, { signal: ctl.signal, cache: 'no-store' })
-        .then(r => r.ok).catch(() => false)
+        .then(async r => {
+          if (!r.ok) return false;
+          const id = (await r.json()).host?.id;
+          return typeof id === 'string' && !!id && (!host.hostId || id === host.hostId);
+        }).catch(() => false)
         .then(ok => {
           clearTimeout(t);
+          if (settled) return;
           results[i] = ok;
           if (ok && !grace) grace = setTimeout(() => decide(true), 700);
           decide(false);

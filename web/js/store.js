@@ -7,7 +7,9 @@ const PREFS_KEY = 'headroom.prefs.v1';
 function read(key, fallback) {
   try {
     const v = localStorage.getItem(key);
-    return v ? JSON.parse(v) : fallback;
+    const value = v && JSON.parse(v);
+    if (!value || typeof value !== 'object' || Array.isArray(value) !== Array.isArray(fallback)) return fallback;
+    return value;
   } catch { return fallback; }
 }
 
@@ -15,7 +17,7 @@ function write(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); return true; } catch { return false; }
 }
 
-export function loadHosts() { return read(HOSTS_KEY, []); }
+export function loadHosts() { return read(HOSTS_KEY, []).filter(h => h && typeof h.url === 'string'); }
 
 export function saveHosts(hosts) { write(HOSTS_KEY, hosts); }
 
@@ -63,7 +65,7 @@ function migratePrefs() {
     if (Number(localStorage.getItem(PREFS_VERSION_KEY) || 1) >= 2) return;
     const all = read(PREFS_KEY, {});
     for (const k of Object.keys(all)) if (all[k] && typeof all[k] === 'object') delete all[k].maxFps;
-    write(PREFS_KEY, all);
+    if (!write(PREFS_KEY, all)) return;
     localStorage.setItem(PREFS_VERSION_KEY, '2');
   } catch { }
 }
@@ -75,6 +77,7 @@ export function loadPrefs(hostId) {
 }
 
 export function savePrefs(hostId, patch) {
+  migratePrefs();
   const all = read(PREFS_KEY, {});
   all[hostId] = { ...(all[hostId] || {}), ...patch };
   write(PREFS_KEY, all);
