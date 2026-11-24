@@ -17,19 +17,20 @@ export class AudioPlayer {
   }
 
   /** Call synchronously from a user gesture. */
-  unlock() {
+  async unlock() {
     if (!this.supported) return;
     try {
       if (navigator.audioSession) navigator.audioSession.type = 'playback';
     } catch { }
     if (!this.ctx) {
       const AC = window.AudioContext || window.webkitAudioContext;
-      if (!AC) { this.supported = false; return; }
+      if (!AC) { this.supported = false; throw new Error('audio output unavailable'); }
       this.ctx = new AC({ sampleRate: 48000, latencyHint: 'interactive' });
       this.ready = this._init(this.ctx);
     }
     // Don't await: resume() can hang during an iOS audio interruption.
     this.ctx.resume?.().catch(() => { });
+    return this.ready;
   }
 
   /** Sets up `ctx`, unless it was closed meanwhile (muted again before it was ready). */
@@ -46,10 +47,14 @@ export class AudioPlayer {
   }
 
   _createDecoder() {
-    this.decoder = new AudioDecoder({
-      output: data => this._output(data),
-      error: e => { console.warn('[audio] decoder error', e); setTimeout(() => { if (this.node) this._createDecoder(); }, 100); },
+    const decoder = new AudioDecoder({
+      output: data => { if (this.decoder === decoder) this._output(data); else data.close(); },
+      error: e => {
+        console.warn('[audio] decoder error', e);
+        this.retryTimer = setTimeout(() => { if (this.decoder === decoder) this._createDecoder(); }, 100);
+      },
     });
+    this.decoder = decoder;
     // No description: each chunk is a raw Opus packet (Chrome rejects an empty description).
     this.decoder.configure({ codec: 'opus', sampleRate: 48000, numberOfChannels: 2 });
   }
@@ -91,6 +96,7 @@ export class AudioPlayer {
 
   close() {
     this.enabled = false;
+    clearTimeout(this.retryTimer);
     try { this.decoder?.close(); } catch { }
     this.decoder = null;
     this.node?.disconnect();

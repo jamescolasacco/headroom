@@ -63,3 +63,61 @@ test('mobile text goes to the current session after leaving and rejoining', () =
   }
   assert.deepEqual(sent, Array.from({ length: 20 }, (_, i) => [i, 'hello']));
 });
+
+const { VideoPresenter } = await import('../web/js/video/presenter.js');
+const { DecoderCore } = await import('../web/js/video/decoder-core.js');
+const canvas = () => ({ cloneNode: canvas, replaceWith() {} });
+
+test('cancel during the video worker probe disposes resources without starting a renderer', async t => {
+  let worker;
+  globalThis.Worker = class {
+    constructor() { worker = this; }
+    postMessage() {}
+    terminate() { this.terminated = true; }
+  };
+  t.after(() => delete globalThis.Worker);
+  const presenter = new VideoPresenter({ canvas: canvas(), video: {} });
+  const starting = presenter.start();
+  presenter.close();
+  await starting;
+  assert.equal(worker.terminated, true);
+  assert.equal(presenter.core, null);
+  assert.equal(presenter.mode, null);
+});
+
+test('a worker that reports video track support but fails initialization falls back to canvas', async t => {
+  globalThis.Worker = class {
+    postMessage(m) {
+      queueMicrotask(() => {
+        if (m.type === 'probe') this.onmessage({ data: { type: 'caps', decoder: true, vtg: true } });
+        else this.onerror(new Error('track unavailable'));
+      });
+    }
+    terminate() {}
+  };
+  t.after(() => delete globalThis.Worker);
+  const presenter = new VideoPresenter({ canvas: canvas(), video: {}, preference: 'video' });
+  t.after(() => presenter.close());
+  await presenter.start();
+  assert.equal(presenter.mode, 'main-canvas');
+  assert.ok(presenter.core);
+});
+
+test('frame timing stays bounded through a long session with the stats overlay closed', () => {
+  const p = new VideoPresenter({ canvas: canvas(), video: {} });
+  p.frameTimes = Array.from({ length: 20000 }, (_, i) => performance.now() - 22000 + i);
+  p._onWorker({ type: 'decoded' });
+  assert.equal(p.frameTimes.length, 1);
+  p.close();
+});
+
+test('closing a failed decoder cancels its queued recovery', async () => {
+  const core = new DecoderCore({ kind: 'canvas' }, () => {});
+  let reopened = false;
+  core.config = {};
+  core._createDecoder = () => { reopened = true; };
+  core._error(new Error('decode stopped'));
+  core.close();
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.equal(reopened, false);
+});

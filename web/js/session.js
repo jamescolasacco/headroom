@@ -215,10 +215,11 @@ export class Session {
     if (on === this.audioOn) return;
     this.audioOn = on;
     if (on) {
-      this.audio.unlock();
+      const start = this.audio.unlock();
+      this.audioStart = start;
       this.audio.setEnabled(true);
-      this.audio.ready?.catch(() => {
-        if (!this.audioOn || this.disposed) return;
+      start.catch(() => {
+        if (this.audioStart !== start || !this.audioOn || this.disposed) return;
         toast('This browser can\'t play the computer\'s sound');
         this.setAudio(false);
       });

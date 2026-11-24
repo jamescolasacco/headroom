@@ -28,67 +28,67 @@ export class VideoPresenter extends EventTarget {
     const fresh = this.canvas.cloneNode(false);
     this.canvas.replaceWith(fresh);
     this.canvas = fresh;
-    let caps = { vtg: false, decoder: false };
-    let worker = null;
+    let mode = 'main-canvas';
     try {
-      worker = new Worker(new URL('./video-worker.js', import.meta.url), { type: 'module' });
-      caps = await new Promise((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error('worker probe timeout')), 3000);
-        worker.onmessage = e => { if (e.data.type === 'caps') { clearTimeout(t); resolve(e.data); } };
-        worker.onerror = err => { clearTimeout(t); reject(err); };
-        worker.postMessage({ type: 'probe' });
-      });
-    } catch (e) {
-      console.warn('[video] worker unavailable:', e);
-      worker?.terminate();
-      worker = null;
-    }
-
-    const canOffscreen = !!this.canvas.transferControlToOffscreen;
-    let mode;
-    if (worker && caps.decoder) {
-      if (this.preference === 'canvas') mode = canOffscreen ? 'worker-canvas' : 'main-canvas';
-      else if (this.preference === 'video') mode = caps.vtg ? 'vtg' : (canOffscreen ? 'worker-canvas' : 'main-canvas');
-      else mode = caps.vtg && isWebKit ? 'vtg' : (canOffscreen ? 'worker-canvas' : (caps.vtg ? 'vtg' : 'main-canvas'));
-    } else {
-      mode = 'main-canvas';
-    }
-    if (mode === 'main-canvas' && worker) { worker.terminate(); worker = null; }
-    this.mode = mode;
-
-    if (mode === 'vtg') {
-      this.canvas.hidden = true;
-      this.video.hidden = false;
-      const track = await new Promise(resolve => {
-        worker.onmessage = e => { if (e.data.type === 'track') resolve(e.data.track); else this._onWorker(e.data); };
-        worker.postMessage({ type: 'init', mode: 'vtg' });
-      });
-      worker.onmessage = e => this._onWorker(e.data);
-      this.video.srcObject = new MediaStream([track]);
-      this.video.play().catch(err => console.warn('[video] play() rejected', err));
-      if (this.video.requestVideoFrameCallback) {
-        const tick = (now, meta) => { this._presented(meta); this.video.requestVideoFrameCallback(tick); };
-        this.video.requestVideoFrameCallback(tick);
+      this.worker = new Worker(new URL('./video-worker.js', import.meta.url), { type: 'module' });
+      const caps = await this._workerReply({ type: 'probe' }, 'caps');
+      if (this.closed) return;
+      const canvas = !!this.canvas.transferControlToOffscreen;
+      if (caps.decoder && caps.vtg && this.preference !== 'canvas' && (this.preference === 'video' || isWebKit || !canvas)) {
+        const { track } = await this._workerReply({ type: 'init', mode: 'vtg' }, 'track');
+        if (this.closed) { track?.stop(); return; }
+        this.video.srcObject = new MediaStream([track]);
+        this.video.play().catch(err => console.warn('[video] play() rejected', err));
+        mode = 'vtg';
+      } else if (caps.decoder && canvas) {
+        const off = this.canvas.transferControlToOffscreen();
+        this.worker.postMessage({ type: 'init', mode: 'canvas', canvas: off }, [off]);
+        mode = 'worker-canvas';
       }
-    } else if (mode === 'worker-canvas') {
-      this.video.hidden = true;
-      this.canvas.hidden = false;
-      const off = this.canvas.transferControlToOffscreen();
-      worker.onmessage = e => this._onWorker(e.data);
-      worker.postMessage({ type: 'init', mode: 'canvas', canvas: off }, [off]);
-    } else {
-      this.video.hidden = true;
-      this.canvas.hidden = false;
-      this.core = new DecoderCore({ kind: 'canvas', canvas: this.canvas }, msg => this._onWorker(msg));
+    } catch (e) {
+      if (this.closed) return;
+      console.warn('[video] worker unavailable:', e);
+      // A canvas that was transferred before a failed init cannot be used on this thread.
+      const replacement = this.canvas.cloneNode(false);
+      this.canvas.replaceWith(replacement);
+      this.canvas = replacement;
     }
-    this.worker = worker;
+    if (mode === 'main-canvas') {
+      this.worker?.terminate();
+      this.worker = null;
+      this.core = new DecoderCore({ kind: 'canvas', canvas: this.canvas }, msg => this._onWorker(msg));
+    } else {
+      this.worker.onmessage = e => this._onWorker(e.data);
+    }
+    this.mode = mode;
+    this.canvas.hidden = mode === 'vtg';
+    this.video.hidden = mode !== 'vtg';
     console.info(`[video] render path: ${mode}`);
     this.emit('mode', { mode });
+  }
+
+  async _workerReply(request, replyType) {
+    const worker = this.worker;
+    let timer;
+    try {
+      return await new Promise((resolve, reject) => {
+        this.cancelStartup = () => reject(new Error('session closed'));
+        timer = setTimeout(() => reject(new Error(`video worker timed out waiting for ${replyType}`)), 3000);
+        worker.onerror = reject;
+        worker.onmessage = e => { if (e.data.type === replyType) resolve(e.data); };
+        worker.postMessage(request);
+      });
+    } finally {
+      clearTimeout(timer);
+      this.cancelStartup = null;
+      worker.onerror = null;
+    }
   }
 
   _onWorker(m) {
     switch (m.type) {
       case 'decoded':
+        this._trimFrameTimes();
         this.frameTimes.push(performance.now());
         this.emit('decoded', m);
         break;
@@ -104,10 +104,6 @@ export class VideoPresenter extends EventTarget {
         if (m.level === 'error') this.emit('error', m);
         break;
     }
-  }
-
-  _presented(meta) {
-    this.presentedFrames = meta?.presentedFrames;
   }
 
   configure(cfg) {
@@ -135,14 +131,20 @@ export class VideoPresenter extends EventTarget {
   }
 
   /** Displayed frames per second over the last second. */
-  get fps() {
+  _trimFrameTimes() {
     const now = performance.now();
     while (this.frameTimes.length && now - this.frameTimes[0] > 1000) this.frameTimes.shift();
+  }
+
+  get fps() {
+    this._trimFrameTimes();
     return this.frameTimes.length;
   }
 
   close() {
-    this.worker?.postMessage({ type: 'close' });
+    this.closed = true;
+    this.cancelStartup?.();
+    this.worker?.terminate();
     this.worker = null;
     this.core?.close();
     this.core = null;

@@ -58,10 +58,11 @@ export class DecoderCore {
       hardwareAcceleration: this.hwPref,
       optimizeForLatency: cfg.optimizeForLatency !== false,
     };
-    this.decoder = new VideoDecoder({
-      output: f => this._output(f),
-      error: e => this._error(e),
+    const decoder = new VideoDecoder({
+      output: frame => { if (this.decoder === decoder) this._output(frame); else frame.close(); },
+      error: e => { if (this.decoder === decoder) this._error(e); },
     });
+    this.decoder = decoder;
     try {
       this.decoder.configure(dc);
     } catch (e) {
@@ -145,7 +146,11 @@ export class DecoderCore {
     // QuotaExceededError = reclaimed by the browser: just recreate. Repeated real errors: try software.
     if (name !== 'QuotaExceededError' && this.stats.errors > 3 && this.hwPref !== 'prefer-software') this.hwPref = 'prefer-software';
     // Recreate on the next tick so we're not inside the decoder's error callback.
-    setTimeout(() => { if (this.config) this._createDecoder(); }, 0);
+    clearTimeout(this.retryTimer);
+    const decoder = this.decoder;
+    this.retryTimer = setTimeout(() => {
+      if (this.config && this.decoder === decoder) this._createDecoder();
+    }, 100);
   }
 
   _requestKey(reason) {
@@ -166,6 +171,9 @@ export class DecoderCore {
 
   close() {
     clearInterval(this.statsTimer);
+    clearTimeout(this.retryTimer);
+    this.config = null;
+    this.inFlight.clear();
     try { this.decoder?.close(); } catch { }
     this.decoder = null;
   }
