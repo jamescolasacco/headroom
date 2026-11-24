@@ -13,6 +13,7 @@ let package = Package(
     ],
     targets: [
         .target(name: "HeadroomUpdate"),
+        .testTarget(name: "HeadroomUpdateTests", dependencies: ["HeadroomUpdate"]),
         .executableTarget(name: "update-check", dependencies: ["HeadroomUpdate"]),
     ]
 )

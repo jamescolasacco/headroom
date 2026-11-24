@@ -121,9 +121,15 @@ public sealed class Updater : IDisposable
         error = null;
         if (Now.Phase != "ready" || Now.Version is not { } version) { error = "There's no downloaded update to install."; return false; }
         var setup = Path.Combine(_cacheDir, version, _setupName ?? "");
-        if (_setupName == null || _setupSha == null || !File.Exists(setup) || Sha256File(setup) != _setupSha || !Validate(setup, version))
+        try
         {
-            error = "The downloaded update is incomplete.";
+            if (_setupName == null || _setupSha == null || !File.Exists(setup) || Sha256File(setup) != _setupSha || !Validate(setup, version))
+                throw new UpdateException("The downloaded update is incomplete.");
+        }
+        catch (Exception e)
+        {
+            error = Describe(e);
+            Set(Now with { Phase = "failed", Message = error, CheckedAt = DateTime.Now });
             return false;
         }
         const string silent = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS";

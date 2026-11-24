@@ -27,6 +27,8 @@ public final class Updater: @unchecked Sendable {
         public var progress: Double = 0
         public var message: String?
         public var checkedAt: Date?
+        fileprivate var archive: URL?
+        fileprivate var checksum: String?
         /// For the web pages (the Server window, the Viewer's home screen).
         public var json: [String: Any] {
             var d: [String: Any] = ["cmd": "update", "phase": phase.rawValue, "current": current, "progress": progress]
@@ -75,17 +77,21 @@ public final class Updater: @unchecked Sendable {
     /// The two apps an update can replace, side by side in one folder.
     public static let apps = [(name: "Headroom Server.app", id: "app.headroom.server"), (name: "Headroom Viewer.app", id: "app.headroom.viewer")]
 
-    public private(set) var state: State
+    private var currentState: State
+    public var state: State {
+        lock.lock(); defer { lock.unlock() }
+        return currentState
+    }
     public let config: Config
     private let session: URLSession
     private var timer: Timer?
     private var busy = false
     private let lock = NSLock()
 
-    public init(config: Config) {
+    public init(config: Config, sessionConfiguration: URLSessionConfiguration = .ephemeral) {
         self.config = config
-        state = State(current: config.current)
-        let c = URLSessionConfiguration.ephemeral
+        currentState = State(current: config.current)
+        let c = sessionConfiguration
         c.timeoutIntervalForRequest = 30
         c.timeoutIntervalForResource = 15 * 60
         c.httpAdditionalHeaders = ["User-Agent": "Headroom-Updater/\(config.current)"]
@@ -116,11 +122,15 @@ public final class Updater: @unchecked Sendable {
         }
     }
 
+    private static func isFileName(_ value: String) -> Bool {
+        !value.isEmpty && value != "." && value != ".." && (value as NSString).lastPathComponent == value
+    }
+
     /// One check at a time, and none once an update is waiting to be installed.
     private func claim() -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        if busy || state.phase == .ready { return false }
+        if busy || currentState.phase == .ready { return false }
         busy = true
         return true
     }
@@ -135,13 +145,19 @@ public final class Updater: @unchecked Sendable {
     /// again. Each app updates only itself (Headroom Server and Headroom Viewer each have an updater), so macOS
     /// never has to let one app modify another. The caller quits right after this returns.
     public func install() throws {
-        guard state.phase == .ready, let version = state.available else { throw UpdateError.notReady }
-        let stage = config.cacheDir.appendingPathComponent(version).appendingPathComponent("x/Headroom")
-        let script = stage.appendingPathComponent("install.sh")
-        guard FileManager.default.fileExists(atPath: script.path) else { throw UpdateError.notReady }
-        // Checked again now: the download waited in this user's folder since it was checked.
-        try validate(stage.deletingLastPathComponent(), version: version)
+        let ready = state
+        guard ready.phase == .ready, let version = ready.available, let zip = ready.archive, let expected = ready.checksum else {
+            throw UpdateError.notReady
+        }
         guard let me = installedApps().first else { throw UpdateError.badPackage }
+        let stage: URL
+        do {
+            stage = try extractVerified(zip, checksum: expected, version: version)
+        } catch {
+            update { $0.phase = .failed; $0.message = Self.describe(error) }
+            throw error
+        }
+        let script = stage.appendingPathComponent("Headroom/install.sh")
         var args = [script.path]
         if me.id == "app.headroom.server" {
             args += ["--only", "server"] // and opens it again
@@ -183,37 +199,52 @@ public final class Updater: @unchecked Sendable {
         let manifestData = try await fetch("update.json")
         guard sums["update.json"] == Self.sha256(manifestData) else { throw UpdateError.mismatch("update.json") }
         guard let manifest = try JSONSerialization.jsonObject(with: manifestData) as? [String: Any],
-              let version = manifest["version"] as? String, !version.isEmpty else { throw UpdateError.badPackage }
+              let version = manifest["version"] as? String, Self.isFileName(version) else { throw UpdateError.badPackage }
         guard Self.isNewer(version, than: config.current) else {
             update { $0.phase = .current; $0.available = nil; $0.checkedAt = Date() }
             return
         }
         let asset = manifest["mac"] as? String ?? "Headroom-macOS.zip"
-        guard let expected = sums[asset] else { throw UpdateError.mismatch(asset) }
+        guard Self.isFileName(asset), let expected = sums[asset] else { throw UpdateError.mismatch(asset) }
 
         let dir = config.cacheDir.appendingPathComponent(version, isDirectory: true)
-        let stage = dir.appendingPathComponent("x", isDirectory: true)
         let fm = FileManager.default
-        if fm.fileExists(atPath: dir.appendingPathComponent("ready").path), (try? validate(stage, version: version)) != nil {
-            update { $0.phase = .ready; $0.available = version; $0.progress = 1; $0.checkedAt = Date() }
-            return
-        }
-        try? fm.removeItem(at: dir)
-        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        update { $0.phase = .downloading; $0.available = version; $0.progress = 0 }
         let zip = dir.appendingPathComponent(asset)
-        var last = 0.0
-        try await Downloader(session: session).download(config.base.appendingPathComponent(asset), to: zip) { p in
-            guard p - last >= 0.02 || p >= 1 else { return }
-            last = p
-            self.update { $0.progress = p }
+        if (try? Self.sha256(file: zip)) != expected {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            update { $0.phase = .downloading; $0.available = version; $0.progress = 0 }
+            var last = 0.0
+            try await Downloader(session: session).download(config.base.appendingPathComponent(asset), to: zip) { p in
+                guard p - last >= 0.02 || p >= 1 else { return }
+                last = p
+                self.update { $0.progress = p }
+            }
         }
-        guard try Self.sha256(file: zip) == expected else { throw UpdateError.mismatch(asset) }
-        try Self.exec("/usr/bin/ditto", ["-x", "-k", zip.path, stage.path])
-        try validate(stage, version: version)
-        try? fm.removeItem(at: zip)
-        try Data().write(to: dir.appendingPathComponent("ready"))
-        update { $0.phase = .ready; $0.progress = 1; $0.checkedAt = Date() }
+        let stage = try extractVerified(zip, checksum: expected, version: version)
+        try fm.removeItem(at: stage)
+        update {
+            $0.phase = .ready; $0.available = version; $0.progress = 1; $0.checkedAt = Date()
+            $0.archive = zip; $0.checksum = expected
+        }
+    }
+
+    /// Check the exact copy that ditto will extract, including the install script.
+    private func extractVerified(_ zip: URL, checksum: String, version: String) throws -> URL {
+        let fm = FileManager.default
+        let stage = zip.deletingLastPathComponent().appendingPathComponent(UUID().uuidString)
+        try fm.createDirectory(at: stage, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        do {
+            let copy = stage.appendingPathComponent("download.zip")
+            try fm.copyItem(at: zip, to: copy)
+            guard try Self.sha256(file: copy) == checksum else { throw UpdateError.mismatch(zip.lastPathComponent) }
+            try Self.exec("/usr/bin/ditto", ["-x", "-k", copy.path, stage.path])
+            try fm.removeItem(at: copy)
+            try validate(stage, version: version)
+            return stage
+        } catch {
+            try? fm.removeItem(at: stage)
+            throw error
+        }
     }
 
     /// The unzipped release holds the apps installed here, at that version, signed like this app.
@@ -253,7 +284,7 @@ public final class Updater: @unchecked Sendable {
 
     private func update(_ change: (inout State) -> Void) {
         lock.lock()
-        change(&state)
+        change(&currentState)
         lock.unlock()
         emit()
     }
