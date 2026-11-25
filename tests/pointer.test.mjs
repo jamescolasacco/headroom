@@ -173,3 +173,36 @@ test('captured pointer conserves fractional and large relative motion across flu
   fire('pointermove', { movementX: 80000, movementY: -90000 }); mouse._flushMove();
   assert.deepEqual(packets.reduce(([x, y], p) => [x + p[1], y + p[2]], [0, 0]), [80002, -90002]);
 });
+
+test('reversing incremental pinches to their starting scale restores the Windows zoom level', t => {
+  const { fire, packets } = fixture(t);
+  for (let peak = 116; peak <= 250; peak++) {
+    packets.length = 0;
+    fire('gesturestart', { scale: 1 });
+    for (let step = 1; step <= 20; step++) fire('gesturechange', { scale: 1 + (peak / 100 - 1) * step / 20 });
+    for (let step = 19; step >= 0; step--) fire('gesturechange', { scale: 1 + (peak / 100 - 1) * step / 20 });
+    fire('gestureend', { scale: 1 });
+    const wheels = packets.filter(p => p[0] === 'wheel');
+    assert.ok(wheels.length >= 2, 'peak ' + peak);
+    assert.equal(wheels.reduce((net, p) => net + p[2], 0), 0, 'peak ' + peak);
+  }
+});
+
+test('the final touch sample can complete a pinch without a preceding pointermove', t => {
+  const { fire, state, packets, local } = fixture(t);
+  state.target = 'viewer';
+  const finger = (type, id, x) => fire(type, { pointerType: 'touch', pointerId: id, clientX: x });
+  finger('pointerdown', 1, 400); finger('pointerdown', 2, 500);
+  finger('pointerup', 1, 375); finger('pointerup', 2, 525);
+  assert.equal(local.length, 1);
+  assert.equal(local[0][0], 1.25);
+  assert.deepEqual(packets, []);
+});
+
+test('a remaining moving finger after a two-finger tap starts lifting cannot click', t => {
+  const { fire, packets } = fixture(t);
+  const finger = (type, id, x) => fire(type, { pointerType: 'touch', pointerId: id, clientX: x });
+  finger('pointerdown', 1, 400); finger('pointerdown', 2, 500);
+  finger('pointerup', 1, 400); finger('pointerup', 2, 525);
+  assert.deepEqual(packets, []);
+});

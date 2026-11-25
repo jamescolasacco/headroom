@@ -305,6 +305,10 @@ export class TouchInput {
     const g = this.g;
     const v = this.ctx.viewport;
 
+    if (this.touches.size === 1 && g.kind === 'multi-pending' && Math.hypot(t.x - g.cx, t.y - g.cy) > SLOP) {
+      g.kind = 'multi-done'; // moving after the first finger lifts cancels a two-finger tap
+    }
+
     if (g.kind === 'rightdrag') {
       // The pointer follows the fingers (however many are still down), with the right button held.
       const c = this._centroid();
@@ -423,6 +427,8 @@ export class TouchInput {
     const t = this.touches.get(e.pointerId);
     if (!t) return;
     e.preventDefault();
+    // Pointerup can carry movement that was never delivered as a separate pointermove.
+    if (t.x !== e.clientX || t.y !== e.clientY) this._move(e);
     const g = this.g;
     if (g?.multiFrame && this.touches.size >= 2) {
       cancelAnimationFrame(g.multiFrame);
