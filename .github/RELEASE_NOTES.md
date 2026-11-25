@@ -1,5 +1,9 @@
 Remote desktop for your own computers, and quick help with a code: **Headroom Server** on the computer you want to reach; **Headroom Viewer**, any browser, or an iPhone/iPad on the device you use.
 
+## New in 0.4.12
+
+- **One Headroom Server on your Mac.** Opening a second copy from a download or project folder opens the installed app in Applications. Headroom checks which engine is serving before installing an update. If a portable copy is already serving when you open the installed app, you can keep it running or switch over.
+
 ## New in 0.4.11
 
 - **Sound starts off.** Joining a session no longer plays the computer's sound, or stops the music on your phone. A red speaker in the toolbar turns it on, and the computer sends no sound until you do.
