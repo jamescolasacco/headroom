@@ -4,7 +4,6 @@ Remote desktop for your own computers, and quick help with a code: **Headroom Se
 
 - **Pinch from a Mac or PC trackpad to zoom the Windows app under the pointer.** Settings → Pinch to zoom also offers Two-finger touch for Windows apps that use native touch gestures, and Viewer to magnify any remote screen. Touchscreens still magnify the viewer by default.
 - **Mouse and pen input.** Headroom preserves the pointer position for clicks, drags and scrolling on busy Windows hosts. The viewer forwards simultaneous mouse buttons and pen barrel or eraser presses, and releases held buttons when focus or capture is lost.
-
 - **One Headroom Server on your Mac.** Opening a second copy from a download or project folder opens the installed app in Applications. Headroom checks which engine is serving before installing an update. If a portable copy is already serving when you open the installed app, you can keep it running or switch over.
 
 ## New in 0.4.11

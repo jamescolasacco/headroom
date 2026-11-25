@@ -8,6 +8,7 @@ internal sealed unsafe class TouchPinch
     private const uint Touch = 2, Down = 0x10000, Update = 0x20000, Up = 0x40000, Cancelled = 0x8000;
     private const uint Contact = 0x2 | 0x4; // INRANGE | INCONTACT
     private nint _device;
+    internal bool Active => _device != 0;
     private (int X1, int X2, int Y) _last;
 
     [StructLayout(LayoutKind.Sequential)]

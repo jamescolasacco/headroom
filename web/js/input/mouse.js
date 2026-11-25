@@ -271,7 +271,7 @@ export class MouseInput {
       return;
     }
     const now = performance.now();
-    if (now - this.lastPinch > 300) this.zoomRemainder = 0;
+    if (source === 'trackpad' && this.gestureScale === null && this.nativePinch === null && now - this.lastPinch > 300) this.zoomRemainder = 0;
     this.lastPinch = now;
     this.zoomRemainder += Math.log(factor) / ZOOM_STEP;
     const steps = Math.trunc(this.zoomRemainder);

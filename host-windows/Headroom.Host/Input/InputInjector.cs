@@ -65,7 +65,7 @@ public sealed unsafe class InputInjector
             }
             // Usually the input desktop changed (or UIPI blocked us). Re-attach and retry once.
             _desktop.Sync(0);
-            sent = Native.SendInput((uint)inputs.Length, p, sizeof(Native.INPUT));
+            sent += Native.SendInput((uint)inputs.Length - sent, p + (int)sent, sizeof(Native.INPUT));
             LastInjectionBlocked = sent != inputs.Length;
             if (LastInjectionBlocked) Log.Debug("input", $"SendInput blocked (err {Marshal.GetLastWin32Error()})");
             return !LastInjectionBlocked;
@@ -179,7 +179,7 @@ public sealed unsafe class InputInjector
         Post(() =>
         {
             if (phase >= 2 || !allowed()) { ctx.Pinch.End(cancel: phase != 2 || !allowed()); return; }
-            if (ctx.PinchUnavailable) return;
+            if (ctx.PinchUnavailable || (phase == 1 && !ctx.Pinch.Active)) return;
             if (!ctx.Pinch.Frame(phase == 0, points))
             {
                 ctx.PinchUnavailable = true;
