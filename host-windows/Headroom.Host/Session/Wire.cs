@@ -21,6 +21,7 @@ public static class Wire
     public const byte MouseWheel = 0x13;
     public const byte KeyEvent = 0x14;
     public const byte FrameAck = 0x15;
+    public const byte TouchPinch = 0x16;
 
     public const int VideoHeaderSize = 28;
     public const int MaxFragmentPayload = 64 * 1024;

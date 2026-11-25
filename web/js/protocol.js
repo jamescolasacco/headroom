@@ -1,7 +1,7 @@
 // Binary wire format shared with the hosts (host-windows/.../Session/Wire.cs, host-macos/.../Session/Wire.swift). Little-endian.
 
 export const H2C = { VIDEO: 0x01, CURSOR_POS: 0x02, AUDIO: 0x03, CURSOR_SHAPE: 0x05 };
-export const C2H = { MOUSE_ABS: 0x10, MOUSE_REL: 0x11, MOUSE_BUTTON: 0x12, MOUSE_WHEEL: 0x13, KEY: 0x14, FRAME_ACK: 0x15 };
+export const C2H = { MOUSE_ABS: 0x10, MOUSE_REL: 0x11, MOUSE_BUTTON: 0x12, MOUSE_WHEEL: 0x13, KEY: 0x14, FRAME_ACK: 0x15, TOUCH_PINCH: 0x16 };
 export const VIDEO_HEADER = 28;
 export const VF = { KEY: 1, FIRST: 2, LAST: 4, REFINE: 8 }; // REFINE: the still screen sent again, sharper
 
@@ -33,6 +33,17 @@ export function wheel(dx, dy) {
   v.setUint8(0, C2H.MOUSE_WHEEL);
   v.setInt16(1, clamp16(dx), true);
   v.setInt16(3, clamp16(dy), true);
+  return b;
+}
+
+/** Two native touch contacts on a capable Windows host. Scale is relative to the gesture start. */
+export function touchPinch(phase, nx = 0, ny = 0, scale = 1) {
+  const b = new ArrayBuffer(14), v = new DataView(b);
+  v.setUint8(0, C2H.TOUCH_PINCH);
+  v.setUint8(1, phase);
+  v.setFloat32(2, nx, true);
+  v.setFloat32(6, ny, true);
+  v.setFloat32(10, scale, true);
   return b;
 }
 

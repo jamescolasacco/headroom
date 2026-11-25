@@ -9,6 +9,8 @@ public sealed class InputContext
 {
     internal readonly HashSet<string> Keys = new();
     internal readonly HashSet<int> Buttons = new();
+    internal readonly TouchPinch Pinch = new();
+    internal bool PinchUnavailable; // input thread only
 }
 
 /// <summary>
@@ -172,6 +174,20 @@ public sealed unsafe class InputInjector
         });
     }
 
+    internal void Pinch(InputContext ctx, int phase, (int X1, int X2, int Y) points, Func<bool> allowed, Action unavailable)
+    {
+        Post(() =>
+        {
+            if (phase >= 2 || !allowed()) { ctx.Pinch.End(cancel: phase != 2 || !allowed()); return; }
+            if (ctx.PinchUnavailable) return;
+            if (!ctx.Pinch.Frame(phase == 0, points))
+            {
+                ctx.PinchUnavailable = true;
+                unavailable();
+            }
+        });
+    }
+
     // --------------------------------------------------------------------------------------- keyboard
 
     public void Key(InputContext ctx, string code, bool down)
@@ -268,9 +284,9 @@ public sealed unsafe class InputInjector
             ctx.Keys.Clear();
             ctx.Buttons.Clear();
         }
-        if (keys.Length == 0 && buttons.Length == 0) return;
         Post(() =>
         {
+            ctx.Pinch.End(cancel: true);
             foreach (var code in keys) if (KeyMap.TryGet(code, out var k)) SendKey(k, false);
             foreach (var b in buttons) SendButton(b, false);
         });

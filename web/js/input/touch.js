@@ -89,7 +89,7 @@ export class TouchInput {
     l.removeEventListener('pointerup', this.h.up);
     l.removeEventListener('pointercancel', this.h.cancel);
     l.removeEventListener('touchstart', this.h.touchstart);
-    this._release();
+    this.releaseAll();
   }
 
   /** Remote cursor moved by the host (e.g. an app warped it): adopt it unless we moved recently. */
@@ -108,7 +108,7 @@ export class TouchInput {
 
   // ------------------------------------------------------------------ helpers
 
-  _send(buf) { this.ctx.conn.sendBinary(buf); }
+  _send(buf) { if (this.ctx.inputAllowed()) this.ctx.conn.sendBinary(buf); }
 
   _moveTo(nx, ny) {
     this.cursor = { nx: Math.min(1, Math.max(0, nx)), ny: Math.min(1, Math.max(0, ny)) };
@@ -345,56 +345,62 @@ export class TouchInput {
       return;
     }
 
-    if (this.touches.size >= 2) {
-      const c = this._centroid();
-      const spread = this._spread();
-      const dcx = c.x - g.cx, dcy = c.y - g.cy;
-      const dt = Math.max(1, now - g.lastMoveT);
-      if (g.kind === 'multi-pending') {
-        // Each finger reports on its own, so halfway through a frame one finger has moved and the other not yet:
-        // the centre seems to shift by half a pinch. Decide only once one kind of movement clearly leads.
-        const moved = Math.hypot(dcx, dcy);
-        const pinchDelta = Math.abs(spread - g.spread0);
-        if (this.touches.size === 2 && pinchDelta > 24 && pinchDelta > moved) g.kind = 'pinch';
-        else if (moved > SLOP * 2 && moved > pinchDelta * 1.2) g.kind = this.touches.size >= 3 ? 'pan3' : g.armedRight ? 'rightdrag' : 'scroll';
-        else return;
-        g.pinchSpread = g.spread0; g.pinchX = g.cx; g.pinchY = g.cy; // what the picture shows so far
-        if (g.kind === 'rightdrag') {
-          // Two-finger double-tap and hold, then drag: the right button goes down where the pointer is (touch
-          // mode: where the fingers came down), a few points along the drag from the right-click just before.
-          if (this.mode === 'touch') { const r = v.toRemote(g.cx, g.cy); this._moveTo(r.nx, r.ny); }
-          this._pressToDrag(now, dcx, dcy, 2);
-          g.cx = c.x; g.cy = c.y; g.lastMoveT = now;
-          return;
-        }
-      }
-      if (g.kind === 'pinch' && this.touches.size >= 2) {
-        // Once per frame, with every finger's latest position: zoom around their centre and follow it.
-        if (!g.pinchFrame) {
-          g.pinchFrame = requestAnimationFrame(() => {
-            g.pinchFrame = 0;
-            if (this.g !== g || this.touches.size < 2) return;
-            const cc = this._centroid(), sp = this._spread();
-            const r = this.ctx.layer.getBoundingClientRect();
-            v.pinch(g.pinchSpread > 0 && sp > 0 ? sp / g.pinchSpread : 1, cc.x - r.left, cc.y - r.top, cc.x - g.pinchX, cc.y - g.pinchY);
-            g.pinchSpread = sp; g.pinchX = cc.x; g.pinchY = cc.y;
-          });
-        }
-        g.spread = spread;
-      } else if (g.kind === 'pan3') {
-        v.panBy(dcx, dcy);
-      } else if (g.kind === 'scroll') {
-        this._scroll(dcx, dcy);
-        // Velocity over a ~80 ms window of centroid samples: each finger reports separately (often
-        // <1 ms apart), so per-event deltas would give absurd speeds and a huge fling.
-        (g.samples ||= []).push({ t: now, x: c.x, y: c.y });
-        while (g.samples.length > 2 && now - g.samples[1].t > 80) g.samples.shift();
-        const s0 = g.samples[0];
-        const span = now - s0.t;
-        if (span >= 16) { g.vx = (c.x - s0.x) / span; g.vy = (c.y - s0.y) / span; }
-      }
-      g.cx = c.x; g.cy = c.y; g.lastMoveT = now;
+    if (this.touches.size >= 2 && !g.multiFrame) {
+      g.multiFrame = requestAnimationFrame(() => {
+        g.multiFrame = 0;
+        if (g === this.g && this.touches.size >= 2) this._multiMove(g);
+      });
     }
+  }
+
+  _multiMove(g) {
+    const now = performance.now(), v = this.ctx.viewport;
+    const c = this._centroid(), spread = this._spread();
+    const dcx = c.x - g.cx, dcy = c.y - g.cy;
+    if (g.kind === 'multi-pending') {
+      // Each finger reports on its own, so halfway through a frame one finger has moved and the other not yet:
+      // the centre seems to shift by half a pinch. Decide only once one kind of movement clearly leads.
+      const moved = Math.hypot(dcx, dcy);
+      const pinchDelta = Math.abs(spread - g.spread0);
+      if (this.touches.size === 2 && pinchDelta > Math.max(6, Math.min(18, g.spread0 * 0.1)) && pinchDelta > moved) g.kind = 'pinch';
+      else if (moved > SLOP * 2 && moved > pinchDelta * 1.2) g.kind = this.touches.size >= 3 ? 'pan3' : g.armedRight ? 'rightdrag' : 'scroll';
+      else return;
+      g.pinchSpread = g.spread0; g.pinchX = g.cx; g.pinchY = g.cy; // what the picture shows so far
+      if (g.kind === 'scroll' && this.mode === 'touch') {
+        const r = v.toRemote(g.cx, g.cy);
+        this._moveTo(r.nx, r.ny);
+      }
+      if (g.kind === 'rightdrag') {
+        // Two-finger double-tap and hold, then drag: the right button goes down where the pointer is (touch
+        // mode: where the fingers came down), a few points along the drag from the right-click just before.
+        if (this.mode === 'touch') { const r = v.toRemote(g.cx, g.cy); this._moveTo(r.nx, r.ny); }
+        this._pressToDrag(now, dcx, dcy, 2);
+        g.cx = c.x; g.cy = c.y; g.lastMoveT = now;
+        return;
+      }
+    }
+    if (g.kind === 'pinch') {
+      this._applyPinch(g);
+    } else if (g.kind === 'pan3') {
+      v.panBy(dcx, dcy);
+    } else if (g.kind === 'scroll') {
+      this._scroll(dcx, dcy);
+      // Velocity over a ~80 ms window of centroid samples: each finger reports separately (often
+      // <1 ms apart), so per-event deltas would give absurd speeds and a huge fling.
+      (g.samples ||= []).push({ t: now, x: c.x, y: c.y });
+      while (g.samples.length > 2 && now - g.samples[1].t > 80) g.samples.shift();
+      const s0 = g.samples[0];
+      const span = now - s0.t;
+      if (span >= 16) { g.vx = (c.x - s0.x) / span; g.vy = (c.y - s0.y) / span; }
+    }
+    g.cx = c.x; g.cy = c.y; g.lastMoveT = now;
+  }
+
+  _applyPinch(g) {
+    const c = this._centroid(), spread = this._spread();
+    const factor = g.pinchSpread > 0 && spread > 0 ? spread / g.pinchSpread : 1;
+    this.ctx.pinch(factor, c.x, c.y, 'touch', c.x - g.pinchX, c.y - g.pinchY);
+    g.pinchSpread = spread; g.pinchX = c.x; g.pinchY = c.y;
   }
 
   _scroll(dx, dy) {
@@ -416,8 +422,14 @@ export class TouchInput {
     const t = this.touches.get(e.pointerId);
     if (!t) return;
     e.preventDefault();
-    this.touches.delete(e.pointerId);
     const g = this.g;
+    if (g?.multiFrame && this.touches.size >= 2) {
+      cancelAnimationFrame(g.multiFrame);
+      g.multiFrame = 0;
+      this._multiMove(g);
+    }
+    this.touches.delete(e.pointerId);
+    if (g?.kind === 'pinch' && this.touches.size < 2) this.ctx.endPinch();
     if (!g) return;
     if (this.touches.size > 0) {
       // Fingers lifting one by one: recompute the reference for the remaining ones.
@@ -529,15 +541,17 @@ export class TouchInput {
 
   _cancel(e) {
     if (e.pointerType !== 'touch') return;
-    this.touches.delete(e.pointerId);
-    if (this.touches.size === 0) {
-      if (this.g) clearTimeout(this.g.holdTimer);
-      this.g = null;
-      this._release();
-    }
+    if (this.touches.has(e.pointerId)) this.releaseAll();
   }
 
-  _release() {
+  releaseAll() {
+    if (this.g?.kind === 'pinch') this.ctx.endPinch(true);
+    if (this.g) {
+      clearTimeout(this.g.holdTimer);
+      if (this.g.multiFrame) cancelAnimationFrame(this.g.multiFrame);
+    }
+    this.g = this.lastTap = this.lastTap2 = this.lastPress = null;
+    this.scrollAccX = this.scrollAccY = 0;
     if (this.held) { clearTimeout(this.held.timer); this.held = null; }
     if (this.buttonDown) this._button(0, false);
     if (this.rightDown) this._button(2, false);

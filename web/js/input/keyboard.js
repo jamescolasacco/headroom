@@ -16,6 +16,7 @@ export class KeyboardInput {
     this.hostOs = 'windows';
     this.enabled = false;
     this.down = new Set();          // codes we told the host are down
+    this.physicalControls = new Set();
     this.deferred = new Map();      // modifier code -> { sent, used } (Mac profile)
     this.swallowUp = new Set();     // keys whose keyup must not be forwarded (translated chords)
     this.metaHeldKeys = new Set();  // keys pressed while Cmd held (their keyup may never arrive on macOS)
@@ -98,6 +99,7 @@ export class KeyboardInput {
    */
   nativeKey(code, down) {
     if (!this.enabled) return;
+    this._trackControl(code, down);
     const hostCode = this._mapPlain(code);
     if (!down && !this.down.has(hostCode)) return;
     if (down && !isModifier(code)) this.ctx.mods?.pressForKey();
@@ -108,6 +110,7 @@ export class KeyboardInput {
   releaseAll() {
     for (const c of [...this.down]) this.send(c, false);
     this.down.clear();
+    this.physicalControls.clear();
     this.deferred.clear();
     this.swallowUp.clear();
     this.metaHeldKeys.clear();
@@ -137,6 +140,11 @@ export class KeyboardInput {
     this.ctx.conn.sendJson({ t: 'locks', caps, num });
   }
 
+  _trackControl(code, down) {
+    if (code !== 'ControlLeft' && code !== 'ControlRight') return;
+    if (down) this.physicalControls.add(code); else this.physicalControls.delete(code);
+  }
+
   _keydown(e) {
     if (!this._ours(e)) return;
     // An option sheet is open: Escape closes it (it isn't meant for the remote computer).
@@ -144,6 +152,7 @@ export class KeyboardInput {
     this.ctx.onUserGesture?.(e);
     const code = codeFromEvent(e);
     if (!code) return;
+    this._trackControl(code, true);
 
     // Local hotkeys: Ctrl+Alt+Shift+<key> never reach the host.
     if (e.ctrlKey && e.altKey && e.shiftKey && !isModifier(code)) {
@@ -209,6 +218,7 @@ export class KeyboardInput {
     if (!this.enabled) return;
     const code = codeFromEvent(e);
     if (!code) return;
+    this._trackControl(code, false);
     if (!this._ours(e) && !this.down.has(code) && !this.deferred.has(code)) return;
     e.preventDefault();
     if (code === 'CapsLock' && isApple) { this.tap('CapsLock'); return; }

@@ -39,3 +39,11 @@ burst.Take()();
 burst.Take()();
 if (actual[^2] != "9999" || actual[^1] != "button up") throw new Exception("Move burst lost its endpoint");
 Console.WriteLine("Windows input queue: 80,000 moves interleaved with 4,000 actions passed");
+
+foreach (var nx in new[] { 0d, 0.5, 1 })
+foreach (var scale in new[] { 0.05, 1, 12 })
+{
+    var (a, b, y) = TouchPinch.Positions(-2560, -50, 2560, 1440, nx, 1, 1.5, scale);
+    if (a < -2560 || b >= 0 || a >= b || y != 1389) throw new Exception("Off-monitor touch");
+}
+await DesktopInputTest.Run();

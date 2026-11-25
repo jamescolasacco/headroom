@@ -8,6 +8,7 @@ import WebKit
 final class ViewerWindow: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler, WKDownloadDelegate {
     let window: NSWindow
     private(set) var web: WKWebView!
+    private var magnifyMonitor: Any?
     private var titleObservation: NSKeyValueObservation?
     private(set) var sessionActive = false
     private(set) var sessionHost: String?
@@ -47,6 +48,21 @@ final class ViewerWindow: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUI
         if #available(macOS 13.3, *) { web.isInspectable = ProcessInfo.processInfo.environment["HEADROOM_DEVTOOLS"] == "1" }
         window.contentView = web
         self.web = web
+        // WKWebView has page magnification disabled. Capture AppKit's trackpad gesture before
+        // WebKit can consume it, and leave other windows and the home screen alone.
+        magnifyMonitor = NSEvent.addLocalMonitorForEvents(matching: .magnify) { [weak self] event in
+            guard let self, self.wantsShortcuts, event.window === self.window else { return event }
+            let view = self.web!
+            let p = view.convert(event.locationInWindow, from: nil)
+            let b = view.bounds
+            guard b.contains(p), b.width > 0, b.height > 0 else { return event }
+            let y = (p.y - b.minY) / b.height
+            let phase = event.phase.contains(.cancelled) ? "cancel" : event.phase.contains(.ended) ? "end" :
+                        event.phase.contains(.began) ? "begin" : "change"
+            self.post(["type": "magnify", "phase": phase, "factor": 1 + event.magnification,
+                       "x": (p.x - b.minX) / b.width, "y": view.isFlipped ? y : 1 - y])
+            return nil
+        }
         titleObservation = web.observe(\.title) { [weak self] w, _ in
             let t = (w.title ?? "").replacingOccurrences(of: "— Headroom", with: "— Headroom Viewer")
             self?.window.title = t.isEmpty ? "Headroom Viewer" : t
@@ -298,6 +314,8 @@ final class ViewerWindow: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUI
 
     func windowWillClose(_ notification: Notification) {
         sessionActive = false
+        if let magnifyMonitor { NSEvent.removeMonitor(magnifyMonitor) }
+        magnifyMonitor = nil
         titleObservation = nil
         web.configuration.userContentController.removeScriptMessageHandler(forName: "headroom")
         web.loadHTMLString("", baseURL: nil) // ends the session socket promptly

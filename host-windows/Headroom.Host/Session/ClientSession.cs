@@ -208,6 +208,7 @@ public sealed class ClientSession : IVideoSink
         {
             t = "welcome",
             session = Id,
+            touchPinch = true,
             host = HostInfo.Describe(),
             monitors = Displays.Enumerate().Select(MonitorJson).ToArray(),
             device = new { id = _device.Id, name = _device.Name },
@@ -418,6 +419,26 @@ public sealed class ClientSession : IVideoSink
             case Wire.MouseWheel when b.Length >= 5:
                 InputInjector.Instance.Wheel(BinaryPrimitives.ReadInt16LittleEndian(b.AsSpan(1)), BinaryPrimitives.ReadInt16LittleEndian(b.AsSpan(3)));
                 break;
+            case Wire.TouchPinch when b.Length == 14:
+            {
+                int phase = b[1]; // begin, update, end, cancel
+                if (phase > 3) return;
+                var mon = _pipeline?.Source?.Monitor ?? _pipeline?.Monitor;
+                (int, int, int) points = default;
+                if (phase <= 1)
+                {
+                    if (mon == null || mon.Width < 3 || mon.Height < 1) return;
+                    float nx = BinaryPrimitives.ReadSingleLittleEndian(b.AsSpan(2));
+                    float ny = BinaryPrimitives.ReadSingleLittleEndian(b.AsSpan(6));
+                    float scale = BinaryPrimitives.ReadSingleLittleEndian(b.AsSpan(10));
+                    if (!float.IsFinite(nx) || !float.IsFinite(ny) || !float.IsFinite(scale) || scale <= 0) return;
+                    points = TouchPinch.Positions(mon.X, mon.Y, mon.Width, mon.Height,
+                        Math.Clamp(nx, 0, 1), Math.Clamp(ny, 0, 1), mon.Scale, Math.Clamp(scale, 0.05f, 12f));
+                }
+                InputInjector.Instance.Pinch(_input, phase, points, () => !_closed && !_viewOnly,
+                    () => Enqueue(new { t = "pinchUnavailable" }));
+                break;
+            }
             case Wire.KeyEvent when b.Length >= 4:
             {
                 bool down = (b[1] & 1) != 0;

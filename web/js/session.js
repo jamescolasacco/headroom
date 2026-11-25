@@ -109,6 +109,13 @@ export class Session {
     this.mouse = new MouseInput({
       conn: this.conn, viewport: this.viewport, cursor: this.cursor, layer, mods: this.mods, keyboard: this.keyboard,
       sink: isTouchPrimary ? null : sink, onUserGesture, inputAllowed,
+      touchActive: () => !!this.touch?.touches.size,
+      pinchTarget: source => {
+        const target = this.prefs.pinchTarget;
+        if (target === 'touch' && !this.touchPinch) return 'remote';
+        if (target === 'auto') return source === 'touch' || this.macHost ? 'viewer' : 'remote';
+        return target;
+      },
       onRelativeChange: rel => { this.relative = rel; this.toolbar?.refresh(); if (rel) toast('Mouse captured — press Esc to release'); },
       onPress: () => this.typing.reset(), // a click puts the cursor somewhere else
     });
@@ -139,7 +146,9 @@ export class Session {
     });
 
     this.touch = new TouchInput({
-      conn: this.conn, viewport: this.viewport, cursor: this.cursor, layer, mods: this.mods, onUserGesture,
+      conn: this.conn, viewport: this.viewport, cursor: this.cursor, layer, mods: this.mods, onUserGesture, inputAllowed,
+      pinch: (...args) => this.mouse.pinch(...args),
+      endPinch: cancel => this.mouse.endPinch(cancel),
       ripple: (x, y, kind) => this._ripple(x, y, kind),
       toggleKeyboard: () => this.toggleKeyboard(),
       onPress: () => this.typing.reset(), // a tap's click puts the cursor somewhere else
@@ -175,6 +184,7 @@ export class Session {
     // viewer switches the system shortcuts off instead, so ⌘Tab and friends arrive as ordinary key events.)
     this._offNative = onNative(m => {
       if (m?.type === 'nativeKey') this.keyboard.nativeKey(m.code, m.down);
+      if (m?.type === 'magnify') this.mouse.nativeMagnify(m);
     });
     postNative({ cmd: 'session', active: true, host: this.host.name });
     this.conn.connect();
@@ -197,6 +207,7 @@ export class Session {
     this.prefs[key] = value;
     savePrefs(this.host.id, { [key]: value });
     switch (key) {
+      case 'pinchTarget': this.mouse.endPinch(true); break;
       case 'inputMode': this.touch.setMode(this.inputMode); break;
       case 'keyboardProfile': this.keyboard.setProfile(value, this.hostOs); break;
       case 'scaling': this.viewport.setMode(value); break;
@@ -238,6 +249,7 @@ export class Session {
       const w = e.detail;
       this.monitors = w.monitors || [];
       this.permissions = w.permissions || this.permissions;
+      this.touchPinch = w.touchPinch === true;
       this.elevated = w.elevated;
       this.hostInfo = w.host;
       if (w.host?.os && w.host.os !== this.host.os) { this.host.os = w.host.os; touchHost(this.host.id, { os: w.host.os }); }
@@ -294,6 +306,11 @@ export class Session {
     c.addEventListener('audio', e => this.audio.packet(e.detail));
     c.addEventListener('clip', e => this.clipboard.onRemote(e.detail.text || ''));
     c.addEventListener('stats', e => { this.hostStats = e.detail; });
+    c.addEventListener('pinchUnavailable', () => {
+      this.touchPinch = false;
+      this.mouse.endPinch(true);
+      toast('Windows touch input is unavailable. Pinch now uses Ctrl + wheel.');
+    });
     c.addEventListener('notice', e => toast(e.detail.message, 5000));
     // The person at the other computer changed what this session may do (control, clipboard, files).
     c.addEventListener('permissions', e => {
@@ -303,7 +320,7 @@ export class Session {
       if (was.clipboard && !this.permissions.clipboard) this.clipboard.clear();
       if ((was.clipboard && !this.permissions.clipboard) || (was.files && !this.permissions.files)) closeSheet();
       if (was.audio && !this.permissions.audio) this.setAudio(false);
-      if (was.input && !this.permissions.input) { this.keyboard?.releaseAll(); toast('View only: they turned off control.', 5000); }
+      if (was.input && !this.permissions.input) { this._releaseInput(); toast('View only: they turned off control.', 5000); }
       else if (!was.input && this.permissions.input) toast('You can control the screen now.', 4000);
       this.toolbar?.refresh();
     });
@@ -331,7 +348,7 @@ export class Session {
       const back = [{ label: 'Back', primary: true, onClick: () => this.stop() }];
       if (m.code === 'ended') {
         // The other computer ended it (its Stop, its sign-in removed, Headroom Server quit): no reconnecting.
-        this.keyboard?.releaseAll();
+        this._releaseInput();
         this._overlay('Session ended', `${m.message || 'The other computer ended the session.'}${this.host.support ? ' To connect again, ask them for a new code.' : ''}`, false, back);
       } else if (this.host.support && (m.code === 'unauthorized' || m.code === 'bad-code' || m.code === 'declined')) {
         // A guest: a wrong or used code, "Decline", or the session ended from the other computer.
@@ -356,7 +373,7 @@ export class Session {
     c.addEventListener('state', e => {
       const { state, attempt, reason } = e.detail;
       if (state === 'reconnecting') {
-        this.keyboard?.releaseAll();
+        this._releaseInput();
         this.typing?.reset();
         this.clipboard.clear();
         if (!this._opened && this.host.account) {
@@ -420,6 +437,7 @@ export class Session {
   }
 
   selectMonitor(id) {
+    this.mouse.endPinch(true);
     this.monitorId = id;
     this.typing?.reset();
     savePrefs(this.host.id, { monitor: id });
@@ -447,11 +465,17 @@ export class Session {
 
   // ------------------------------------------------------------------ lifecycle
 
+  _releaseInput() {
+    this.mouse?.releaseAll();
+    this.touch?.releaseAll();
+    this.keyboard?.releaseAll();
+  }
+
   _wireLifecycle() {
+    window.addEventListener('blur', () => this.touch.releaseAll(), { signal: this.life.signal });
     this._onVis = () => {
       if (document.visibilityState === 'hidden') {
-        this.keyboard.releaseAll();
-        this.mouse.releaseAll();
+        this._releaseInput();
       } else {
         this._requestWakeLock();
         this.conn.resume();

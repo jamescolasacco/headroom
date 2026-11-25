@@ -399,6 +399,10 @@ export class Toolbar {
           { value: 'trackpad', label: 'Trackpad' }, { value: 'touch', label: 'Direct touch' },
         ], s.inputMode, v => s.setPref('inputMode', v))));
       }
+      el.append(row('Pinch to zoom', segmented([
+        { value: 'auto', label: 'Auto' }, { value: 'remote', label: 'App zoom' },
+        ...(s.touchPinch ? [{ value: 'touch', label: 'Two-finger touch' }] : []), { value: 'viewer', label: 'Viewer' },
+      ], p.pinchTarget === 'touch' && !s.touchPinch ? 'remote' : p.pinchTarget, v => s.setPref('pinchTarget', v))));
       if (s.macHost) {
         el.append(row('Keyboard', segmented([
           { value: 'auto', label: 'Auto' },

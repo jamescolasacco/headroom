@@ -83,7 +83,9 @@ public sealed class ViewerWindow : Form
         s.IsStatusBarEnabled = false;
         s.IsZoomControlEnabled = false;          // Ctrl+wheel / Ctrl+= belong to the remote
         s.AreBrowserAcceleratorKeysEnabled = false; // F5, Ctrl+R, Ctrl+P, Ctrl+F... go to the remote
-        s.IsPinchZoomEnabled = false;
+        // Let Chromium dispatch trackpad pinches. The session input layer cancels page zoom
+        // and routes the gesture; a touchscreen is handled by its touch-action:none pointer layer.
+        s.IsPinchZoomEnabled = true;
         s.IsSwipeNavigationEnabled = false;
         s.AreDefaultContextMenusEnabled = Debugger.IsAttached;
         s.AreDevToolsEnabled = Debugger.IsAttached || Environment.GetEnvironmentVariable("HEADROOM_DEVTOOLS") == "1";
