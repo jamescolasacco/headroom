@@ -3,6 +3,10 @@ Remote desktop for your own computers, and quick help with a code: **Headroom Se
 ## New in 0.4.11
 
 - **Sound starts off.** Joining a session no longer plays the computer's sound, or stops the music on your phone. A red speaker in the toolbar turns it on, and the computer sends no sound until you do.
+- **Reconnects and mobile typing.** After reconnecting, keyboard input goes to the current session. Leaving a session cancels pending audio and video startup. Clipboard sync follows permission changes during a session.
+- **Simultaneous uploads.** Uploading several files with the same name keeps each completed file and the original. Canceling one transfer leaves the others intact.
+- **Desktop updates.** Headroom checks downloaded updates again before installation. On macOS, a failed replacement restores the previous app. On Windows, closing a viewer window during startup cancels its pending setup.
+- **Address book and offline viewer.** The viewer checks a computer’s identity before using a saved direct address, falls back to its relay when available, and keeps the offline cache scoped to Headroom.
 
 ## New in 0.4.10: sharp right after you scroll
 
