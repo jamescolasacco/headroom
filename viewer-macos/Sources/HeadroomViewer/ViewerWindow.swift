@@ -9,6 +9,7 @@ final class ViewerWindow: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUI
     let window: NSWindow
     private(set) var web: WKWebView!
     private var magnifyMonitor: Any?
+    private var trackingMagnify = false
     private var titleObservation: NSKeyValueObservation?
     private(set) var sessionActive = false
     private(set) var sessionHost: String?
@@ -55,10 +56,15 @@ final class ViewerWindow: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUI
             let view = self.web!
             let p = view.convert(event.locationInWindow, from: nil)
             let b = view.bounds
-            guard b.contains(p), b.width > 0, b.height > 0 else { return event }
+            guard b.width > 0, b.height > 0 else { return event }
+            if event.phase.contains(.began) || !self.trackingMagnify {
+                guard b.contains(p) else { return event }
+                self.trackingMagnify = true
+            }
             let y = (p.y - b.minY) / b.height
             let phase = event.phase.contains(.cancelled) ? "cancel" : event.phase.contains(.ended) ? "end" :
                         event.phase.contains(.began) ? "begin" : "change"
+            if phase == "cancel" || phase == "end" { self.trackingMagnify = false }
             self.post(["type": "magnify", "phase": phase, "factor": 1 + event.magnification,
                        "x": (p.x - b.minX) / b.width, "y": view.isFlipped ? y : 1 - y])
             return nil
@@ -310,7 +316,10 @@ final class ViewerWindow: NSObject, NSWindowDelegate, WKNavigationDelegate, WKUI
     var wantsShortcuts: Bool { sessionActive && window.isKeyWindow && NSApp.isActive }
 
     func windowDidBecomeKey(_ notification: Notification) { updateShortcutCapture() }
-    func windowDidResignKey(_ notification: Notification) { updateShortcutCapture() }
+    func windowDidResignKey(_ notification: Notification) {
+        trackingMagnify = false
+        updateShortcutCapture()
+    }
 
     func windowWillClose(_ notification: Notification) {
         sessionActive = false

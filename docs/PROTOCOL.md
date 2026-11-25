@@ -108,6 +108,7 @@ The host sends the cursor separately so the client can draw it locally with no l
 | `0x12` | `[u8 button][u8 down]` | buttons: 0 left, 1 middle, 2 right, 3 back, 4 forward |
 | `0x13` | `[i16 dx][i16 dy]` | wheel in Windows units (120 = one notch; fractions allowed). +dy scrolls up, +dx scrolls right. A macOS host turns this into continuous pixel scrolling (units ÷ 1.2 — the client maps ~100 px of scrolling to 120 units) |
 | `0x14` | `[u8 flags: 1=down][u8 len][ASCII code]` | a key, as a W3C `KeyboardEvent.code` (positional; the host's layout applies). Windows maps codes to set-1 scancodes, macOS to virtual key codes (PC-only keys as Apple maps a PC keyboard: Insert → Help, PrintScreen/ScrollLock/Pause → F13/F14/F15; `MetaLeft` is ⌘) |
+| `0x16` | `[u8 phase][f32 nx][f32 ny][f32 scale]` | Windows two-contact pinch. Only send after a welcome with `touchPinch: true` and with input permission. Phases 0/1/2/3 begin, update, end and cancel. The anchor is relative to the selected display and scale is relative to the start. A host may send `{"t":"pinchUnavailable"}` to switch the viewer back to wheel zoom. |
 
 JSON input messages:
 - `{"t":"text","s":"…"}` types text layout-independently (Unicode injection). It is used for soft

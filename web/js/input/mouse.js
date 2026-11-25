@@ -101,29 +101,27 @@ export class MouseInput {
   _scheduleMove() {
     if (this.moveTimer) return;
     const now = performance.now();
-    const wait = Math.max(0, 4 - (now - this.lastMoveSent));
+    const wait = this.ctx.conn.buffered > 256 * 1024 ? 16 : Math.max(0, 4 - (now - this.lastMoveSent));
     this.moveTimer = setTimeout(() => {
       this.moveTimer = 0;
       if (!this.ctx.inputAllowed()) { this.releaseAll(); return; }
       if (this.ctx.conn.buffered > 256 * 1024) { this._scheduleMove(); return; }
-      this.lastMoveSent = performance.now();
-      if (this.relative) {
-        const dx = Math.round(this.relAccX), dy = Math.round(this.relAccY);
-        this.relAccX -= dx; this.relAccY -= dy;
-        if (dx || dy) this.ctx.conn.sendBinary(P.mouseRel(dx, dy));
-      } else if (this.pendingMove) {
-        this.ctx.conn.sendBinary(P.mouseAbs(this.pendingMove.nx, this.pendingMove.ny));
-        this.pendingMove = null;
-      }
+      this._flushMove();
     }, wait);
   }
 
   _flushMove() {
     if (this.moveTimer) { clearTimeout(this.moveTimer); this.moveTimer = 0; }
     if (this.relative) {
-      const dx = Math.round(this.relAccX), dy = Math.round(this.relAccY);
-      this.relAccX = 0; this.relAccY = 0;
-      if (dx || dy) this.ctx.conn.sendBinary(P.mouseRel(dx, dy));
+      let dx = Math.round(this.relAccX), dy = Math.round(this.relAccY);
+      this.relAccX -= dx; this.relAccY -= dy;
+      // Long backlogs can exceed one signed 16-bit packet. Preserve the total and direction.
+      const parts = Math.ceil(Math.max(Math.abs(dx), Math.abs(dy)) / 32767);
+      for (let left = parts; left > 0; left--) {
+        const x = Math.round(dx / left), y = Math.round(dy / left);
+        this.ctx.conn.sendBinary(P.mouseRel(x, y));
+        dx -= x; dy -= y;
+      }
     } else if (this.pendingMove) {
       this.ctx.conn.sendBinary(P.mouseAbs(this.pendingMove.nx, this.pendingMove.ny));
       this.pendingMove = null;
@@ -152,7 +150,7 @@ export class MouseInput {
     e.preventDefault();
     if (!this.relative) this.pendingMove = this.ctx.viewport.toRemote(e.clientX, e.clientY);
     this._syncButtons(e);
-    this.pointerId = null;
+    if (!this.buttons.size) this.pointerId = null;
   }
 
   _syncButtons(e) {
@@ -259,6 +257,10 @@ export class MouseInput {
     }
     if (target === 'touch') {
       this.touchScale = Math.min(12, Math.max(0.05, this.touchScale * factor));
+      if (source === 'trackpad' && this.gestureScale === null && this.nativePinch === null) {
+        clearTimeout(this.pinchTimer);
+        this.pinchTimer = setTimeout(() => this.endPinch(), 250);
+      }
       if (!this.contactsDown && Math.abs(Math.log(this.touchScale)) < 0.025) return;
       const { nx, ny } = this.ctx.viewport.toRemote(x, y);
       if (!this.contactsDown) {
@@ -266,11 +268,6 @@ export class MouseInput {
         this.contactsDown = true;
       }
       this.ctx.conn.sendBinary(P.touchPinch(1, nx, ny, this.touchScale));
-      // Chromium sends wheel events with no explicit gesture-end event.
-      if (source === 'trackpad' && this.gestureScale === null && this.nativePinch === null) {
-        clearTimeout(this.pinchTimer);
-        this.pinchTimer = setTimeout(() => this.endPinch(), 250);
-      }
       return;
     }
     const now = performance.now();

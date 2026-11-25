@@ -68,6 +68,7 @@ export class TouchInput {
   }
 
   setMode(mode) {
+    if (this.mode !== mode) this.releaseAll();
     this.mode = mode;
     this.ctx.cursor.setMode('overlay');
   }

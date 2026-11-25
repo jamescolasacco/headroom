@@ -25,6 +25,9 @@ jobs:
         run: node account-server/test.mjs
       - name: Viewer, offline cache and account storage regressions
         run: node --test tests/*.test.mjs
+      - name: Chromium trackpad pinch through the viewer
+        timeout-minutes: 2
+        run: node tests/chromium-pinch.mjs
       - name: Syntax check (web client, tools)
         run: for f in web/js/*.js web/js/*/*.js web/sw.js tools/*.mjs account-server/*.mjs; do node --check "$f"; done
       - name: Linux service install (tools/install-account-server-linux.sh)
@@ -156,8 +159,8 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
-      - name: Windows input ordering under load
-        timeout-minutes: 3
+      - name: Windows pointer, wheel and touch delivery
+        timeout-minutes: 6
         run: dotnet run --project tests/windows-input/InputQueueTests.csproj -c Release
       - name: Build Headroom Server and Headroom Viewer
         shell: pwsh

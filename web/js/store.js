@@ -45,7 +45,7 @@ export function touchHost(id, patch) {
 /** Session preferences, stored per host with global defaults. */
 export const DEFAULT_PREFS = {
   inputMode: 'auto',        // auto | trackpad | touch
-  pinchTarget: 'auto',      // auto | remote | viewer
+  pinchTarget: 'auto',      // auto | remote | touch | viewer
   keyboardProfile: 'auto',  // auto | mac | pc | cmdctrl
   scaling: 'fit',           // fit | actual | fill
   maxFps: 15,               // a quarter of 60's frames to send; the hosts sharpen the picture once it stops moving
