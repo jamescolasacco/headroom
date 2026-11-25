@@ -4,10 +4,12 @@ import HeadroomUpdate
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     static let shared = AppDelegate()
     private var windows: [ViewerWindow] = []
+    private var handingOff = false
     /// The app menu's update item: "Check for Updates…", then "Restart to Update to 1.2.3" once one is downloaded.
     var updateItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if openInstalledCopyIfNeeded() { return }
         NSApp.setActivationPolicy(.regular)
         openWindow(ClientScheme.startUrl)
         NSApp.activate(ignoringOtherApps: true)
@@ -18,6 +20,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             if let s = n.userInfo?["state"] as? Updater.State { self?.updateChanged(s) }
         }
         Updater.shared.start()
+    }
+
+    private func openInstalledCopyIfNeeded() -> Bool {
+        if handingOff { return true }
+        guard Bundle.main.bundleIdentifier == InstalledApplication.viewer.bundleID,
+              let installed = InstalledApplication.viewer.preferredURL(for: Bundle.main.bundleURL) else { return false }
+        handingOff = true
+        InstalledApplication.viewer.open(installed) { [weak self] error in
+            if let error {
+                NSAlert(error: error).runModal()
+                self?.handingOff = false
+                if self?.windows.isEmpty == false { return }
+            }
+            NSApp.terminate(nil)
+        }
+        return true
     }
 
     // ------------------------------------------------------------------ updates
@@ -55,6 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             a.addButton(withTitle: "Cancel")
             if a.runModal() != .alertFirstButtonReturn { return }
         }
+        if openInstalledCopyIfNeeded() { return }
         do { try Updater.shared.install() } catch {
             let a = NSAlert()
             a.messageText = "Couldn't install the update"
@@ -68,6 +87,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if handingOff { return false }
         if windows.isEmpty { openWindow(ClientScheme.startUrl) }
         return true
     }

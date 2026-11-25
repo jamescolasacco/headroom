@@ -110,7 +110,8 @@ jobs:
           swift test --package-path update-macos -c release
           bash tests/build-macos.sh
           bash tests/install-macos.sh
-          bash tests/server-copy-macos.sh
+          bash tests/app-copy-macos.sh Server
+          bash tests/app-copy-macos.sh Viewer
       - name: Check the signatures
         if: env.HEADROOM_SIGN_IDENTITY != ''
         run: |

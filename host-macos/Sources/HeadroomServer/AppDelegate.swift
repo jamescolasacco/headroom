@@ -104,18 +104,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     // A copy opened from a checkout or download must not start its own engine or updater
     // when Headroom Server is installed in Applications.
     private func openInstalledCopyIfNeeded() -> Bool {
-        guard Bundle.main.bundleIdentifier == ServerInstallation.bundleID,
-              let installed = ServerInstallation.preferredURL(for: Bundle.main.bundleURL, in: ServerInstallation.applicationDirectories) else { return false }
+        guard Bundle.main.bundleIdentifier == InstalledApplication.server.bundleID,
+              let installed = InstalledApplication.server.preferredURL(for: Bundle.main.bundleURL) else { return false }
         handingOff = true
-        let config = NSWorkspace.OpenConfiguration()
-        config.allowsRunningApplicationSubstitution = false
-        config.activates = !launchedAtLogin
-        if launchedAtLogin { config.arguments = ["--tray"] }
-        NSWorkspace.shared.openApplication(at: installed, configuration: config) { _, error in
-            DispatchQueue.main.async {
-                if let error { NSAlert(error: error).runModal() }
-                NSApp.terminate(nil)
-            }
+        InstalledApplication.server.open(installed, activate: !launchedAtLogin, arguments: launchedAtLogin ? ["--tray"] : []) { error in
+            if let error { NSAlert(error: error).runModal() }
+            NSApp.terminate(nil)
         }
         return true
     }
@@ -130,7 +124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         guard engine.pid != status.pid, let owner = ServerInstallation.runningOwner(of: status.pid),
               owner.processIdentifier != getpid() else { return false }
         if !launchedAtLogin, let url = owner.bundleURL,
-           let preferred = ServerInstallation.preferredURL(for: url, in: ServerInstallation.applicationDirectories),
+           let preferred = InstalledApplication.server.preferredURL(for: url),
            preferred.resolvingSymlinksInPath().path == Bundle.main.bundleURL.resolvingSymlinksInPath().path {
             // An older portable copy may already be running when the app is first installed.
             switchingOwner = true
@@ -333,7 +327,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     /// open again. If someone is connected, ask first: their session ends.
     @objc func restartToUpdate() {
         guard !checkingInstall, !handingOff, !switchingOwner, Updater.shared.state.phase == .ready else { return }
-        if let installed = ServerInstallation.preferredURL(for: Bundle.main.bundleURL, in: ServerInstallation.applicationDirectories) {
+        if let installed = InstalledApplication.server.preferredURL(for: Bundle.main.bundleURL) {
             let alert = NSAlert()
             alert.messageText = "Update the installed Headroom Server"
             alert.informativeText = "Quit this copy and open \(installed.path) to update it."

@@ -75,7 +75,7 @@ public final class Updater: @unchecked Sendable {
     }
 
     /// The two apps an update can replace, side by side in one folder.
-    public static let apps = [(name: "Headroom Server.app", id: "app.headroom.server"), (name: "Headroom Viewer.app", id: "app.headroom.viewer")]
+    public static let apps = InstalledApplication.allCases.map { (name: $0.rawValue + ".app", id: $0.bundleID) }
 
     private var currentState: State
     public var state: State {

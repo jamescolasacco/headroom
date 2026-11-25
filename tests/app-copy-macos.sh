@@ -1,12 +1,14 @@
 #!/bin/bash
-# Launch two copies through the production server UI. A temporary Applications bundle
-# records launches and reopen events. Run on a Mac without Headroom Server installed.
+# Launch two copies through the production app. A temporary Applications bundle
+# records launches and reopen events. Run on a Mac without the selected app installed.
 set -euo pipefail
 repo="$(cd "$(dirname "$0")/.." && pwd)"
-app="Headroom Server.app"
+case "${1:-Server}" in Server|Viewer) kind="${1:-Server}" ;; *) exit 2 ;; esac
+app="Headroom $kind.app"
+exe="Headroom$kind"
 dst="$HOME/Applications/$app"
 if [[ -e "/Applications/$app" || -e "$dst" ]]; then
-  echo "This test needs a Mac without an existing Headroom Server installation." >&2
+  echo "This test needs a Mac without an existing $app installation." >&2
   exit 1
 fi
 tmp="$(mktemp -d)"
@@ -41,7 +43,7 @@ app.setActivationPolicy(.accessory)
 app.run()
 SWIFT
 /usr/libexec/PlistBuddy -c "Add :FixtureDirectory string $tmp" "$dst/Contents/Info.plist"
-swiftc "$tmp/main.swift" -o "$dst/Contents/MacOS/HeadroomServer"
+swiftc "$tmp/main.swift" -o "$dst/Contents/MacOS/$exe"
 codesign --force --sign - "$dst"
 ditto "$repo/dist/$app" "$tmp/$app"
 cat > "$tmp/engine-spy" <<'SH'
@@ -51,8 +53,9 @@ exit 2
 SH
 chmod +x "$tmp/engine-spy"
 for marker in pid reopened; do
+  rm -f "$tmp/$marker"
   HEADROOM_DATA="$tmp" HEADROOM_ENGINE="$tmp/engine-spy" HEADROOM_ADMIN_PORT=59877 \
-    "$tmp/$app/Contents/MacOS/HeadroomServer" > "$tmp/duplicate.log" 2>&1 &
+    "$tmp/$app/Contents/MacOS/$exe" > "$tmp/duplicate.log" 2>&1 &
   child=$!
   for _ in {1..100}; do
     [[ -e "$tmp/duplicate-engine-started" ]] && { echo "A second engine was started." >&2; exit 1; }
@@ -63,4 +66,4 @@ for marker in pid reopened; do
   wait "$child"
   child=""
 done
-echo "Both launches reached the installed server without starting a second engine."
+echo "Both launches reached the installed $app."
