@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using Headroom.Host.Platform;
 using Headroom.Host.Util;
@@ -20,11 +19,9 @@ public sealed unsafe class InputInjector
 {
     public static InputInjector Instance { get; } = new();
 
-    private readonly BlockingCollection<Action> _queue = new(new ConcurrentQueue<Action>(), 4096);
+    private readonly InputQueue _queue = new(4096);
     private readonly Thread _thread;
     private readonly InputDesktopFollower _desktop = new();
-    private int _pendingMoves;
-    private int _lastX = int.MinValue, _lastY = int.MinValue;
 
     public bool LastInjectionBlocked { get; private set; }
 
@@ -37,8 +34,9 @@ public sealed unsafe class InputInjector
     private void Run()
     {
         _desktop.Sync();
-        foreach (var action in _queue.GetConsumingEnumerable())
+        while (true)
         {
+            var action = _queue.Take();
             try
             {
                 _desktop.Sync(100);
@@ -51,10 +49,7 @@ public sealed unsafe class InputInjector
         }
     }
 
-    private void Post(Action a)
-    {
-        if (!_queue.TryAdd(a)) Log.Warn("input", "input queue full; dropping event");
-    }
+    private void Post(Action action) => _queue.Post(action);
 
     private bool Send(ReadOnlySpan<Native.INPUT> inputs)
     {
@@ -80,13 +75,8 @@ public sealed unsafe class InputInjector
     /// <summary>Move to an absolute position in virtual-desktop pixels.</summary>
     public void MoveTo(int x, int y)
     {
-        Interlocked.Increment(ref _pendingMoves);
-        Post(() =>
+        _queue.Post(() =>
         {
-            // Coalesce: if newer moves are queued behind us, skip this one.
-            if (Interlocked.Decrement(ref _pendingMoves) > 0) return;
-            if (x == _lastX && y == _lastY) return;
-            _lastX = x; _lastY = y;
             int vl = Native.GetSystemMetrics(Native.SM_XVIRTUALSCREEN);
             int vt = Native.GetSystemMetrics(Native.SM_YVIRTUALSCREEN);
             int vw = Math.Max(1, Native.GetSystemMetrics(Native.SM_CXVIRTUALSCREEN));
@@ -104,7 +94,7 @@ public sealed unsafe class InputInjector
                 dwExtraInfo = Native.InjectedTag,
             };
             Send(input);
-        });
+        }, absoluteMove: true);
     }
 
     /// <summary>Relative motion (pointer lock / games). Not subject to Windows pointer acceleration? It is — like a real mouse.</summary>
@@ -112,7 +102,6 @@ public sealed unsafe class InputInjector
     {
         Post(() =>
         {
-            _lastX = int.MinValue;
             Span<Native.INPUT> input = stackalloc Native.INPUT[1];
             input[0].type = Native.INPUT_MOUSE;
             input[0].mi = new Native.MOUSEINPUT { dx = dx, dy = dy, dwFlags = Native.MOUSEEVENTF_MOVE, dwExtraInfo = Native.InjectedTag };
