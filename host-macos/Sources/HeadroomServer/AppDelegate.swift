@@ -24,6 +24,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     /// Updates: the version we've told the user about (once), and whether we're quitting to install one.
     private var announcedUpdate: String?
     private var updating = false
+    private var handingOff = false
+    private var switchingOwner = false
+    private var checkingInstall = false
     /// Set once the menu bar has had a moment to place the icon (see updateDockIcon).
     private var menuBarSettled = false
 
@@ -36,6 +39,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        if openInstalledCopyIfNeeded() { return }
+        DistributedNotificationCenter.default().addObserver(self, selector: #selector(showExistingWindow),
+            name: ServerInstallation.showSettings, object: String(getpid()))
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.image = StatusIcon.image(active: false)
         statusItem.button?.toolTip = "Headroom Server"
@@ -69,12 +75,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        guard !handingOff else { return false }
         showWindow("home") // opened again from Finder / Launchpad / Spotlight
         return true
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if updating { return .terminateNow } // asked already: the installer is waiting for us to quit
+        if updating || handingOff { return .terminateNow } // asked already: the installer is waiting for us to quit
         if let st = status, !st.viewers.isEmpty, engine.running {
             NSApp.activate(ignoringOtherApps: true)
             let a = NSAlert()
@@ -89,8 +96,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        DistributedNotificationCenter.default().removeObserver(self)
         pollTimer?.invalidate()
         engine.stop()
+    }
+
+    // A copy opened from a checkout or download must not start its own engine or updater
+    // when Headroom Server is installed in Applications.
+    private func openInstalledCopyIfNeeded() -> Bool {
+        guard Bundle.main.bundleIdentifier == ServerInstallation.bundleID,
+              let installed = ServerInstallation.preferredURL(for: Bundle.main.bundleURL, in: ServerInstallation.applicationDirectories) else { return false }
+        handingOff = true
+        let config = NSWorkspace.OpenConfiguration()
+        config.allowsRunningApplicationSubstitution = false
+        config.activates = !launchedAtLogin
+        if launchedAtLogin { config.arguments = ["--tray"] }
+        NSWorkspace.shared.openApplication(at: installed, configuration: config) { _, error in
+            DispatchQueue.main.async {
+                if let error { NSAlert(error: error).runModal() }
+                NSApp.terminate(nil)
+            }
+        }
+        return true
+    }
+
+    @objc private func showExistingWindow(_ notification: Notification) {
+        if !handingOff { showWindow("home") }
+    }
+
+    /// The ports elect one engine even if two portable copies start simultaneously.
+    /// Send the user to its actual parent and leave any live session alone.
+    private func handOffToOwner(of status: ServerStatus) -> Bool {
+        guard engine.pid != status.pid, let owner = ServerInstallation.runningOwner(of: status.pid),
+              owner.processIdentifier != getpid() else { return false }
+        if !launchedAtLogin, let url = owner.bundleURL,
+           let preferred = ServerInstallation.preferredURL(for: url, in: ServerInstallation.applicationDirectories),
+           preferred.resolvingSymlinksInPath().path == Bundle.main.bundleURL.resolvingSymlinksInPath().path {
+            // An older portable copy may already be running when the app is first installed.
+            switchingOwner = true
+            let alert = NSAlert()
+            alert.messageText = "Switch to the installed Headroom Server?"
+            let sessions = status.viewers.isEmpty ? "" : " Switching ends the current remote session."
+            alert.informativeText = "Headroom Server is running from \(url.path). Switching quits that copy and starts \(preferred.path).\(sessions)"
+            alert.addButton(withTitle: "Keep Current Server")
+            alert.addButton(withTitle: "Switch to Installed Copy")
+            if alert.runModal() == .alertSecondButtonReturn, owner.terminate() {
+                waitForOwnerToQuit(owner, until: .now() + 15)
+                return true
+            }
+            switchingOwner = false
+        }
+        handingOff = true
+        if !launchedAtLogin {
+            DistributedNotificationCenter.default().postNotificationName(ServerInstallation.showSettings,
+                object: String(owner.processIdentifier), userInfo: nil, deliverImmediately: true)
+            owner.activate(options: [.activateAllWindows])
+        }
+        NSApp.terminate(nil)
+        return true
+    }
+
+    private func waitForOwnerToQuit(_ owner: NSRunningApplication, until deadline: DispatchTime) {
+        admin.status { [weak self] live in
+            guard let self else { return }
+            if owner.isTerminated && (live == nil || live?.pid == self.engine.pid) {
+                self.switchingOwner = false
+                _ = self.engine.start()
+                self.poll()
+            } else if DispatchTime.now() < deadline {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self.waitForOwnerToQuit(owner, until: deadline) }
+            } else {
+                self.handingOff = true
+                let alert = NSAlert()
+                alert.messageText = "The other Headroom Server is still using the server port"
+                alert.informativeText = "Quit that copy before opening the installed app again."
+                alert.runModal()
+                NSApp.terminate(nil)
+            }
+        }
     }
 
     // ------------------------------------------------------------------ status
@@ -100,6 +183,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     private func apply(_ st: ServerStatus?) {
+        guard !handingOff, !switchingOwner else { return }
+        if let st, handOffToOwner(of: st) { return }
         updateDockIcon()
         guard let st else {
             status = nil
@@ -247,8 +332,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     /// Installs the downloaded update: Headroom Server (and Headroom Viewer, if it's here) quit, are replaced, and
     /// open again. If someone is connected, ask first: their session ends.
     @objc func restartToUpdate() {
-        guard Updater.shared.state.phase == .ready, let v = Updater.shared.state.available else { return }
-        if let st = status, !st.viewers.isEmpty {
+        guard !checkingInstall, !handingOff, !switchingOwner, Updater.shared.state.phase == .ready else { return }
+        if let installed = ServerInstallation.preferredURL(for: Bundle.main.bundleURL, in: ServerInstallation.applicationDirectories) {
+            let alert = NSAlert()
+            alert.messageText = "Update the installed Headroom Server"
+            alert.informativeText = "Quit this copy and open \(installed.path) to update it."
+            alert.runModal()
+            return
+        }
+        checkingInstall = true
+        admin.status { [weak self] live in
+            guard let self else { return }
+            self.checkingInstall = false
+            guard !self.handingOff, !self.switchingOwner else { return }
+            let active = live ?? self.status
+            if let active, !ServerInstallation.canUpdate(ownEngine: self.engine.pid, servingEngine: active.pid) {
+                if self.handOffToOwner(of: active) { return }
+                let alert = NSAlert()
+                alert.messageText = "Another Headroom engine is running"
+                alert.informativeText = "Stop that engine before updating this copy of Headroom Server."
+                alert.runModal()
+                return
+            }
+            self.installUpdate(active)
+        }
+    }
+
+    private func installUpdate(_ active: ServerStatus?) {
+        guard let v = Updater.shared.state.available else { return }
+        if let st = active, !st.viewers.isEmpty {
             NSApp.activate(ignoringOtherApps: true)
             let a = NSAlert()
             a.messageText = "Restart to update to \(v)?"

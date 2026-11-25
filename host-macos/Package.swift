@@ -33,6 +33,7 @@ let package = Package(
         ),
         .testTarget(name: "HeadroomKitTests", dependencies: ["HeadroomKit"]),
         .executableTarget(name: "headroom", dependencies: ["HeadroomKit"]),
+        .testTarget(name: "HeadroomServerTests", dependencies: ["HeadroomServer"]),
         // Menu-bar app: status item, notifications, settings window (the engine's admin page in a WKWebView),
         // and updates (../update-macos).
         .executableTarget(name: "HeadroomServer", dependencies: [.product(name: "HeadroomUpdate", package: "update-macos")]),

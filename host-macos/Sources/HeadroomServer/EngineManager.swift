@@ -18,6 +18,8 @@ final class EngineManager {
 
     var running: Bool { process?.isRunning == true }
 
+    var pid: pid_t? { running ? process?.processIdentifier : nil }
+
     @discardableResult
     func start() -> Bool {
         userStopped = false
