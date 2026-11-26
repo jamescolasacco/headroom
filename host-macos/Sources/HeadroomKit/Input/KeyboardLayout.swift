@@ -60,19 +60,26 @@ public final class KeyboardLayout {
         }
     }
 
-    /// Every character the layout types with one key, alone or with Shift (the plainer one wins when two keys type it).
+    /// Every character the current layout types with one key, alone or with Shift (the plainer one wins when two keys type it).
     private static func build() -> [Character: Stroke] {
         guard let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
               let raw = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else { return [:] }
         let data = Unmanaged<CFData>.fromOpaque(raw).takeUnretainedValue() as Data
-        let keyboardType = UInt32(LMGetKbdType())
+        return build(layout: data, keyboardType: UInt32(LMGetKbdType()))
+    }
+
+    /// The main block: letters, digits, punctuation, space (the keypad and function keys type nothing new), then a JIS
+    /// keyboard's ¥ and _ keys: on a Mac with one, `_`, `¥` and `|` are only there.
+    static let typingKeys = Array(0...0x32) + [0x5D, 0x5E]
+
+    /// The keys of a layout (its 'uchr' data) for a keyboard type (LMGetKbdType: ANSI, ISO or JIS).
+    static func build(layout data: Data, keyboardType: UInt32) -> [Character: Stroke] {
         var result: [Character: Stroke] = [:]
         data.withUnsafeBytes { (buf: UnsafeRawBufferPointer) in
             guard let layout = buf.baseAddress?.assumingMemoryBound(to: UCKeyboardLayout.self) else { return }
             for shift in [false, true] {
                 let modifiers: UInt32 = shift ? UInt32((shiftKey >> 8) & 0xFF) : 0
-                // The main block: letters, digits, punctuation, space (the keypad and function keys type nothing new).
-                for code in 0...0x32 {
+                for code in typingKeys {
                     var deadKeyState: UInt32 = 0
                     var length = 0
                     var chars = [UniChar](repeating: 0, count: 4)

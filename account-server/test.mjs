@@ -319,13 +319,14 @@ function openTunnel(nonce) {
   tcp.on('close', () => ws.close());
 }
 /** A device's control connection: with an account's device token, or none (a device without an account). */
-function connectControl(token) {
+function connectControl(token, headers = {}, at = wsBase) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`${wsBase}/api/relay/control`, token ? { headers: { Authorization: `Bearer ${token}` } } : undefined);
+    const all = { ...headers, ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+    const ws = new WebSocket(`${at}/api/relay/control`, Object.keys(all).length ? { headers: all } : undefined);
     ws.replies = [];
     ws.onmessage = e => {
       const msg = JSON.parse(e.data);
-      if (msg.t === 'hello') { ws.relayId = msg.relayId; resolve(ws); }
+      if (msg.t === 'hello') { ws.relayId = msg.relayId; ws.key = msg.key; resolve(ws); }
       if (msg.t === 'open') { ws.opens = (ws.opens || 0) + 1; ws.lastOpen = msg; openTunnel(msg.id); }
       if (msg.t === 'slot') ws.replies.push(msg);
     };
@@ -441,6 +442,110 @@ await test('guest codes: a code stops working when its device disconnects', asyn
   guestHost.close();
   await sleep(200);
   assert.equal((await getJson(`/c/${slot}/api/info`)).body.error, 'bad-code');
+});
+// A computer without an account keeps its relay id with the key from its hello, so a guest it accepted (whose session
+// continues at /r/<id>/) can come back after the computer's own connection dropped (a network change, a relay restart).
+const keepHeaders = (host, id, key) => ({ 'X-Headroom-Host-Id': host, ...(id ? { 'X-Headroom-Relay-Id': id, 'X-Headroom-Relay-Key': key } : {}) });
+/** A control connection that stops answering after its hello (a computer whose network went away). */
+function silentControl(headers, at = base) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(at);
+    const socket = net.connect(Number(u.port), u.hostname, () => socket.write([`GET /api/relay/control HTTP/1.1`, `Host: ${u.host}`, 'Upgrade: websocket',
+      'Connection: Upgrade', `Sec-WebSocket-Key: ${crypto.randomBytes(16).toString('base64')}`, 'Sec-WebSocket-Version: 13',
+      ...Object.entries(headers).map(([k, v]) => `${k}: ${v}`), '', ''].join('\r\n')));
+    let buf = Buffer.alloc(0);
+    socket.on('data', d => {
+      buf = Buffer.concat([buf, d]);
+      const end = buf.indexOf('\r\n\r\n');
+      if (end < 0 || buf.length < end + 6) return;
+      const frame = buf.subarray(end + 4);
+      const len = frame[1] & 0x7f;
+      if (frame.length < 2 + len) return;
+      socket.removeAllListeners('data');
+      socket.on('data', () => { }); // never answers a ping again
+      resolve({ socket, hello: JSON.parse(frame.subarray(2, 2 + len).toString()) });
+    });
+    socket.on('error', reject);
+  });
+}
+await test('guest codes: a computer without an account keeps its relay id when it connects again with its key', async () => {
+  const first = await connectControl(null, keepHeaders('keep-1'));
+  assert.match(first.relayId, /^[\w-]{16,24}$/);
+  assert.match(first.key, /^[\w-]{16,64}$/);
+  first.close();
+  await sleep(100);
+  const again = await connectControl(null, keepHeaders('keep-1', first.relayId, first.key));
+  assert.equal(again.relayId, first.relayId);
+  assert.equal(again.key, first.key);
+  assert.equal((await getJson(`/r/${again.relayId}/api/info`)).body.host.id, 'host-1'); // where its guest's session continues
+  // A wrong key, the key with another computer's host id, or no key: a new id.
+  again.close();
+  await sleep(100);
+  for (const h of [keepHeaders('keep-1', first.relayId, first.key.slice(0, -2) + 'AA'), keepHeaders('keep-2', first.relayId, first.key), keepHeaders('keep-1')]) {
+    const other = await connectControl(null, h);
+    assert.notEqual(other.relayId, first.relayId);
+    other.close();
+    await sleep(50);
+  }
+});
+await test('guest codes: a kept id is never one an account computer has, or one a live connection still answers on', async () => {
+  const open = [];
+  try {
+    const accountId = store.data.computers.find(c => c.relayId)?.relayId;
+    assert.match(accountId, /^\d{9}$/);
+    const forged = crypto.createHmac('sha256', store.key).update(`headroom-relay-keep|v1|${accountId}|keep-3`).digest('base64url');
+    const notIt = await connectControl(null, keepHeaders('keep-3', accountId, forged));
+    open.push(notIt);
+    assert.notEqual(notIt.relayId, accountId, 'an account computer\'s id is never handed out');
+    // Its first connection still answers: the id stays with it, the newcomer gets another.
+    const live = await connectControl(null, keepHeaders('keep-4'));
+    open.push(live);
+    const second = await connectControl(null, keepHeaders('keep-4', live.relayId, live.key));
+    open.push(second);
+    assert.notEqual(second.relayId, live.relayId, 'an id a live connection answers on is not handed out');
+    assert.equal((await getJson(`/r/${live.relayId}/api/info`)).status, 200, 'the live connection keeps its id');
+    // Its first connection went silent (gone with a network change): the computer gets its id back, at once — even
+    // when it connects again within the same millisecond (the relay listens for an answer, not at the clock).
+    const gone = await silentControl(keepHeaders('keep-5'));
+    open.push({ close: () => gone.socket.destroy() });
+    assert.ok(app.relay.hosts.get(gone.hello.relayId), 'the silent connection is still listed');
+    const t0 = Date.now();
+    const back = await connectControl(null, keepHeaders('keep-5', gone.hello.relayId, gone.hello.key));
+    open.push(back);
+    assert.equal(back.relayId, gone.hello.relayId, 'a silent connection\'s id comes back to the computer with the key');
+    assert.ok(Date.now() - t0 < 5000);
+    await sleep(100);
+    assert.ok(gone.socket.destroyed || gone.socket.readableEnded, 'the silent connection is closed');
+    assert.equal((await getJson(`/r/${back.relayId}/api/info`)).body?.host?.id, 'host-1', 'reachable at its kept id');
+  } finally {
+    for (const c of open) c.close();
+    await sleep(150);
+  }
+});
+await test('guest codes: after a restart, a kept id comes back to that computer only, and old codes are gone', async () => {
+  const host = await connectControl(null, keepHeaders('keep-6'));
+  const oldSlot = (await askSlot(host)).slot;
+  // The same database (and server key) behind a new relay, as after a restart.
+  const app2 = createApp({ store, mail });
+  const server2 = http.createServer(app2);
+  server2.on('upgrade', app2.upgrade);
+  await new Promise(r => server2.listen(0, '127.0.0.1', r));
+  const base2 = `http://127.0.0.1:${server2.address().port}`;
+  try {
+    const stolen = await connectControl(null, keepHeaders('someone-else', host.relayId, host.key), base2.replace('http', 'ws'));
+    assert.notEqual(stolen.relayId, host.relayId);
+    stolen.close();
+    const back = await connectControl(null, keepHeaders('keep-6', host.relayId, host.key), base2.replace('http', 'ws'));
+    assert.equal(back.relayId, host.relayId);
+    const r = await fetch(`${base2}/c/${oldSlot}/api/info`);
+    assert.equal((await r.json()).error, 'bad-code'); // a code from before the restart reaches nobody
+    back.close();
+  } finally {
+    host.close();
+    server2.closeAllConnections?.();
+    server2.close();
+    await sleep(100);
+  }
 });
 await test('devices without an account: a few per network address', async () => {
   const hosts = [];

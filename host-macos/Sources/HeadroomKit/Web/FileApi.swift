@@ -94,20 +94,41 @@ enum FileApi {
         let temp: String
         let handle: FileHandle
         let remote: String?
+        /// Whose upload it is: it's kept only if they may still transfer files (not turned off, guest not stopped).
+        let deviceId: String?
+        private var checkedAt = Date.distantPast
+        private var refused = false
+        /// The mode a new file gets here (0666 less the umask: 0644 usually), as uploads had before staging: mkstemp
+        /// makes its file owner-only, and the rename keeps that, so a file sent to a shared folder was unreadable to others.
+        static let fileMode: mode_t = { let m = umask(0o022); umask(m); return 0o666 & ~m }()
 
-        init(dir: String, name: String, remote: String?) throws {
+        init(dir: String, name: String, remote: String?, deviceId: String? = nil) throws {
             self.dir = dir
             self.name = name
             self.remote = remote
+            self.deviceId = deviceId
             try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
             var template = Array((dir as NSString).appendingPathComponent(".headroom-upload-XXXXXX").utf8CString)
             let fd = mkstemp(&template)
             guard fd >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+            fchmod(fd, Self.fileMode)
             temp = String(cString: template)
             handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         }
 
-        func write(_ bytes: [UInt8]) throws { try handle.write(contentsOf: bytes) }
+        /// File transfer was turned off for this session, or the guest stopped, since the upload began.
+        private var revoked: Bool {
+            if !refused, let deviceId, Date().timeIntervalSince(checkedAt) >= 0.25 {
+                checkedAt = Date()
+                refused = AuthService.allowed(deviceId)?.files != true
+            }
+            return refused
+        }
+
+        func write(_ bytes: [UInt8]) throws {
+            if revoked { return } // the rest isn't written; finish() refuses it
+            try handle.write(contentsOf: bytes)
+        }
 
         /// Some external volumes do not implement RENAME_EXCL. Reserve an unused name there before replacing it.
         static func moveWithReservation(_ source: String, to destination: String) -> Int32 {
@@ -117,13 +138,21 @@ enum FileApi {
             if rename(source, destination) == 0 { return 0 }
             let failure = errno
             unlink(destination)
-            return failure
+            // The name was free (reserved just now): a volume that won't rename over the reservation isn't "name taken",
+            // or finish() would try the next name forever.
+            return failure == EEXIST ? EIO : failure
         }
 
         func finish() -> HttpResponse {
             let fm = FileManager.default
             let ext = (name as NSString).pathExtension
             let stem = (name as NSString).deletingPathExtension
+            checkedAt = .distantPast
+            if revoked {
+                abort()
+                Log.info("files", "upload of \(name) from \(remote ?? "?") dropped: file transfer was turned off")
+                return .json(["error": "file transfer isn't allowed"], status: .forbidden)
+            }
             do {
                 try handle.close()
                 var i = 0
@@ -135,7 +164,7 @@ enum FileApi {
                         failure = errno
                         if failure == ENOTSUP { failure = Self.moveWithReservation(temp, to: final) }
                     }
-                    if failure == EEXIST {
+                    if failure == EEXIST && i < 10_000 {
                         i += 1
                         continue
                     }
@@ -156,12 +185,16 @@ enum FileApi {
     }
 
     static func beginUpload(_ req: HttpRequest) -> HttpStreamDecision {
-        if let err = denied(req) { return .respond(err) }
+        let device: PairedDevice
+        switch authorize(req) {
+        case .failure(let err): return .respond(err.response)
+        case .success(let dev): device = dev
+        }
         let dirParam = req.query["dir"] ?? ""
         let dir = dirParam.trimmingCharacters(in: .whitespaces).isEmpty ? defaultUploadDir : dirParam
         guard let name = sanitizeName(req.query["name"]) else { return .respond(.json(["error": "bad target"], status: .badRequest)) }
         do {
-            return .stream(try UploadSink(dir: dir, name: name, remote: req.remoteIP))
+            return .stream(try UploadSink(dir: dir, name: name, remote: req.remoteIP, deviceId: device.id))
         } catch {
             return .respond(.json(["error": "can't write there: \(error.localizedDescription)"], status: .forbidden))
         }
@@ -182,9 +215,21 @@ enum FileApi {
         return .json(["path": p])
     }
 
+    struct Refusal: Error { let response: HttpResponse }
+
+    /// Who's asking, if they may transfer files now.
+    private static func authorize(_ req: HttpRequest) -> Result<PairedDevice, Refusal> {
+        guard let dev = AuthService.validateToken(req.bearerToken, ip: req.remoteIP, touch: false) else {
+            return .failure(Refusal(response: .json(["error": "unauthorized"], status: .unauthorized)))
+        }
+        guard AuthService.allowed(dev.id)?.files == true else {
+            return .failure(Refusal(response: .json(["error": "file transfer isn't allowed"], status: .forbidden)))
+        }
+        return .success(dev)
+    }
+
     private static func denied(_ req: HttpRequest) -> HttpResponse? {
-        guard let dev = AuthService.validateToken(req.bearerToken, ip: req.remoteIP, touch: false) else { return .json(["error": "unauthorized"], status: .unauthorized) }
-        guard AuthService.allowed(dev.id)?.files == true else { return .json(["error": "file transfer isn't allowed"], status: .forbidden) }
+        if case .failure(let err) = authorize(req) { return err.response }
         return nil
     }
 
@@ -194,22 +239,38 @@ enum FileApi {
         return n.isEmpty || n == "." || n == ".." ? nil : n
     }
 
+    /// Tests only (HEADROOM_TEST_HOME=<dir>, with the test pattern): the folders offered and the default upload folder
+    /// are <dir> and its Desktop, Documents and Downloads, so a test engine never writes to this Mac user's folders.
+    static let testHome: String? = {
+        guard Displays.testPatternSize != nil, let dir = ProcessInfo.processInfo.environment["HEADROOM_TEST_HOME"], !dir.isEmpty else { return nil }
+        Log.warn("files", "TEST: files go to \(dir), not this Mac user's folders")
+        return URL(fileURLWithPath: dir).standardizedFileURL.path
+    }()
+
+    private static func userFolder(_ dir: FileManager.SearchPathDirectory) -> String? {
+        if let home = testHome {
+            let name = [FileManager.SearchPathDirectory.desktopDirectory: "Desktop", .documentDirectory: "Documents", .downloadsDirectory: "Downloads"][dir]
+            return name.map { (home as NSString).appendingPathComponent($0) }
+        }
+        return FileManager.default.urls(for: dir, in: .userDomainMask).first?.path
+    }
+
     static var defaultUploadDir: String {
-        FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first?.path ?? NSHomeDirectory()
+        userFolder(.downloadsDirectory) ?? testHome ?? NSHomeDirectory()
     }
 
     private static func roots() -> [JSONObject] {
         var roots = [JSONObject]()
         let fm = FileManager.default
         func add(_ label: String, _ dir: FileManager.SearchPathDirectory) {
-            if let u = fm.urls(for: dir, in: .userDomainMask).first, fm.fileExists(atPath: u.path) {
-                roots.append(["name": label, "path": u.path, "dir": true, "size": 0, "modified": NSNull()])
+            if let path = userFolder(dir), fm.fileExists(atPath: path) {
+                roots.append(["name": label, "path": path, "dir": true, "size": 0, "modified": NSNull()])
             }
         }
         add("Desktop", .desktopDirectory)
         add("Documents", .documentDirectory)
         add("Downloads", .downloadsDirectory)
-        roots.append(["name": "Home", "path": NSHomeDirectory(), "dir": true, "size": 0, "modified": NSNull()])
+        roots.append(["name": "Home", "path": testHome ?? NSHomeDirectory(), "dir": true, "size": 0, "modified": NSNull()])
         // Mounted volumes: the startup disk first, then external and network volumes.
         let vols = fm.mountedVolumeURLs(includingResourceValuesForKeys: [.volumeLocalizedNameKey, .volumeIsBrowsableKey], options: [.skipHiddenVolumes]) ?? []
         for v in vols {

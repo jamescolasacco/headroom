@@ -37,6 +37,9 @@ export class MouseInput {
       gestureStart: e => this._gestureStart(e), gestureChange: e => this._gestureChange(e),
       gestureEnd: e => { if (this.gestureScale !== null) { this._gestureChange(e); this.endPinch(); } this.gestureScale = null; },
       aux: e => { if (e.button > 0) e.preventDefault(); },
+      // A pinch (Ctrl+wheel) anywhere else in the session — the toolbar, the overlay, a toast, the screen's opening
+      // transition — must not zoom the page: it stays zoomed, and Auto resolution then lowers the stream to match.
+      pageZoom: e => { if (e.ctrlKey && !e.defaultPrevented) e.preventDefault(); },
     };
   }
 
@@ -53,6 +56,7 @@ export class MouseInput {
     l.addEventListener('gestureend', this.h.gestureEnd, { passive: false });
     window.addEventListener('blur', this.h.blur);
     l.addEventListener('wheel', this.h.wheel, { passive: false });
+    window.addEventListener('wheel', this.h.pageZoom, { passive: false });
     l.addEventListener('contextmenu', this.h.ctx);
     document.addEventListener('pointerlockchange', this.h.lockChange);
     this.enabled = true;
@@ -71,6 +75,7 @@ export class MouseInput {
     l.removeEventListener('gestureend', this.h.gestureEnd, { passive: false });
     window.removeEventListener('blur', this.h.blur);
     l.removeEventListener('wheel', this.h.wheel);
+    window.removeEventListener('wheel', this.h.pageZoom, { passive: false });
     l.removeEventListener('contextmenu', this.h.ctx);
     document.removeEventListener('pointerlockchange', this.h.lockChange);
     this.releaseAll();

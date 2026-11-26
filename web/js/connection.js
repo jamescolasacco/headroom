@@ -2,6 +2,11 @@
 import { H2C, VF, VIDEO_HEADER, parseVideoHeader, frameAck } from './protocol.js';
 import { deviceLabel, platformId } from './platform.js';
 
+// An accepted guest can come back after a drop for 2 minutes from when the computer notices it
+// (SupportService.resumeGrace), which can be 20 s late (a connection that went silent). After that, trying again only
+// says "Can't reach" forever: the session has ended.
+export const GUEST_RESUME_MS = 150_000;
+
 export class Connection extends EventTarget {
   constructor(host) {
     super();
@@ -19,6 +24,7 @@ export class Connection extends EventTarget {
     this._timers = [];
     this.helloTimer = null;
     this.bytesIn = 0;
+    this.lostAt = 0;              // when the last connection that was let in went away (0: none lost since)
   }
 
   emit(type, detail) { this.dispatchEvent(new CustomEvent(type, { detail })); }
@@ -78,6 +84,7 @@ export class Connection extends EventTarget {
       this.ws = null;
       this._clearTimers();
       this._assembly = null;
+      if (this.welcome) this.lostAt ||= Date.now();
       if (this.closedByUser) { this.setState('closed', { reason: 'user' }); return; }
       if (this._fatal) { this.setState('closed', { reason: this._fatal.code, message: this._fatal.message }); return; }
       this._scheduleReconnect(ev.reason || `code ${ev.code}`);
@@ -96,7 +103,15 @@ export class Connection extends EventTarget {
     else if (!this.ws || this.ws.readyState >= WebSocket.CLOSING) this.reconnectNow();
   }
 
+  /** An accepted guest away for longer than its resume key lasts: the session has ended (says so, and returns true). */
+  _expired() {
+    if (!this.host.support || !this.host.token || !this.lostAt || Date.now() - this.lostAt <= GUEST_RESUME_MS) return false;
+    this._end(`The connection to ${this.host.name || 'the other computer'} was lost.`);
+    return true;
+  }
+
   _scheduleReconnect(reason) {
+    if (this._expired()) return;
     this.attempt++;
     const delay = Math.min(5000, 300 * 2 ** Math.min(this.attempt - 1, 4)) * (0.8 + Math.random() * 0.4);
     this.setState('reconnecting', { attempt: this.attempt, reason, inMs: Math.round(delay) });
@@ -106,9 +121,19 @@ export class Connection extends EventTarget {
   /** Reconnect immediately (e.g. app came back to the foreground). */
   reconnectNow() {
     if (this.closedByUser || this._fatal) return;
+    if (this.welcome) this.lostAt ||= Date.now();
     if (this.ws) { try { this.ws.close(); } catch { } this.ws = null; }
+    if (this._expired()) return;
     this.attempt = Math.max(this.attempt, 1);
     this._open();
+  }
+
+  /** Gives up for good, as when the host ends the session ('ended'): no more reconnecting. */
+  _end(message) {
+    this._clearTimers();
+    this._fatal = { code: 'ended', message };
+    this.emit('fatal', { t: 'error', code: 'ended', message });
+    this.setState('closed', { reason: 'ended', message });
   }
 
   close() {
@@ -180,6 +205,7 @@ export class Connection extends EventTarget {
         if (msg.relayPath && this.host.support) this.host.url = new URL(msg.relayPath, this.host.url).toString().replace(/\/$/, '');
         this.welcome = msg;
         this.attempt = 0;
+        this.lostAt = 0;
         this._fatal = null;
         this.setState('open');
         this.emit('welcome', msg);

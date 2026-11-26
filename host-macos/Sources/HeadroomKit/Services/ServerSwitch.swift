@@ -20,6 +20,7 @@ public final class ServerSwitch {
         guard !was else { return }
         Log.info("main", "stopped from Headroom Server: nobody can connect until it's started")
         SupportService.shared.cancelCode()
+        SupportService.shared.declineAll() // someone waiting for an answer can't be let in now
         SupportService.shared.revokeAll()
         for s in SessionManager.active { s.disconnect("Headroom Server was stopped on this computer") }
         // The relay connection closes on its next tick: RelayService wants none while stopped.

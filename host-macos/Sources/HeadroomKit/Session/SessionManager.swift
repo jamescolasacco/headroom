@@ -19,6 +19,10 @@ public enum SessionManager {
     static func register(_ s: ClientSession) {
         if let id = s.device?.id, id.hasPrefix("guest:") { SupportService.shared.sessionStarted(id) }
         lock.lock()
+        // The same viewer again, on a new connection, while its old one still waits out its 20 s of silence (it
+        // dropped without closing: a phone that changed networks mid-drag). What the old one holds is let go, or this
+        // one's first moves would drag with it and its first click would only end that drag.
+        let stale = sessions.filter { $0 !== s && $0.device?.id != nil && $0.device?.id == s.device?.id }
         sessions.append(s)
         if assertion == 0 {
             IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleDisplaySleep as CFString, IOPMAssertionLevel(kIOPMAssertionLevelOn),
@@ -29,6 +33,7 @@ public enum SessionManager {
         IOPMAssertionDeclareUserActivity("Headroom viewer connected" as CFString, kIOPMUserActiveLocal, &activityAssertion)
         let handlers = changedHandlers
         lock.unlock()
+        for old in stale { old.releaseHeldInput() }
         Displays.testDisplayWake()
         handlers.forEach { $0() }
     }

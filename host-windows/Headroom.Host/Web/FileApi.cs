@@ -33,7 +33,7 @@ public static class FileApi
                 }
                 foreach (var f in Safe(() => dir.EnumerateFiles()))
                 {
-                    if ((f.Attributes & (FileAttributes.Hidden | FileAttributes.System)) != 0) continue;
+                    if ((f.Attributes & (FileAttributes.Hidden | FileAttributes.System)) != 0 || IsStaging(f.Name)) continue;
                     entries.Add(new { name = f.Name, path = f.FullName, dir = false, size = f.Length, modified = f.LastWriteTimeUtc });
                 }
                 return Results.Json(new { path = dir.FullName, parent = dir.Parent?.FullName ?? "", entries });
@@ -59,7 +59,7 @@ public static class FileApi
 
         app.MapPost("/api/files/upload", async (HttpContext ctx, string? dir, string? name) =>
         {
-            if (!Allowed(ctx, out var err)) return err!;
+            if (!Allowed(ctx, out var err, out var deviceId)) return err!;
             var targetDir = string.IsNullOrWhiteSpace(dir) ? DefaultUploadDir() : dir;
             var fileName = SanitizeName(name);
             if (targetDir == null || fileName == null) return Results.Json(new { error = "bad target" }, statusCode: 400);
@@ -72,6 +72,12 @@ public static class FileApi
                 await using (stream)
                     await ctx.Request.Body.CopyToAsync(stream, 1 << 16, ctx.RequestAborted);
                 ctx.RequestAborted.ThrowIfCancellationRequested();
+                // File transfer may have been turned off for this session, or the guest stopped, while it arrived.
+                if (AuthService.Allowed(deviceId)?.Files != true)
+                {
+                    Log.Info("files", $"upload of {fileName} from {ctx.Connection.RemoteIpAddress} dropped: file transfer was turned off");
+                    return Results.Json(new { error = "file transfer isn't allowed" }, statusCode: 403);
+                }
                 final = PublishUpload(temp, targetDir, fileName);
             }
             finally
@@ -96,15 +102,23 @@ public static class FileApi
         });
     }
 
-    private static bool Allowed(HttpContext ctx, out IResult? error)
+    private static bool Allowed(HttpContext ctx, out IResult? error) => Allowed(ctx, out error, out _);
+
+    private static bool Allowed(HttpContext ctx, out IResult? error, out string? deviceId)
     {
         error = null;
+        deviceId = null;
         var dev = WebHost.Authenticate(ctx);
         if (dev == null) { error = Results.Json(new { error = "unauthorized" }, statusCode: 401); return false; }
+        deviceId = dev.Id;
         // What this session's owner may do now: this PC's settings for your devices, what you allowed for a guest.
         if (AuthService.Allowed(dev.Id)?.Files != true) { error = Results.Json(new { error = "file transfer isn't allowed" }, statusCode: 403); return false; }
         return true;
     }
+
+    /// <summary>An upload still arriving (see the upload endpoint): not shown until it's complete, as on a Mac.</summary>
+    private static bool IsStaging(string name) =>
+        name.StartsWith(".headroom-", StringComparison.Ordinal) && name.EndsWith(".headroom-part", StringComparison.Ordinal);
 
     private static IEnumerable<T> Safe<T>(Func<IEnumerable<T>> f)
     {

@@ -29,20 +29,22 @@ self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET' || url.origin !== location.origin) return;
   // Only public shell assets belong in this cache. Other apps may share the origin.
   if (!SHELL.includes(url.pathname) || e.request.headers.has('range') || e.request.headers.has('authorization')) return;
+  // '/' and '/index.html' are one page: one copy, so an offline visit to either gets the newest.
+  const key = url.pathname === '/index.html' ? '/' : url.pathname;
   e.respondWith((async () => {
     let fresh;
     try {
       fresh = await fetch(e.request);
     } catch (networkError) {
       const cache = await caches.open(CACHE);
-      const cached = await cache.match(url.pathname);
+      const cached = await cache.match(key);
       if (cached) return cached;
       throw networkError;
     }
     if (fresh.ok && fresh.status !== 206 && !fresh.redirected && !/\bno-store\b/i.test(fresh.headers.get('cache-control') || '')) {
       const copy = fresh.clone();
       // The network response remains usable even if storage is full or private browsing refuses the write.
-      e.waitUntil(caches.open(CACHE).then(cache => cache.put(url.pathname, copy)).catch(() => {}));
+      e.waitUntil(caches.open(CACHE).then(cache => cache.put(key, copy)).catch(() => {}));
     }
     return fresh;
   })());

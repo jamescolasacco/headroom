@@ -4,6 +4,13 @@
 // after every input event we diff against that: lost chars on the left = Backspaces, on the right =
 // Deletes, anything new in the middle = typed text (works for autocorrect, predictive text, dictation,
 // emoji and IME composition). iOS fires nothing for Backspace on an empty field — hence the sentinel.
+//
+// Whether the keyboard is up is read off the page, never assumed from the field's focus: a phone gives the field its
+// focus back by itself (after the app switcher or the lock screen) with or without the keyboard, Android's Back and a
+// hardware keyboard take the keyboard away and leave the field focused. So typing (`open`: the typing dock, the
+// toolbar's Keyboard button) follows the keyboard the page can see: one that comes back by itself opens it, one that
+// goes away by itself closes it. A tap on Keyboard always ends with a keyboard: a field that kept its focus is focused
+// afresh inside the tap, the only way a phone shows one.
 import { charToCode } from './keymap.js';
 
 // Different invisible characters before and after the caret, so the diff can tell a Backspace
@@ -12,17 +19,26 @@ const ZWSP = '​', WJ = '⁠'; // zero-width space, word joiner
 const LEFT = ZWSP.repeat(12);
 const RIGHT = WJ.repeat(12);
 const STRIP = /[​⁠]/g;
+// An on-screen keyboard covers at least this much of the page (a hardware keyboard's bar alone is about 45-70 px).
+const KEYBOARD_MIN = 100;
+// A keyboard gone this long after the visible area last changed is gone, not resizing, turning with the phone (iOS
+// reports no keyboard, even a negative height, while it turns) or changing layouts.
+const GONE_MS = 700;
 
 export class SoftKeyboard extends EventTarget {
   /**
-   * @param {object} ctx { sink, conn, keyboard (KeyboardInput), mods, touch (focus means the keyboard is up),
-   *   echo (ui/typing.js: what went to the computer, shown above the keys) }
+   * @param {object} ctx { sink, signal (the session's life), conn, keyboard (KeyboardInput), mods, touch (a phone or
+   *   tablet: its keyboard is on screen), echo (ui/typing.js: what went to the computer, shown above the keys),
+   *   inputAllowed() (the computer takes input now: control is on and the connection is open) }
    */
   constructor(ctx) {
     super();
     this.ctx = ctx;
     this.open = false;
     this.composing = false;
+    this.seen = false;      // an on-screen keyboard showed since typing began (so its going away can be seen too)
+    this.own = false;       // show() is focusing the field: its focus and blur say nothing new
+    this.goneTimer = 0;
     const s = ctx.sink;
     const options = { signal: ctx.signal };
     // While a word is being composed (Asian keyboards, dictation, swipe typing, Android's suggestions) the field
@@ -33,35 +49,91 @@ export class SoftKeyboard extends EventTarget {
     s.addEventListener('compositionstart', () => { this.composing = true; }, options);
     s.addEventListener('compositionend', () => { this.composing = false; this._input(); }, options);
     s.addEventListener('blur', () => {
+      if (this.own) return;
       this.composing = false;
-      if (this.open) { this.open = false; this.dispatchEvent(new Event('change')); }
+      this._set(false);
     }, options);
     s.addEventListener('focus', () => {
+      if (this.own) return;
       this.composing = false;
       this._reset();
-      // On a touch screen the keyboard comes up whenever this field has focus, also when iOS gives it back by
-      // itself (after the app switcher, or a hardware keyboard coming and going): say so.
-      if (ctx.touch && !this.open) { this.open = true; this.dispatchEvent(new Event('change')); }
+      // The focus came back by itself (iOS after the app switcher or the lock screen, a hardware keyboard coming or
+      // going): typing goes on once a keyboard shows, not before. If none comes, Keyboard opens one in one tap.
+      this.viewportChanged();
     }, options);
+    ctx.signal?.addEventListener('abort', () => clearTimeout(this.goneTimer));
     this._reset();
   }
 
-  /** Must be called synchronously from a tap/click handler. */
+  /**
+   * Must be called synchronously from a tap/click handler: it ends with a keyboard. A field that kept its focus
+   * without one (it came back without it, Back hid it) is focused afresh: a phone shows a keyboard only for a field
+   * focused inside a tap.
+   */
   show() {
     const s = this.ctx.sink;
     this.composing = false;
     this._reset();
-    s.focus({ preventScroll: true });
-    if (!this.open) { this.open = true; this.dispatchEvent(new Event('change')); } // (focus may have said so already)
+    this.own = true;
+    try {
+      if (document.activeElement === s && this.covered() < KEYBOARD_MIN) s.blur();
+      s.focus({ preventScroll: true });
+    } finally { this.own = false; }
+    this.seen = this.covered() >= KEYBOARD_MIN;
+    this._set(true);
   }
 
   hide() {
     this.ctx.sink.blur();
-    this.open = false;
-    this.dispatchEvent(new Event('change'));
+    this._set(false);
   }
 
   toggle() { if (this.open) this.hide(); else this.show(); }
+
+  /** The page went to the background: whatever keyboard there was went with it (it may come back: viewportChanged). */
+  suspend() {
+    this.composing = false;
+    this._set(false);
+  }
+
+  /**
+   * How much of the page's bottom an on-screen keyboard covers now (0: none): the page keeps its height (innerHeight)
+   * and only what shows of it (the visual viewport) ends above the keyboard. (A browser that shrinks the page itself
+   * for the keyboard shows 0 here: typing then opens and closes only from Keyboard and Hide keyboard.)
+   */
+  covered() {
+    const vv = window.visualViewport;
+    return vv ? Math.max(0, Math.round((window.innerHeight || 0) - vv.offsetTop - vv.height)) : 0;
+  }
+
+  /**
+   * The visible area changed (the session calls this before it lays itself out): a keyboard that came up by itself
+   * starts typing, one that went away by itself while the field kept its focus ends it.
+   */
+  viewportChanged() {
+    if (!this.ctx.touch) return;
+    const focused = document.activeElement === this.ctx.sink && document.visibilityState !== 'hidden';
+    if (focused && this.covered() >= KEYBOARD_MIN) {
+      clearTimeout(this.goneTimer); this.goneTimer = 0;
+      this.seen = true;
+      this._set(true);
+    } else if (this.open && this.seen) {
+      clearTimeout(this.goneTimer); // counted from the last change: a phone turning goes through several
+      this.goneTimer = setTimeout(() => {
+        this.goneTimer = 0;
+        const still = document.activeElement === this.ctx.sink && this.covered() >= KEYBOARD_MIN;
+        if (this.open && this.seen && !still) this._set(false);
+      }, GONE_MS);
+    }
+  }
+
+  _set(open) {
+    clearTimeout(this.goneTimer); this.goneTimer = 0;
+    if (!open) this.seen = false;
+    if (open === this.open) return;
+    this.open = open;
+    this.dispatchEvent(new Event('change'));
+  }
 
   /**
    * Whether a keydown belongs to the text path. Printable keys typed while the soft keyboard is open go
@@ -69,7 +141,9 @@ export class SoftKeyboard extends EventTarget {
    * through the scancode path.
    */
   handles(e) {
-    if (!this.open || document.activeElement !== this.ctx.sink) return false;
+    // On a phone or tablet the field's text path holds whenever it has focus, also while a returning keyboard is still
+    // on its way (or a hardware keyboard types into it): what's typed must go one way only, as text.
+    if (document.activeElement !== this.ctx.sink || !(this.open || this.ctx.touch)) return false;
     if (e.ctrlKey || e.metaKey || e.altKey) return false;
     if (e.key && e.key.length === 1) return true;
     // Let the field handle Backspace/Enter too: preventDefault on iOS kills Backspace auto-repeat,
@@ -101,10 +175,14 @@ export class SoftKeyboard extends EventTarget {
     else if (/^delete.*Forward$/.test(type)) { deletes += backspaces; backspaces = 0; }
     const inserted = v.replace(STRIP, '');
     const kb = this.ctx.keyboard;
-    for (let i = 0; i < backspaces; i++) this._key('Backspace');
-    for (let i = 0; i < deletes; i++) this._key('Delete');
-    if (backspaces) this.ctx.echo?.back(backspaces);
-    if (inserted) this._text(inserted);
+    // While the computer takes no input (reconnecting, or watching only) what's typed goes nowhere: it isn't sent, and
+    // the box over the keys doesn't show it as sent.
+    if (!this.ctx.inputAllowed || this.ctx.inputAllowed()) {
+      for (let i = 0; i < backspaces; i++) this._key('Backspace');
+      for (let i = 0; i < deletes; i++) this._key('Delete');
+      if (backspaces) this.ctx.echo?.back(backspaces);
+      if (inserted) this._text(inserted);
+    }
     this._reset();
     kb?.ctx.onUserGesture?.();
   }

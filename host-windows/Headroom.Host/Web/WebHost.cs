@@ -265,7 +265,7 @@ public static class WebHost
                 if (Int(body, "maxFps") is { } f) c.Video.MaxFps = Math.Clamp(f, 10, 240);
                 if (Int(body, "maxBitrateKbps") is { } b) c.Video.MaxBitrateKbps = Math.Clamp(b, 1000, 200000);
                 if (Str(body, "encoder") is "auto" or "hardware" or "software") c.Video.Encoder = Str(body, "encoder")!;
-                if (Bool(body, "audio") is { } a) c.Audio.Enabled = a;
+                if (Bool(body, "audio") is { } a) { c.Audio.Enabled = a; rightsChanged = true; } // sound stops for running sessions too
                 if (Bool(body, "clipboard") is { } cb) { c.Permissions.Clipboard = cb; rightsChanged = true; }
                 if (Bool(body, "fileTransfer") is { } ft) { c.Permissions.FileTransfer = ft; rightsChanged = true; }
                 if (Bool(body, "input") is { } inp) { c.Permissions.Input = inp; rightsChanged = true; }

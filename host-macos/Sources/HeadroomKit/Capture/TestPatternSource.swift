@@ -71,11 +71,15 @@ final class TestPatternSource: CaptureSource {
     private let dumpQueue = DispatchQueue(label: "headroom.testpattern.dump", qos: .utility)
     private var page: CGImage?
     private var photo: CGImage?
+    /// Test input (TestInput): the overlay last drawn, so a still spell still shows input as soon as it arrives.
+    private var overlayDrawn = -1
 
     private func tick() {
         frame += 1
         // Bars: 4 s of motion, then 2 s still. Desktop: 2 s of scrolling, then 2 s still.
-        if Self.desktopStyle ? frame > 1 && (Self.jump ? frame % 240 != 0 : frame % 240 >= 120) : frame > 1 && frame % 360 >= 240 { return }
+        let still = Self.desktopStyle ? frame > 1 && (Self.jump ? frame % 240 != 0 : frame % 240 >= 120) : frame > 1 && frame % 360 >= 240
+        let overlay = TestInput.enabled ? TestInput.shared.overlay(fieldChars: overlayFieldChars) : nil
+        if still && (overlay == nil || overlay?.key == overlayDrawn) { return }
         guard let pool else { return }
         var pbOut: CVPixelBuffer?
         guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pbOut) == kCVReturnSuccess, let pb = pbOut else { return }
@@ -86,7 +90,13 @@ final class TestPatternSource: CaptureSource {
         if let base = CVPixelBufferGetBaseAddress(pb), let cs = CGColorSpace(name: CGColorSpace.sRGB),
            let ctx = CGContext(data: base, width: w, height: h, bitsPerComponent: 8, bytesPerRow: CVPixelBufferGetBytesPerRow(pb), space: cs,
                                bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) {
+            ctx.saveGState()
             if Self.desktopStyle { drawDesktop(ctx, w, h) } else { draw(ctx, w, h) }
+            ctx.restoreGState()
+            if let overlay {
+                drawTestInput(ctx, w, h, overlay)
+                overlayDrawn = overlay.key
+            }
             // The last picture before a still spell (a jump's only one): what the stream should end up showing.
             if Self.desktopStyle, let dir = Self.dumpDir, Self.jump || frame % 240 == 119, let image = ctx.makeImage() {
                 let url = URL(fileURLWithPath: dir).appendingPathComponent("still-\(frame / 240).png")
@@ -210,6 +220,76 @@ final class TestPatternSource: CaptureSource {
             }
         }
         return c.makeImage()
+    }
+
+    // ------------------------------------------------------------------ test input overlay
+
+    private var overlayFont: CGFloat { max(28, (CGFloat(monitor.height) / 24).rounded()) }
+    /// As much of the field as fits beside "FIELD: " (Menlo's advance is 0.6 em).
+    private var overlayFieldChars: Int { max(8, min(48, Int((CGFloat(monitor.width) - 64) / (overlayFont * 0.6)) - 9)) }
+
+    /// What the test input recorder holds (TestInput), in a black panel at the top left (big enough to read through
+    /// the video), a crosshair where the pointer is, and a ring with the click count for a second after a click.
+    private func drawTestInput(_ c: CGContext, _ w: Int, _ h: Int, _ o: TestInput.Overlay) {
+        let W = CGFloat(w), H = CGFloat(h)
+        c.saveGState()
+        defer { c.restoreGState() }
+        c.translateBy(x: 0, y: H)
+        c.scaleBy(x: 1, y: -1) // top-left origin
+        let size = overlayFont
+        let font = CTFontCreateWithName("Menlo-Bold" as CFString, size, nil)
+        let white = CGColor(gray: 1, alpha: 1), black = CGColor(gray: 0, alpha: 1)
+        let lines = o.lines.map { s -> CTLine in
+            CTLineCreateWithAttributedString(NSAttributedString(string: s, attributes: [
+                .init(kCTFontAttributeName as String): font, .init(kCTForegroundColorAttributeName as String): white]))
+        }
+        let pad = (size * 0.4).rounded(), lineH = (size * 1.3).rounded()
+        let widest = lines.map { CGFloat(CTLineGetTypographicBounds($0, nil, nil, nil)) }.max() ?? 0
+        let panel = CGRect(x: 12, y: 12, width: min(W - 24, widest + pad * 2), height: lineH * CGFloat(lines.count) + pad * 2)
+        c.setFillColor(black)
+        c.fill(panel)
+        c.setStrokeColor(white)
+        c.setLineWidth(2)
+        c.stroke(panel.insetBy(dx: 1, dy: 1))
+        c.saveGState()
+        c.clip(to: panel)
+        c.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
+        for (i, line) in lines.enumerated() {
+            c.textPosition = CGPoint(x: panel.minX + pad, y: panel.minY + pad + lineH * CGFloat(i) + size * 0.98)
+            CTLineDraw(line, c)
+        }
+        c.restoreGState()
+
+        // Global points (where input goes) to this picture's pixels: the test display's bounds are the main display's.
+        let b = monitor.bounds
+        guard b.width > 0, b.height > 0 else { return }
+        func pixel(_ p: CGPoint) -> CGPoint { CGPoint(x: (p.x - b.minX) * W / b.width, y: (p.y - b.minY) * H / b.height) }
+        if let click = o.click {
+            let p = pixel(CGPoint(x: click.x, y: click.y))
+            let color = click.button == "left" ? CGColor(red: 1, green: 0.85, blue: 0, alpha: 1)
+                : click.button == "right" ? CGColor(red: 0, green: 0.9, blue: 1, alpha: 1) : CGColor(red: 0.3, green: 1, blue: 0.3, alpha: 1)
+            let ring = CGRect(x: p.x - 26, y: p.y - 26, width: 52, height: 52)
+            c.setLineWidth(8); c.setStrokeColor(black); c.strokeEllipse(in: ring)
+            c.setLineWidth(4); c.setStrokeColor(color); c.strokeEllipse(in: ring)
+            let label = CTLineCreateWithAttributedString(NSAttributedString(string: " ×\(click.clickState) ", attributes: [
+                .init(kCTFontAttributeName as String): font, .init(kCTForegroundColorAttributeName as String): black]))
+            let lw = CGFloat(CTLineGetTypographicBounds(label, nil, nil, nil))
+            let box = CGRect(x: min(p.x + 30, W - lw - 4), y: max(4, p.y - 30 - size * 1.2), width: lw, height: size * 1.25)
+            c.setFillColor(color)
+            c.fill(box)
+            c.textMatrix = CGAffineTransform(scaleX: 1, y: -1)
+            c.textPosition = CGPoint(x: box.minX, y: box.minY + size * 0.98)
+            CTLineDraw(label, c)
+        }
+        if let pointer = o.pointer {
+            let p = pixel(pointer)
+            for (width, color) in [(CGFloat(7), black), (CGFloat(3), CGColor(red: 1, green: 0.1, blue: 0.75, alpha: 1))] {
+                c.setLineWidth(width)
+                c.setStrokeColor(color)
+                c.strokeLineSegments(between: [CGPoint(x: p.x - 24, y: p.y), CGPoint(x: p.x - 5, y: p.y), CGPoint(x: p.x + 5, y: p.y), CGPoint(x: p.x + 24, y: p.y),
+                                               CGPoint(x: p.x, y: p.y - 24), CGPoint(x: p.x, y: p.y - 5), CGPoint(x: p.x, y: p.y + 5), CGPoint(x: p.x, y: p.y + 24)])
+            }
+        }
     }
 
     private static let clock: DateFormatter = {

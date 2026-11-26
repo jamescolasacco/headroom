@@ -188,7 +188,7 @@ public sealed class Updater : IDisposable
         if (!hashes.TryGetValue("update.json", out var mh) || mh != Sha256(manifestBytes)) throw new UpdateException("update.json didn't match its checksum, so it wasn't installed.");
         using var manifest = JsonDocument.Parse(manifestBytes);
         var version = manifest.RootElement.TryGetProperty("version", out var v) ? v.GetString() : null;
-        if (string.IsNullOrEmpty(version)) throw new UpdateException("The latest release doesn't say its version.");
+        if (!IsFileName(version)) throw new UpdateException("The latest release doesn't say its version.");
         if (!IsNewer(version, Current))
         {
             Set(Now with { Phase = "current", Version = null, CheckedAt = DateTime.Now });
@@ -197,7 +197,7 @@ public sealed class Updater : IDisposable
         var assetKey = _app == App.Server ? "windowsServer" : "windowsViewer";
         var asset = manifest.RootElement.TryGetProperty(assetKey, out var a) && a.GetString() is { Length: > 0 } n ? n
             : _app == App.Server ? "Headroom-Server-Setup.exe" : "Headroom-Viewer-Setup.exe";
-        if (!hashes.TryGetValue(asset, out var expected)) throw new UpdateException($"{asset} isn't in the release's checksums.");
+        if (!IsFileName(asset) || !hashes.TryGetValue(asset, out var expected)) throw new UpdateException($"{asset} isn't in the release's checksums.");
 
         var dir = Path.Combine(_cacheDir, version);
         var setup = Path.Combine(dir, asset);
@@ -321,6 +321,11 @@ public sealed class Updater : IDisposable
         }
         return false;
     }
+
+    /// <summary>A plain file name, so update.json can't point outside this app's own folder (as on the Mac).</summary>
+    private static bool IsFileName([System.Diagnostics.CodeAnalysis.NotNullWhen(true)] string? value) =>
+        !string.IsNullOrEmpty(value) && value != "." && value != ".." && value[^1] != '.' && value[^1] != ' '
+        && value.IndexOfAny(Path.GetInvalidFileNameChars()) < 0;
 
     private static string Sha256(byte[] data) => Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant();
 

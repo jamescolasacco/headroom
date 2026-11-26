@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Text;
 using Headroom.Host.Util;
 
 namespace Headroom.Host.Services;
@@ -13,6 +14,14 @@ public sealed unsafe class ClipboardService
     public static ClipboardService Instance { get; } = new();
 
     public event Action<string>? Changed;
+
+    /// <summary>
+    /// Viewers get clipboard text in one WebSocket message, and every leg (this host, the relay) takes messages up to
+    /// 16 MiB: more would drop the session's connection. Larger text isn't synced (the web client holds the same limit).
+    /// </summary>
+    public const int MaxTextBytes = 4 << 20;
+
+    private static bool Fits(string text) => Encoding.UTF8.GetByteCount(text) <= MaxTextBytes;
 
     private const uint WM_CLIPBOARDUPDATE = 0x031D;
     private const uint WM_APP_SET = 0x8001;
@@ -80,6 +89,11 @@ public sealed unsafe class ClipboardService
             if (text != null && text != _lastText)
             {
                 _lastText = text;
+                if (!Fits(text))
+                {
+                    Log.Info("clipboard", $"not synced: {Encoding.UTF8.GetByteCount(text)} bytes of text is more than viewers take");
+                    return 0;
+                }
                 try { Changed?.Invoke(text); } catch (Exception ex) { Log.Error("clipboard", "listener failed", ex); }
             }
             return 0;
@@ -101,8 +115,8 @@ public sealed unsafe class ClipboardService
         PostMessageW(_hwnd, WM_APP_SET, 0, 0);
     }
 
-    /// <summary>Current clipboard text (thread-safe snapshot of the last value seen).</summary>
-    public string? GetText() => _lastText;
+    /// <summary>Current clipboard text (thread-safe snapshot of the last value seen; none when it's more than viewers take).</summary>
+    public string? GetText() => _lastText is { } t && Fits(t) ? t : null;
 
     private static bool OpenWithRetry(nint hwnd)
     {

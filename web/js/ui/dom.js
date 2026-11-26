@@ -114,6 +114,17 @@ export function toast(message, ms) {
   if (document.hidden) { clearTimeout(toastTimer); toastTimer = 0; } else armToast(el);
 }
 
+/** Takes the message down now, if it's still `message` (one that no longer holds, like "Uploading…"). */
+export function clearToast(message) {
+  const el = document.getElementById('toast');
+  if (!el || el.hidden || el.textContent !== message) return;
+  clearTimeout(toastTimer);
+  toastTimer = 0;
+  hideToast(el);
+  el.hidden = true;
+  el.textContent = '';
+}
+
 /**
  * A labelled form field: the label is bound to the input, an optional hint is linked as its description, and
  * an error line below it is linked too and starts empty. Returns the nodes to append plus `error(text)` to show

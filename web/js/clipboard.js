@@ -4,6 +4,14 @@
 //  Cmd/Ctrl+C: a gesture-privileged ClipboardItem whose content is a promise that resolves when the host's
 //  new clipboard arrives — the only way Safari lets a page write clipboard data that arrives later.
 
+// Clipboard text goes in one WebSocket message, and every leg (the hosts, the relay) takes messages up to 16 MiB: more
+// would drop the connection. Text over this isn't synced, either way (the hosts hold the same limit).
+export const MAX_CLIP_BYTES = 4 * 1024 * 1024;
+export function clipTooLarge(text) {
+  if (text.length * 3 <= MAX_CLIP_BYTES) return false; // UTF-8 takes at most 3 bytes per UTF-16 unit
+  return text.length > MAX_CLIP_BYTES || new TextEncoder().encode(text).length > MAX_CLIP_BYTES;
+}
+
 export class ClipboardSync extends EventTarget {
   constructor(conn, allowed) {
     super();
@@ -41,13 +49,15 @@ export class ClipboardSync extends EventTarget {
     this.lastPushed = null;
     this.remote = text;
     this.dispatchEvent(new CustomEvent('remote', { detail: text }));
+    // No text there (nothing copied, an image, or text too large to come over): this device's clipboard keeps what it
+    // has. Writing "" would only wipe it.
     if (this.waiting) {
       clearTimeout(this.waiting.timer);
-      this.waiting.resolve(text);
+      if (text) this.waiting.resolve(text); else this.waiting.reject(new Error('no text on the other computer'));
       this.waiting = null;
       return;
     }
-    this._tryWrite(text);
+    if (text) this._tryWrite(text);
   }
 
   _tryWrite(text) {
@@ -83,11 +93,17 @@ export class ClipboardSync extends EventTarget {
     p.catch(() => { });
   }
 
-  /** Local clipboard text to put on the host (from paste events / manual panel). */
+  /**
+   * Local clipboard text to put on the host (from paste events / manual panel). Says what happened: 'sent', 'same' (the
+   * host has it already), 'off' (not allowed, or not connected right now) or 'too-large'.
+   */
   pushLocal(text) {
-    if (!this.allowed() || text == null || text === this.lastPushed || text === this.remote) return;
+    if (!this.allowed() || text == null) return 'off';
+    if (text === this.lastPushed || text === this.remote) return 'same';
+    if (clipTooLarge(text)) return 'too-large';
     this.lastPushed = text;
     this.conn.sendJson({ t: 'clip', text });
+    return 'sent';
   }
 
   async _readLocalIfGranted() {
@@ -100,13 +116,15 @@ export class ClipboardSync extends EventTarget {
     } catch { /* Safari has no clipboard-read permission name */ }
   }
 
-  /** Explicit "send my clipboard" (button): prompts in Chromium, shows the Paste callout in Safari. */
+  /**
+   * Explicit "send my clipboard" (button): prompts in Chromium, shows the Paste callout in Safari. Resolves with the
+   * text and what pushLocal did with it.
+   */
   async readLocalExplicit() {
     if (!this.allowed()) throw new Error('clipboard unavailable');
     const text = await navigator.clipboard.readText();
     if (!this.allowed()) throw new Error('clipboard unavailable');
     this.lastPushed = null;
-    this.pushLocal(text);
-    return text;
+    return { text, status: this.pushLocal(text) };
   }
 }

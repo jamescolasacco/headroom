@@ -121,7 +121,8 @@ public sealed class SupportService
             new TaskCompletionSource<Decision?>(TaskCreationOptions.RunContinuationsAsynchronously));
         lock (_gate)
         {
-            if (_pending.Count >= MaxPending) return null;
+            // Stopped (Stop server), nobody can connect: not even someone whose code was checked a moment before.
+            if (_pending.Count >= MaxPending || ServerSwitch.Shared.Stopped) return null;
             _pending.Add(p);
         }
         Log.Info("guest", $"'{name}' ({ip ?? "?"}{(country != null ? ", " + country : "")}) asks to connect; waiting for an answer here");
@@ -149,6 +150,7 @@ public sealed class SupportService
             if (p != null) _pending.Remove(p);
         }
         if (p == null) return false;
+        accept &= !ServerSwitch.Shared.Stopped; // nobody gets in while stopped
         Log.Info("guest", $"'{p.Name}' " + (accept
             ? $"accepted{(viewOnly ? " (view only)" : "")}{(files ? ", files" : "")}{(clipboard ? ", clipboard" : "")}"
             : "declined"));
@@ -156,6 +158,15 @@ public sealed class SupportService
         if (!accept) CancelCode();
         p.Done.TrySetResult(accept ? new Decision(viewOnly, files, clipboard) : null);
         return true;
+    }
+
+    /// <summary>Stop server: everyone still waiting for an answer is told no (an Accept now can't let them in).</summary>
+    public void DeclineAll()
+    {
+        List<Pending> waiting;
+        lock (_gate) { waiting = _pending.ToList(); _pending.Clear(); }
+        if (waiting.Count > 0) Log.Info("guest", $"{waiting.Count} waiting request(s) declined: the server was stopped");
+        foreach (var p in waiting) p.Done.TrySetResult(null);
     }
 
     /// <summary>The guest went away while waiting.</summary>

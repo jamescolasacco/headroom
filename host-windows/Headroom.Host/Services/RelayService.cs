@@ -46,9 +46,18 @@ public sealed class RelayService
     private readonly Dictionary<string, TaskCompletionSource<(Slot?, string?)>> _slotWaiters = new();
     private string _state = "off";    // off | connecting | online | retrying
     private string? _relayId;
+    /// <summary>Not signed in, this PC gets a fresh relay id each time it connects, and a key to keep it with: presented
+    /// when it connects again (a network change, a moment asleep), the relay gives the same id back, so a guest it
+    /// accepted (whose session continues at that id) can come back. Relays that don't do this ignore it.</summary>
+    private (string Id, string Key)? _keep;
     private string? _lastError;
     private TimeSpan _backoff = TimeSpan.FromSeconds(1);
     private DateTime _nextAttempt = DateTime.MinValue;
+    /// <summary>
+    /// What the last attempt was for (relay and credential): a wait after a refusal applies to that credential only.
+    /// Signed out because the account removed this PC, or signed in again, it connects at once.
+    /// </summary>
+    private string? _attemptKey;
     private Timer? _timer;
 
     public void Start(int localPort)
@@ -96,10 +105,11 @@ public sealed class RelayService
                     switched = true;
                 }
                 else if (want == null) _state = "off";
-                else if (_target == null && DateTime.UtcNow >= _nextAttempt)
+                else if (_target == null && (DateTime.UtcNow >= _nextAttempt || want.Key != _attemptKey))
                 {
                     gen = ++_generation;
                     _target = want.Key;
+                    _attemptKey = want.Key;
                     if (_state != "retrying") _state = "connecting";
                     connectNow = true;
                 }
@@ -130,7 +140,14 @@ public sealed class RelayService
     private async Task RunControlAsync(Target t, int gen)
     {
         var ws = new ClientWebSocket();
+        (string Id, string Key)? keep;
+        lock (_gate) keep = _keep;
         if (t.Token != null) ws.Options.SetRequestHeader("Authorization", "Bearer " + t.Token);
+        else if (keep is { } k)
+        {
+            ws.Options.SetRequestHeader("X-Headroom-Relay-Id", k.Id);
+            ws.Options.SetRequestHeader("X-Headroom-Relay-Key", k.Key);
+        }
         ws.Options.SetRequestHeader("X-Headroom-Host-Id", HostInfo.HostId);
         ws.Options.SetRequestHeader("X-Headroom-Name", HeaderSafe(HostInfo.Name));
         ws.Options.CollectHttpResponseDetails = true;
@@ -192,6 +209,7 @@ public sealed class RelayService
                         if (gen != _generation) return;
                         first = _relayId != Str("relayId") || _state != "online";
                         _relayId = Str("relayId");
+                        if (_relayId is { } kid && Str("key") is { } key && RelayToken(kid, 9, 24) && RelayToken(key, 16, 64)) _keep = (kid, key);
                         _state = "online";
                         _lastError = null;
                         _backoff = TimeSpan.FromSeconds(1);
@@ -262,6 +280,9 @@ public sealed class RelayService
         SupportService.Shared.RelayDropped();
         foreach (var w in waiters) w.TrySetResult((null, Offline(message)));
         if (log) Log.Warn("relay", $"{message} Retrying in {wait.TotalSeconds:0} s.");
+        // 401: this PC's sign-in is gone (removed from the account, or the account deleted). Check in now to find out,
+        // instead of at the next check-in: signed out, it's back on the relay for guest codes at once.
+        if (status == 401) _ = Task.Run(() => AccountService.Shared.Sync());
     }
 
     private List<TaskCompletionSource<(Slot?, string?)>> TakeWaiters() // under lock
@@ -403,6 +424,10 @@ public sealed class RelayService
     /// <summary>A country code as the relay sends it ("US"), or null.</summary>
     public static string? CountryCode(string? s) =>
         s is { Length: > 0 and <= 8 } && s.All(char.IsAsciiLetter) ? s.ToUpperInvariant() : null;
+
+    /// <summary>A relay id or key as the relay makes them (base64url), safe to send back as a header.</summary>
+    private static bool RelayToken(string s, int min, int max) =>
+        s.Length >= min && s.Length <= max && s.All(ch => char.IsAsciiLetterOrDigit(ch) || ch is '-' or '_');
 
     /// <summary>Header values must be plain ASCII (the relay only shows the name in its log).</summary>
     private static string HeaderSafe(string s)

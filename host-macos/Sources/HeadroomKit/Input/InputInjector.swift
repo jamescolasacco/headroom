@@ -55,8 +55,11 @@ public final class InputInjector {
         return f
     }
 
-    private func post(_ e: CGEvent?) {
+    /// `string`: the text a key event was given (keyboardSetUnicodeString), for the test input recorder.
+    private func post(_ e: CGEvent?, string: String? = nil) {
         guard let e else { return }
+        // Test input (HEADROOM_TEST_INPUT, with the test pattern): recorded, never posted to this Mac.
+        if TestInput.enabled { TestInput.shared.record(e, string: string); return }
         if !warnedAccessibility && !Permissions.accessibility {
             warnedAccessibility = true
             Log.warn("input", "Accessibility permission is missing: input is ignored by macOS. \(Permissions.accessibilityHint)")
@@ -83,7 +86,7 @@ public final class InputInjector {
     /// Relative motion (pointer lock / games): apps that hide the cursor read the deltas.
     public func moveBy(_ dx: Int, _ dy: Int) {
         queue.async { [self] in
-            let cur = CGEvent(source: nil)?.location ?? lastPos ?? .zero
+            let cur = TestInput.enabled ? lastPos ?? TestInput.startPointer : CGEvent(source: nil)?.location ?? lastPos ?? .zero
             let p = Self.clampToDisplays(CGPoint(x: cur.x + CGFloat(dx), y: cur.y + CGFloat(dy)))
             lastPos = p
             postMove(to: p, dx: CGFloat(dx), dy: CGFloat(dy))
@@ -114,7 +117,7 @@ public final class InputInjector {
 
     /// Where the next click lands: the position we last posted (the system's cursor can lag a just-posted move).
     private var clickPosition: CGPoint {
-        lastPos ?? CGEvent(source: nil)?.location ?? .zero
+        lastPos ?? (TestInput.enabled ? TestInput.startPointer : CGEvent(source: nil)?.location ?? .zero)
     }
 
     private static func cgButtonNumber(_ b: Int) -> Int {
@@ -215,11 +218,12 @@ public final class InputInjector {
             var chunk = [UniChar]()
             func flush() {
                 guard !chunk.isEmpty else { return }
+                let string = String(utf16CodeUnits: chunk, count: chunk.count)
                 for down in [true, false] {
                     let e = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: down)
                     e?.flags = []
                     chunk.withUnsafeBufferPointer { e?.keyboardSetUnicodeString(stringLength: $0.count, unicodeString: $0.baseAddress) }
-                    post(e)
+                    post(e, string: string)
                 }
                 chunk.removeAll()
             }
@@ -332,9 +336,13 @@ public final class InputInjector {
         post(ev?.cgEvent)
     }
 
-    static var capsLockOn: Bool { CGEventSource.flagsState(.hidSystemState).contains(.maskAlphaShift) }
+    static var capsLockOn: Bool {
+        if TestInput.enabled { return TestInput.shared.capsLockOn } // test input: the recorder's Caps Lock, not this Mac's
+        return CGEventSource.flagsState(.hidSystemState).contains(.maskAlphaShift)
+    }
 
     static func setCapsLock(_ on: Bool) {
+        if TestInput.enabled { TestInput.shared.setCapsLock(on); return } // test input: recorded, this Mac's lock untouched
         let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching(kIOHIDSystemClass))
         guard service != 0 else { return }
         defer { IOObjectRelease(service) }
@@ -347,6 +355,7 @@ public final class InputInjector {
     /// Lock the screen now (Control-Command-Q), via the login framework when available.
     public func lockScreen() {
         queue.async { [self] in
+            if TestInput.enabled { TestInput.shared.special("lock-screen"); return } // test input: recorded, never locks
             typealias LockFn = @convention(c) () -> Int32
             if let h = dlopen("/System/Library/PrivateFrameworks/login.framework/Versions/Current/login", RTLD_LAZY),
                let sym = dlsym(h, "SACLockScreenImmediate") {
@@ -356,6 +365,11 @@ public final class InputInjector {
             for c in ["ControlLeft", "MetaLeft", "KeyQ"] { sendKey(c, down: true) }
             for c in ["KeyQ", "MetaLeft", "ControlLeft"] { sendKey(c, down: false) }
         }
+    }
+
+    /// Test input: a viewer's special action (ClientSession.handleSpecial), recorded in order with the input around it.
+    func recordSpecial(_ action: String) {
+        queue.async { TestInput.shared.special(action) }
     }
 
     static func clampToDisplays(_ p: CGPoint) -> CGPoint {

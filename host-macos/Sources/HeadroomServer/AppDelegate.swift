@@ -183,6 +183,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         guard let st else {
             status = nil
             offlinePolls += 1
+            // Ours stood aside for another engine on the same ports (one no Headroom Server app owns, so nobody
+            // handed off), and nothing answers there now: serve again.
+            if offlinePolls >= 2 { engine.retryIfPortsFree() }
             stopBar.update([], host: "", onStop: {}, onOpen: {})
             statusItem.button?.image = StatusIcon.image(active: false, warning: offlinePolls > 2)
             statusItem.button?.toolTip = engine.userStopped ? "Headroom Server — stopped" : "Headroom Server — starting…"

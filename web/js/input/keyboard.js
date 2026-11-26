@@ -1,9 +1,9 @@
 // Physical keyboard -> host. Scancode-positional (event.code), so the host's layout decides characters and
 // every shortcut works like a keyboard plugged into the host.
 import * as P from '../protocol.js';
-import { isApple, hasKeyboardLock } from '../platform.js';
+import { isApple, isTouchPrimary, hasKeyboardLock } from '../platform.js';
 import { codeFromEvent, isModifier, macCmdTranslation, macOptionTranslation } from './keymap.js';
-import { sheetOpen, closeSheet } from '../ui/dom.js';
+import { sheetOpen, closeSheet, toast } from '../ui/dom.js';
 
 export class KeyboardInput {
   /**
@@ -61,7 +61,11 @@ export class KeyboardInput {
 
   // ------------------------------------------------------------------ host I/O
 
+  /** Control of the computer (and a connection): without it, nothing goes out but the release of a key it has down. */
+  get allowed() { return this.ctx.inputAllowed ? !!this.ctx.inputAllowed() : true; }
+
   send(code, isDown) {
+    if (!this.allowed && (isDown || !this.down.has(code))) return;
     if (isDown) this.down.add(code); else this.down.delete(code);
     this.ctx.conn.sendBinary(P.key(code, isDown));
   }
@@ -71,6 +75,7 @@ export class KeyboardInput {
    * '-Shift' = temporarily lift a physically held Shift for this chord.
    */
   chord(codes) {
+    if (!this.allowed) return;
     const held = [];
     const lifted = [];
     for (const c of codes) {
@@ -91,7 +96,7 @@ export class KeyboardInput {
     for (const s of lifted) this.send(s, true);
   }
 
-  tap(code) { this.send(code, true); this.send(code, false); }
+  tap(code) { if (this.allowed) { this.send(code, true); this.send(code, false); } }
 
   /**
    * A key captured by Headroom Viewer's low-level hook (Win, Alt+Tab, PrtScn...) — the page never sees
@@ -102,6 +107,7 @@ export class KeyboardInput {
     this._trackControl(code, down);
     const hostCode = this._mapPlain(code);
     if (!down && !this.down.has(hostCode)) return;
+    if (down && !this.allowed) return;
     if (down && !isModifier(code)) this.ctx.mods?.pressForKey();
     this.send(hostCode, down);
     if (down) this.ctx.mods?.consume(code);
@@ -123,6 +129,13 @@ export class KeyboardInput {
     if (!this.enabled) return false;
     const t = e.target;
     if (t && t !== this.ctx.sink && t !== document.body && t.closest) {
+      // A toolbar button the pointer left focused (its sheet just closed, say) doesn't keep typing from the computer:
+      // the keys go there, and so does focus. Used from the keyboard (Ctrl+Alt+Shift+M), the toolbar keeps them.
+      const bar = t.closest('#toolbar');
+      if (bar && !bar.classList.contains('kbd') && !/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) && !this.ctx.softKeyboardHandles?.(e)) {
+        if (!isTouchPrimary && e.type === 'keydown') this.ctx.sink?.focus({ preventScroll: true });
+        return true;
+      }
       // Typing into our own UI (dialogs, sheets, the toolbar, the overlay's buttons) stays local.
       if (t.closest('#sheet, dialog, .local-input, #toolbar, #overlay, #extra-keys')) return false;
       if (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) && t !== this.ctx.sink) return false;
@@ -132,8 +145,9 @@ export class KeyboardInput {
   }
 
   _syncLocks(e) {
-    if (!e.getModifierState) return;
-    const caps = e.getModifierState('CapsLock'), num = e.getModifierState('NumLock');
+    if (!e.getModifierState || !this.allowed) return;
+    // A Mac or iPad has no Num Lock (its browsers say it's off) and its keypad always types digits: on a PC, Num Lock on.
+    const caps = e.getModifierState('CapsLock'), num = isApple || e.getModifierState('NumLock');
     const key = `${caps}|${num}`;
     if (key === this.lastLocks) return;
     this.lastLocks = key;
@@ -146,17 +160,25 @@ export class KeyboardInput {
   }
 
   _keydown(e) {
+    // A real Ctrl down, wherever focus is (a sheet, a dialog): it's what tells a Ctrl+wheel from a trackpad pinch (mouse.js).
+    if (this.enabled && (e.code === 'ControlLeft' || e.code === 'ControlRight')) this._trackControl(e.code, true);
     if (!this._ours(e)) return;
     // An option sheet is open: Escape closes it (it isn't meant for the remote computer).
     if (e.key === 'Escape' && sheetOpen()) { e.preventDefault(); e.stopPropagation(); closeSheet(); return; }
     this.ctx.onUserGesture?.(e);
+    // This device's own input method has the key (Japanese, Chinese, Korean...): no page can take it from it, and what
+    // it makes goes to the computer as text (SoftKeyboard's input path). Sending the key as well would type it twice.
+    if (e.isComposing || e.keyCode === 229) return;
     const code = codeFromEvent(e);
     if (!code) return;
     this._trackControl(code, true);
 
     // Local hotkeys: Ctrl+Alt+Shift+<key> never reach the host.
     if (e.ctrlKey && e.altKey && e.shiftKey && !isModifier(code)) {
-      if (this.ctx.onLocalHotkey?.(code)) { e.preventDefault(); e.stopPropagation(); return; }
+      if (this.ctx.onLocalHotkey?.(code)) {
+        for (const d of this.deferred.values()) d.used = true; // its Option isn't a tap of Alt on the computer
+        e.preventDefault(); e.stopPropagation(); return;
+      }
     }
 
     // Lock keys change the lock state themselves (the host toggles on the key): syncing too would toggle twice.
@@ -165,7 +187,8 @@ export class KeyboardInput {
     // Ctrl+Alt+End = Ctrl+Alt+Del on the remote (the real one never reaches applications) — RDP's convention.
     if (code === 'End' && e.ctrlKey && e.altKey && !e.shiftKey) {
       e.preventDefault();
-      if (!e.repeat) this.ctx.conn.sendJson({ t: 'special', action: 'cad' });
+      for (const d of this.deferred.values()) d.used = true;
+      if (!e.repeat && this.allowed) this.ctx.conn.sendJson({ t: 'special', action: 'cad' });
       return;
     }
 
@@ -219,7 +242,9 @@ export class KeyboardInput {
     const code = codeFromEvent(e);
     if (!code) return;
     this._trackControl(code, false);
-    if (!this._ours(e) && !this.down.has(code) && !this.deferred.has(code)) return;
+    // Released in our own UI (Ctrl+Alt+Shift+M took focus to the toolbar, say): still let go of what the host has down,
+    // as the host knows it (Ctrl went to a Mac as ⌘).
+    if (!this._ours(e) && !this.down.has(this._mapPlain(code)) && !this.deferred.has(code)) return;
     e.preventDefault();
     if (code === 'CapsLock' && isApple) { this.tap('CapsLock'); return; }
 
@@ -248,7 +273,12 @@ export class KeyboardInput {
     if (t && t.closest && t.closest('#sheet, dialog, .local-input')) return;
     const text = e.clipboardData?.getData('text/plain');
     e.preventDefault();
-    if (text) this.ctx.clipboard?.pushLocal(text);
+    if (text && this.ctx.clipboard?.pushLocal(text) === 'too-large') {
+      // It can't go over: pasting now would paste what the other computer had already.
+      if (this.pendingPaste) { clearTimeout(this.pendingPaste.timer); this.pendingPaste = null; }
+      toast('Too much text to paste (the limit is 4 MB)');
+      return;
+    }
     if (this.pendingPaste) {
       clearTimeout(this.pendingPaste.timer);
       const { action } = this.pendingPaste;
@@ -270,12 +300,12 @@ export class KeyboardInput {
 
   /** Replays a held-back shortcut as a complete press (its physical keyup is swallowed). */
   _replay(action) {
-    if (action.kind === 'key') {
-      this._perform(action, 'KeyV', null);
-      if (this.down.has(action.code)) this.send(action.code, false);
-    } else {
-      this._perform(action, 'KeyV', null);
-    }
+    if (!this.allowed) return;
+    // A quick tap's keyup already came (and was swallowed): the replay mustn't wait to swallow another one.
+    const held = this.swallowUp.has('KeyV');
+    this._perform(action, 'KeyV', null);
+    if (action.kind === 'key' && this.down.has(action.code)) this.send(action.code, false);
+    if (!held) this.swallowUp.delete('KeyV');
   }
 
   /**
@@ -338,13 +368,19 @@ export class KeyboardInput {
       this.swallowUp.add(physicalCode);
       return;
     }
-    // A plain key: any deferred modifiers now really go down (Cmd+E -> Win+E, Option+Tab -> Alt+Tab).
+    // A plain key: any deferred modifiers now really go down (Cmd+E -> Win+E, Option+Tab -> Alt+Tab). Not for another
+    // modifier: with Cmd+Shift or Option+Shift down, the key after it still decides (Cmd+Shift+Z = Ctrl+Y,
+    // Option+Shift+← = Ctrl+Shift+←, Cmd+Shift+click = Ctrl+Shift+click), and Cmd+Shift alone is no tap of Win.
+    const modifier = isModifier(physicalCode);
     for (const [mod, d] of this.deferred) {
       d.used = true;
-      if (!d.sent) { this.send(this._mapModifier(mod), true); d.sent = true; }
+      if (!d.sent && !modifier) { this.send(this._mapModifier(mod), true); d.sent = true; }
     }
     const code = action.code;
     if (e?.repeat && !this.down.has(code) && !isModifier(code)) { /* repeat after a synthesized up */ }
+    // This press's keyup goes to the host. One left to swallow from an earlier press of this key (its keyup lost while
+    // Cmd was held, or already gone by when a paste replayed) would leave the key down there.
+    this.swallowUp.delete(physicalCode);
     this.send(code, true);
     const metaHeld = e && e.metaKey && isApple && !isModifier(physicalCode);
     if (metaHeld) {

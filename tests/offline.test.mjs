@@ -60,6 +60,20 @@ test('private and partial requests bypass the offline cache', async () => {
   }
 });
 
+test('an offline visit to / or /index.html gets the copy fetched last for either', async () => {
+  let online = true;
+  const h = harness(async () => {
+    if (!online) throw new Error('offline');
+    return new Response('<title>Headroom</title> newer deploy');
+  });
+  await h.fire('install');
+  assert.match(await (await h.fire('fetch', new Request(origin + '/'))).text(), /newer deploy/);
+  online = false;
+  for (const path of ['/index.html', '/?code=1']) {
+    assert.match(await (await h.fire('fetch', new Request(origin + path))).text(), /newer deploy/);
+  }
+});
+
 test('cache refreshes are scoped to the shell and survive a cache write failure', async () => {
   let reply = new Response('new');
   const h = harness(() => reply.clone());

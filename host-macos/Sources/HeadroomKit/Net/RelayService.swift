@@ -24,9 +24,16 @@ public final class RelayService {
     private var control: Channel?
     private var state = "off"           // off | connecting | online | retrying
     private var relayId: String?
+    /// Not signed in, this computer gets a fresh relay id each time it connects, and a key to keep it with: presented
+    /// when it connects again (a network change, a moment asleep), the relay gives the same id back, so a guest it
+    /// accepted (whose session continues at that id) can come back. Relays that don't do this ignore it.
+    private var keep: (id: String, key: String)?
     private var lastError: String?
     private var backoff: TimeInterval = 1
     private var nextAttempt = Date.distantPast
+    /// What the last attempt was for (relay and credential): a wait after a refusal applies to that credential only.
+    /// Signed out because the account removed this computer, or signed in again, it connects at once.
+    private var attemptKey: String?
     private var timer: DispatchSourceTimer?
     private lazy var tls: NIOSSLContext? = {
         var c = TLSConfiguration.makeClientConfiguration()
@@ -61,7 +68,7 @@ public final class RelayService {
     private func tick() {
         let want = wanted
         lock.lock()
-        let have = target, ch = control, due = Date() >= nextAttempt
+        let have = target, ch = control, due = Date() >= nextAttempt, tried = attemptKey
         if have != nil, have != want?.key {
             // Left the account, joined another, or turned the relay off.
             generation += 1
@@ -77,7 +84,7 @@ public final class RelayService {
         }
         if want == nil { state = "off" }
         lock.unlock()
-        if let want, have == nil, due { connect(want) }
+        if let want, have == nil, due || want.key != tried { connect(want) }
     }
 
     // ------------------------------------------------------------------ control connection
@@ -87,11 +94,14 @@ public final class RelayService {
         generation += 1
         let gen = generation
         target = t.key
+        attemptKey = t.key
         if state != "retrying" { state = "connecting" }
+        let reclaim = t.token == nil ? keep : nil
         lock.unlock()
         let handler = RelayControlHandler { [weak self] msg in self?.onControl(msg, gen: gen, base: t.base) }
         var headers = [("X-Headroom-Host-Id", HostInfo.hostId), ("X-Headroom-Name", HostInfo.name)]
         if let token = t.token { headers.append(("Authorization", "Bearer \(token)")) }
+        else if let reclaim { headers += [("X-Headroom-Relay-Id", reclaim.id), ("X-Headroom-Relay-Key", reclaim.key)] }
         openWebSocket(t.base, path: "/api/relay/control", headers: headers, maxFrame: 1 << 16,
                       install: { try $0.pipeline.syncOperations.addHandler(handler) }) { [weak self] result in
             guard let self else { return }
@@ -116,6 +126,8 @@ public final class RelayService {
             guard gen == generation else { lock.unlock(); return }
             let first = relayId != msg.str("relayId") || state != "online"
             relayId = msg.str("relayId")
+            let token = { (s: String, n: ClosedRange<Int>) in n.contains(s.count) && s.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") } }
+            if let id = relayId, let key = msg.str("key"), token(id, 9...24), token(key, 16...64) { keep = (id, key) }
             state = "online"
             lastError = nil
             backoff = 1
@@ -148,7 +160,9 @@ public final class RelayService {
         relayId = nil
         let waiters = takeWaiters()
         var wait = backoff
+        var refused = false
         if let e = error as? RelayError, case .status(let code) = e {
+            refused = code == 401
             // Rejected: removed from the account (it notices at its next check-in), too many computers from this
             // network without an account, or no relay on that server.
             wait = code == 404 ? 300 : 60
@@ -166,6 +180,9 @@ public final class RelayService {
         SupportService.shared.relayDropped()
         for w in waiters { w(.failure(.offline(message))) }
         if wasOnline || backoff <= 2 { Log.warn("relay", "\(message) Retrying in \(Int(wait)) s.") }
+        // 401: this computer's sign-in is gone (removed from the account, or the account deleted). Check in now to
+        // find out, instead of at the next check-in: signed out, it's back on the relay for guest codes at once.
+        if refused { DispatchQueue.global().async { AccountService.shared.sync() } }
     }
 
     private func takeWaiters() -> [(Result<(slot: String, expires: Date), SupportService.CodeError>) -> Void] { // under lock

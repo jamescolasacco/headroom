@@ -126,10 +126,11 @@ public final class SupportService {
     func requestApproval(name: String, ip: String?, country: String?, done: @escaping (Decision?) -> Void) {
         let p = Pending(id: Bytes.base64Url(Bytes.random(6)), name: name, ip: ip, country: country, created: Date(), done: done)
         lock.lock()
-        let full = pending.count >= Self.maxPending
-        if !full { pending.append(p) }
+        // Stopped (Stop server), nobody can connect: not even someone whose code was checked a moment before.
+        let refused = pending.count >= Self.maxPending || ServerSwitch.shared.stopped
+        if !refused { pending.append(p) }
         lock.unlock()
-        if full { done(nil); return }
+        if refused { done(nil); return }
         Log.info("guest", "'\(name)' (\(ip ?? "?")\(country.map { ", \($0)" } ?? "")) asks to connect; waiting for an answer here")
         DispatchQueue.global().asyncAfter(deadline: .now() + Self.approvalTimeout) { [weak self] in
             if self?.take(p.id) != nil {
@@ -141,13 +142,24 @@ public final class SupportService {
 
     /// The answer from the menu-bar app or the settings window.
     @discardableResult
-    public func decide(id: String, accept: Bool, viewOnly: Bool, files: Bool, clipboard: Bool) -> Bool {
+    public func decide(id: String, accept wanted: Bool, viewOnly: Bool, files: Bool, clipboard: Bool) -> Bool {
         guard let p = take(id) else { return false }
+        let accept = wanted && !ServerSwitch.shared.stopped // nobody gets in while stopped
         Log.info("guest", "'\(p.name)' \(accept ? "accepted\(viewOnly ? " (view only)" : "")\(files ? ", files" : "")\(clipboard ? ", clipboard" : "")" : "declined")")
         // Declining ends the code too, so whoever had it can't ask again with it (make a new one for the right person).
         if !accept { cancelCode() }
         p.done(accept ? Decision(viewOnly: viewOnly, files: files, clipboard: clipboard) : nil)
         return true
+    }
+
+    /// Stop server: everyone still waiting is told no, and their requests leave the window and the prompt.
+    func declineAll() {
+        lock.lock()
+        let waiting = pending
+        pending.removeAll()
+        lock.unlock()
+        if !waiting.isEmpty { Log.info("guest", "\(waiting.count) waiting request(s) declined: the server was stopped") }
+        for p in waiting { p.done(nil) }
     }
 
     /// The guest went away while waiting.

@@ -52,6 +52,9 @@ public sealed class ClientSession : IVideoSink
     private volatile SessionRights _rights = new(false, false, false, false);
     private readonly object _rightsGate = new();
     private bool _audioEnabled;
+    /// <summary>Whether this PC's settings let the session have its sound, as the viewer was last told (welcome, permissions).</summary>
+    private bool _audioAllowed;
+    private readonly object _audioGate = new();
     private int _epochBase;
     private string? _lastClipboardSent;
     private bool _clipboardSubscribed;
@@ -198,10 +201,19 @@ public sealed class ClientSession : IVideoSink
             await CloseAsync(WebSocketCloseStatus.PolicyViolation, "unauthorized");
             return false;
         }
+        if (ServerSwitch.Shared.Stopped)
+        {
+            // Stop server while this one was being let in (its sign-in's key looked up, an Accept): nobody can connect now.
+            if (_device.Id.StartsWith("guest:", StringComparison.Ordinal)) SupportService.Shared.Revoke(_device.Id);
+            await SendJsonDirect(new { t = "error", code = "ended", message = $"Headroom Server is stopped on {HostInfo.Name}." });
+            await CloseAsync(WebSocketCloseStatus.NormalClosure, "stopped");
+            return false;
+        }
         var cfg = ConfigStore.Current;
         var rights = AuthService.Allowed(_device.Id) ?? new SessionRights(false, false, false, _device.Id.StartsWith("guest:", StringComparison.Ordinal));
         _rights = rights;
         _viewOnly = !rights.Input;
+        _audioAllowed = AudioPermitted;
         Log.Info("session", $"{Id}: '{_device.Name}' connected from {_remoteIp}");
 
         await SendJsonDirect(new
@@ -217,7 +229,7 @@ public sealed class ClientSession : IVideoSink
                 input = !_viewOnly,
                 clipboard = rights.Clipboard,
                 files = rights.Files,
-                audio = cfg.Permissions.Audio && cfg.Audio.Enabled && !SameMachine,
+                audio = _audioAllowed,
             },
             limits = new { maxFps = cfg.Video.MaxFps, maxBitrateKbps = cfg.Video.MaxBitrateKbps },
             elevated = InputInjector.IsSystem,
@@ -310,21 +322,24 @@ public sealed class ClientSession : IVideoSink
             Disconnect("access ended");
             return;
         }
+        // Sound is this PC's setting (not a right of its own): turned off, it stops for running sessions too.
+        bool audio = AudioPermitted;
         lock (_rightsGate)
         {
-            if (r == _rights) return;
+            if (r == _rights && audio == _audioAllowed) return;
             _rights = r;
             _viewOnly = !r.Input;
+            _audioAllowed = audio;
         }
         if (!r.Input) InputInjector.Instance.ReleaseAll(_input);
+        if (!audio) SetAudio(false);
         SyncClipboard();
-        var cfg = ConfigStore.Current;
         Enqueue(new
         {
             t = "permissions",
-            permissions = new { input = r.Input, files = r.Files, clipboard = r.Clipboard, audio = cfg.Permissions.Audio && cfg.Audio.Enabled && !SameMachine },
+            permissions = new { input = r.Input, files = r.Files, clipboard = r.Clipboard, audio },
         });
-        Log.Info("session", $"{Id}: now control={r.Input} files={r.Files} clipboard={r.Clipboard}");
+        Log.Info("session", $"{Id}: now control={r.Input} files={r.Files} clipboard={r.Clipboard} sound={audio}");
     }
 
     /// <summary>Follows clipboard changes on this PC while the session may share the clipboard and is streaming.</summary>
@@ -638,6 +653,16 @@ public sealed class ClientSession : IVideoSink
 
     private bool _sameMachineNotified;
 
+    /// <summary>This PC's settings let the session have its sound.</summary>
+    private bool AudioPermitted
+    {
+        get
+        {
+            var cfg = ConfigStore.Current;
+            return cfg.Permissions.Audio && cfg.Audio.Enabled && !SameMachine;
+        }
+    }
+
     private void SetAudio(bool enabled)
     {
         var cfg = ConfigStore.Current;
@@ -652,10 +677,14 @@ public sealed class ClientSession : IVideoSink
                 Enqueue(new { t = "notice", level = "info", message = "Audio is off: you're viewing this PC from itself, which would echo." });
             }
         }
-        if (enabled == _audioEnabled) return;
-        _audioEnabled = enabled;
-        if (enabled) AudioService.Instance.Subscribe(OnAudioPacket);
-        else AudioService.Instance.Unsubscribe(OnAudioPacket);
+        // (The viewer's messages and a settings change can both get here.)
+        lock (_audioGate)
+        {
+            if (enabled == _audioEnabled) return;
+            _audioEnabled = enabled;
+            if (enabled) AudioService.Instance.Subscribe(OnAudioPacket);
+            else AudioService.Instance.Unsubscribe(OnAudioPacket);
+        }
     }
 
     private void OnAudioPacket(AudioService.Packet p)
@@ -1045,6 +1074,9 @@ public sealed class ClientSession : IVideoSink
     }
 
     // ------------------------------------------------------------------------------------------- teardown
+
+    /// <summary>Lets go of the keys and mouse buttons this viewer holds, without ending the session.</summary>
+    internal void ReleaseHeldInput() => InputInjector.Instance.ReleaseAll(_input);
 
     /// <summary>
     /// Ends the session from this side. The viewer hears why first, in words for a person, so it shows

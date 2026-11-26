@@ -85,7 +85,8 @@ public final class CursorTracker {
     }
 
     private func pollPosition() {
-        guard let loc = CGEvent(source: nil)?.location else { return }
+        // Test input (HEADROOM_TEST_INPUT): the recorder's pointer is this Mac's cursor; the real one isn't followed.
+        guard let loc = TestInput.enabled ? TestInput.shared.pointer : CGEvent(source: nil)?.location else { return }
         // macOS has no public API for another process's cursor visibility; the cursor counts as shown.
         lock.lock()
         state.location = loc

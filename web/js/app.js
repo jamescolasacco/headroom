@@ -37,7 +37,10 @@ async function main() {
   });
 
   const own = !nativeViewer && await Account.serverInfo(location.origin);
-  if (own) { server = location.origin; info = own; }
+  // Opened from the offline cache while this page's own server can't be reached: stay with it. Sign-ins and codes
+  // meant for a self-hosted Headroom never go to the public one.
+  if (own || own === undefined) server = location.origin;
+  if (own) info = own;
   renderHome();
   // Headroom Viewer learns the service's details a moment later: "Create account" shows or hides in place.
   if (!info) Account.serverInfo(server).then(i => { info = i; applyInfo(); });
@@ -107,6 +110,7 @@ function renderHome() {
     $('signin-slot').replaceChildren();
     renderDevices(acct);
   } else {
+    $('host-list').replaceChildren(); // signed out: nothing of the account stays in the page
     // Kept across re-renders so typing isn't lost.
     if (!$('code-slot').firstChild) $('code-slot').append(codeForm({ inline: true }));
     if (!$('signin-slot').firstChild) $('signin-slot').append(authCard());
@@ -315,6 +319,8 @@ function connect(host, face = null) {
         const back = await waitForComputer(host, () => session !== s);
         if (session !== s) return;
         if (!back.url) {
+          // Signed out elsewhere while waiting: the sign-in card says so, as it does when the list finds out.
+          if (back.signedOut) signedOutNotice = 'You were signed out: from another device, or because your password changed.';
           s.stop();
           if (back.gone) toast(`${host.name} isn't in your account anymore.`);
           else if (!back.signedOut) toast(`${host.name} didn't come online in 10 minutes. Try again when it's on.`);

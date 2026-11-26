@@ -2,7 +2,7 @@
 // top edge, away from the computer's own taskbar or Dock at the bottom). On touch screens it sits at the bottom, in
 // reach of a thumb, and stays put; it can be folded to a small tab, and while the on-screen keyboard is up the keys
 // bar above the keyboard takes its place.
-import { h, svg, openSheet, closeSheet, sheetOpen, sheetItem, segmented, toast, fmtBytes } from './dom.js';
+import { h, svg, openSheet, closeSheet, sheetOpen, sheetItem, segmented, toast, clearToast, fmtBytes } from './dom.js';
 import { I } from './icons.js';
 import { isTouchPrimary, isIPad, canFullscreen } from '../platform.js';
 import { listFiles, uploadFile } from '../api.js';
@@ -35,6 +35,11 @@ export class Toolbar {
     this.el.addEventListener('keydown', e => this._key(e), options);
     // Its focus ring shows when you arrive from the keyboard, even the first time (not after a tap or click).
     this.el.addEventListener('pointerdown', () => this.el.classList.remove('kbd'), { ...options, capture: true });
+    // Uploads under way (one batch after another) stop with the session: left, or ended from the other side.
+    this._uploads = new Set();
+    this._uploadQueue = Promise.resolve();
+    session.life.signal.addEventListener('abort', () => this.cancelUploads(), { once: true });
+    session.conn?.addEventListener('fatal', () => this.cancelUploads(), options);
     this.refresh();
   }
 
@@ -119,6 +124,8 @@ export class Toolbar {
 
   refresh() {
     const s = this.s;
+    // File transfer turned off: uploads stop too (the computer wouldn't keep them now).
+    if (!s.permissions.files) this.cancelUploads('Upload stopped: they turned off file transfer.');
     this._compact = this.touchUi && this.narrow();
     // Folded away: one tab brings it back.
     this.el.classList.toggle('collapsed', this.collapsed);
@@ -275,14 +282,19 @@ export class Toolbar {
   // ------------------------------------------------------------------ clipboard
   clipboardSheet() {
     const s = this.s;
+    // What became of text sent to the computer's clipboard (ClipboardSync.pushLocal).
+    const sent = { sent: 'Remote clipboard updated', same: 'Remote clipboard updated', off: 'Not connected', 'too-large': 'Too much text to send (the limit is 4 MB)' };
     this._sheet('Clipboard', (el, signal) => {
       el.append(h('h3', {}, 'Remote clipboard'));
       const remote = h('textarea', { class: 'local-input', readonly: true, 'aria-label': 'Remote clipboard' }, s.clipboard.remote || '');
       el.append(h('div', { class: 'row' }, remote, h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap' } },
         h('button', {
           type: 'button', class: 'primary', onclick: async () => {
-            try { await navigator.clipboard.writeText(s.clipboard.remote || ''); toast('Copied to this device'); }
-            catch { remote.select(); document.execCommand?.('copy'); toast('Copied'); }
+            // Nothing known (yet) mustn't replace what this device has.
+            const text = s.clipboard.remote || '';
+            if (!text) { toast('Nothing to copy'); return; }
+            try { await navigator.clipboard.writeText(text); toast('Copied to this device'); }
+            catch { remote.select(); toast(document.execCommand?.('copy') ? 'Copied to this device' : 'Couldn\'t copy'); }
           },
         }, 'Copy to this device'),
         h('button', { type: 'button', onclick: () => s.conn.sendJson({ t: 'clip-get' }) }, 'Refresh'))));
@@ -291,11 +303,14 @@ export class Toolbar {
       el.append(h('h3', {}, 'Send to remote'));
       const local = h('textarea', { class: 'local-input', 'aria-label': 'Text to send to the remote clipboard', placeholder: 'Paste or type here…' });
       el.append(h('div', { class: 'row' }, local, h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px', flexWrap: 'wrap' } },
-        h('button', { type: 'button', class: 'primary', onclick: () => { s.clipboard.lastPushed = null; s.clipboard.pushLocal(local.value); toast('Remote clipboard updated'); } }, 'Set remote clipboard'),
+        h('button', { type: 'button', class: 'primary', onclick: () => { s.clipboard.lastPushed = null; toast(sent[s.clipboard.pushLocal(local.value)]); } }, 'Set remote clipboard'),
         h('button', { type: 'button', onclick: () => { s.typeText(local.value); closeSheet(); } }, 'Type it'),
         navigator.clipboard?.readText ? h('button', {
           type: 'button', onclick: async () => {
-            try { local.value = await s.clipboard.readLocalExplicit(); toast('Sent this device\'s clipboard'); } catch { toast('Clipboard access was denied'); }
+            let r;
+            try { r = await s.clipboard.readLocalExplicit(); } catch { toast(s.clipboard.allowed() ? 'Clipboard access was denied' : sent.off); return; }
+            if (r.status !== 'too-large') local.value = r.text;
+            toast(r.status === 'sent' || r.status === 'same' ? 'Sent this device\'s clipboard' : sent[r.status]);
           },
         }, 'Send my clipboard') : null)));
     });
@@ -305,13 +320,18 @@ export class Toolbar {
   filesSheet(path = '') {
     const s = this.s;
     const state = { path, entries: [], parent: null, error: null };
-    let listEl, pathEl;
+    let listEl, pathEl, loads = 0;
     const load = async p => {
+      const mine = ++loads; // the folder clicked last wins
       listEl.replaceChildren(h('p', { class: 'muted small', style: { padding: '8px 12px' } }, 'Loading…'));
       try {
         const r = await listFiles(s.host, p);
+        if (mine !== loads) return;
         Object.assign(state, { path: r.path, entries: r.entries, parent: r.parent, error: null });
-      } catch (e) { state.error = e.message; }
+      } catch (e) {
+        if (mine !== loads) return;
+        state.error = e.message;
+      }
       render();
     };
     const render = () => {
@@ -327,7 +347,11 @@ export class Toolbar {
       }
       listEl.replaceChildren(...rows);
     };
-    this._sheet('Files', el => {
+    this._sheet('Files', (el, signal) => {
+      // While it's open, finished uploads show up in it.
+      const view = { reload: () => load(state.path) };
+      this._filesView = view;
+      signal.addEventListener('abort', () => { if (this._filesView === view) this._filesView = null; });
       const input = h('input', { type: 'file', multiple: true, hidden: true });
       input.addEventListener('change', () => { this.uploadFiles([...input.files], state.path); input.value = ''; });
       el.append(h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between' } },
@@ -365,21 +389,56 @@ export class Toolbar {
     s.conn.sendJson({ t: 'file-token', path: entry.path, id });
   }
 
-  async uploadFiles(files, dir = '') {
+  /**
+   * Sends files to the computer (to `dir`, or its Downloads), one at a time: a batch dropped or picked while another
+   * is under way waits its turn. One message while it goes and one at the end, so what happened to each file isn't
+   * hidden behind the next file's "Uploading…".
+   */
+  uploadFiles(files, dir = '') {
+    if (!files.length || !this.s.permissions.files) return Promise.resolve();
+    const batch = new AbortController();
+    this._uploads.add(batch);
+    const run = this._uploadQueue.then(() => this._uploadBatch(files, dir, batch.signal)).finally(() => this._uploads.delete(batch));
+    this._uploadQueue = run.catch(() => { });
+    return run;
+  }
+
+  async _uploadBatch(files, dir, signal) {
     const s = this.s;
-    for (const f of files) {
-      toast(`Uploading ${f.name}…`, 60000);
+    const saved = [], failed = [];
+    for (const [i, f] of files.entries()) {
+      if (signal.aborted) return;
+      this._uploadToast = files.length > 1 ? `Uploading ${i + 1} of ${files.length}: ${f.name}…` : `Uploading ${f.name}…`;
+      toast(this._uploadToast, 60000);
       const bar = this.progressEl?.isConnected ? this.progressEl : null;
       if (bar) bar.hidden = false;
       try {
-        const r = await uploadFile(s.host, f, dir, p => { if (bar) bar.firstChild.style.transform = `scaleX(${Math.min(1, Math.max(0, p))})`; });
-        toast(`Saved ${r.name || f.name} on ${s.host.name}${dir ? '' : ' (Downloads)'}`, 4000);
+        const r = await uploadFile(s.host, f, dir, p => { if (bar) bar.firstChild.style.transform = `scaleX(${Math.min(1, Math.max(0, p))})`; }, signal);
+        saved.push(r.name || f.name);
       } catch (e) {
-        toast(`${f.name}: ${e.message}`, 5000);
+        if (signal.aborted) return; // whoever stopped it says why
+        failed.push({ name: f.name, why: e.message });
       } finally {
         if (bar) { bar.hidden = true; bar.firstChild.style.transform = 'scaleX(0)'; }
       }
     }
+    const where = `${s.host.name}${dir ? '' : ' (Downloads)'}`;
+    if (!failed.length) toast(saved.length === 1 ? `Saved ${saved[0]} on ${where}` : `Saved ${saved.length} files on ${where}`, 4000);
+    else if (failed.length === 1 && !saved.length) toast(`Couldn't save ${failed[0].name}: ${failed[0].why}`, 6000);
+    else {
+      const which = failed.map(x => `${x.name} (${x.why})`).join(', ');
+      toast(`Saved ${saved.length} of ${files.length} files on ${where}. Not saved: ${which}`, 9000);
+    }
+    if (saved.length) this._filesView?.reload();
+  }
+
+  /** Stops every upload, the one under way and those waiting; `why` is said when there was one. */
+  cancelUploads(why) {
+    if (!this._uploads?.size) return;
+    for (const batch of this._uploads) batch.abort();
+    this._uploads.clear();
+    if (why) toast(why, 5000);
+    else clearToast(this._uploadToast);
   }
 
   // ------------------------------------------------------------------ settings

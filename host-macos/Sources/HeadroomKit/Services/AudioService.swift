@@ -35,6 +35,12 @@ public final class AudioService: NSObject, SCStreamOutput, SCStreamDelegate {
     private var silentFrames = 0
     private var outBuf = [UInt8](repeating: 0, count: 1500)
 
+    /// Tests only (HEADROOM_TEST_AUDIO=1, with the test pattern): a quiet 440 Hz tone instead of this Mac's sound, so
+    /// the whole path (subscribe, Opus, the viewer's decoder) runs without the Screen Recording permission.
+    private static let testTone = ProcessInfo.processInfo.environment["HEADROOM_TEST_AUDIO"] == "1" && Displays.testPatternSize != nil
+    private var toneTimer: DispatchSourceTimer? // under `lock`
+    private var tonePhase = 0.0                 // queue-confined
+
     public func subscribe(_ owner: AnyObject, _ fn: @escaping (Packet) -> Void) {
         lock.lock()
         subscribers[ObjectIdentifier(owner)] = fn
@@ -48,20 +54,44 @@ public final class AudioService: NSObject, SCStreamOutput, SCStreamDelegate {
         subscribers[ObjectIdentifier(owner)] = nil
         let stop = subscribers.isEmpty
         let s = stop ? stream : nil
-        if stop { stream = nil }
+        let tone = stop ? toneTimer : nil
+        if stop { stream = nil; toneTimer = nil }
         lock.unlock()
         if stop {
             s?.stopCapture { _ in }
             if s != nil { Log.info("audio", "system audio capture stopped") }
+            if let tone { tone.cancel(); Log.info("audio", "test tone stopped") }
             queue.async { [self] in disposeConverter() }
         }
     }
 
     private func beginStart() -> Bool {
         lock.lock(); defer { lock.unlock() }
-        if stream != nil || starting || subscribers.isEmpty { return false }
+        if stream != nil || toneTimer != nil || starting || subscribers.isEmpty { return false }
         starting = true
         return true
+    }
+
+    /// HEADROOM_TEST_AUDIO: 10 ms of tone every 10 ms, through the same encoder as captured sound.
+    private func startTone() {
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        lock.lock()
+        guard !subscribers.isEmpty, toneTimer == nil else { lock.unlock(); return }
+        toneTimer = t
+        lock.unlock()
+        t.schedule(deadline: .now(), repeating: .milliseconds(10))
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            for _ in 0..<Self.frameSamples {
+                let v = Float(sin(self.tonePhase) * 0.05)
+                self.tonePhase = (self.tonePhase + 2 * Double.pi * 440 / Self.sampleRate).truncatingRemainder(dividingBy: 2 * Double.pi)
+                self.pcm.append(v)
+                self.pcm.append(v)
+            }
+            self.encodeAvailable()
+        }
+        t.resume()
+        Log.info("audio", "test tone started (HEADROOM_TEST_AUDIO)")
     }
 
     private func endStart() {
@@ -79,6 +109,7 @@ public final class AudioService: NSObject, SCStreamOutput, SCStreamDelegate {
     private func start() async {
         guard beginStart() else { return }
         defer { endStart() }
+        if Self.testTone { startTone(); return }
         // Never trigger the system prompt from here: the menu-bar app asks for Screen Recording explicitly.
         guard CGPreflightScreenCaptureAccess() else {
             Log.warn("audio", "no audio: \(Permissions.screenRecordingHint)")

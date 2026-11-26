@@ -73,8 +73,9 @@ public enum KeyMap {
             "ArrowLeft": k(0x7B, [fn, pad]), "ArrowRight": k(0x7C, [fn, pad]), "ArrowDown": k(0x7D, [fn, pad]), "ArrowUp": k(0x7E, [fn, pad]),
             "ContextMenu": k(0x6E),
 
-            // International
+            // International. A PC's JIS keys beside the space bar are where a Mac's 英数 (left) and かな (right) are.
             "IntlYen": k(0x5D), "IntlRo": k(0x5E), "Lang1": k(0x68), "KanaMode": k(0x68), "Lang2": k(0x66),
+            "NonConvert": k(0x66), "Convert": k(0x68),
 
             // Media keys are system-defined events (NX_KEYTYPE_*), not key codes.
             "AudioVolumeUp": media(0), "VolumeUp": media(0), "AudioVolumeDown": media(1), "VolumeDown": media(1),

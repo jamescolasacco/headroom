@@ -24,11 +24,17 @@ public static class SessionManager
     public static void Register(ClientSession s)
     {
         if (s.Device?.Id is { } id && id.StartsWith("guest:", StringComparison.Ordinal)) SupportService.Shared.SessionStarted(id);
+        ClientSession[] stale;
         lock (Gate)
         {
+            // The same viewer again, on a new connection, while its old one still waits out its silence (it dropped
+            // without closing: a phone that changed networks mid-drag). What the old one holds is let go, or this
+            // one's first moves would drag with it and its first click would only end that drag.
+            stale = Sessions.Where(o => o != s && o.Device?.Id is { } d && d == s.Device?.Id).ToArray();
             Sessions.Add(s);
             EnsurePowerThread();
         }
+        foreach (var old in stale) old.ReleaseHeldInput();
         PowerSignal.Set();
         // Wake the display if it was asleep (like moving the mouse): the power thread only keeps it on. Asleep, it
         // shows Windows nothing to capture, and the viewer would have no picture to start the stream with.

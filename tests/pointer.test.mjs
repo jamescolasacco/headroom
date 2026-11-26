@@ -206,3 +206,15 @@ test('a remaining moving finger after a two-finger tap starts lifting cannot cli
   finger('pointerup', 1, 400); finger('pointerup', 2, 525);
   assert.deepEqual(packets, []);
 });
+
+test('a pinch outside the remote screen (toolbar, overlay, the opening transition) never zooms the page', t => {
+  const { packets } = fixture(t);
+  const wheel = props => {
+    const e = Object.assign(new Event('wheel', { cancelable: true }), { deltaMode: 0, deltaX: 0, deltaY: -10, ctrlKey: false, ...props });
+    window.dispatchEvent(e);
+    return e;
+  };
+  assert.ok(wheel({ ctrlKey: true }).defaultPrevented);
+  assert.ok(!wheel({}).defaultPrevented, 'scrolling the page\'s own panels stays theirs');
+  assert.deepEqual(packets, []);
+});

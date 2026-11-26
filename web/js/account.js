@@ -51,6 +51,8 @@ async function call(server, path, { method = 'GET', body, token, timeout = 10000
   } catch {
     const e = new Error('Can\'t reach Headroom right now. Check your connection.');
     e.unreachable = true;
+    // Something did answer, just not with JSON (another kind of server, a captive portal's page): it isn't Headroom.
+    e.notHeadroom = !!r && r.ok && !ctl.signal.aborted;
     throw e;
   } finally { clearTimeout(t); }
   if (!r.ok) {
@@ -61,12 +63,12 @@ async function call(server, path, { method = 'GET', body, token, timeout = 10000
   return data;
 }
 
-/** GET /api/info, only if it's a Headroom account server (else null). */
+/** GET /api/info, only if it's a Headroom account server (else null; undefined when it can't be reached). */
 export async function serverInfo(server) {
   try {
     const i = await call(server, '/api/info', { timeout: 5000 });
     return i.service === 'headroom-account-server' ? i : null;
-  } catch { return null; }
+  } catch (e) { return e.unreachable && !e.notHeadroom ? undefined : null; }
 }
 
 function remember(server, r) {

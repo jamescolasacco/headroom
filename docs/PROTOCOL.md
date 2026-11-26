@@ -88,7 +88,8 @@ fragment arrives**. The host uses acks for flow control, which works as follows:
 - An AIMD controller adjusts the encoder bitrate between the min and max limits.
 
 `{"t":"keyframe"}` (client → host) asks for an IDR, for example after a decoder error or on returning
-from the background.
+from the background. Not after a `video-config`: the IDR that starts the epoch follows it anyway, and asking
+again costs a second whole picture.
 
 ## 3. Cursor
 
@@ -112,8 +113,10 @@ The host sends the cursor separately so the client can draw it locally with no l
 
 JSON input messages:
 - `{"t":"text","s":"…"}` types text layout-independently (Unicode injection). It is used for soft
-  keyboards, dictation, IME and "type clipboard".
-- `{"t":"locks","caps":bool,"num":bool}` syncs Caps Lock and Num Lock state (a Mac has no Num Lock: caps only).
+  keyboards, dictation, IME (also a desktop's own input method: the keys it composes with aren't sent as keys)
+  and "type clipboard".
+- `{"t":"locks","caps":bool,"num":bool}` syncs Caps Lock and Num Lock state (a Mac host has no Num Lock: caps only).
+  A viewer without Num Lock (a Mac or an iPad, whose keypad always types digits) sends `num: true`.
 - `{"t":"release"}` releases everything this viewer holds. The client sends it on blur or hide; the host
   also does it on disconnect.
 - `{"t":"special","action":"cad"|"lock"|"taskmgr"}` sends Ctrl+Alt+Del (SAS, service mode only), locks

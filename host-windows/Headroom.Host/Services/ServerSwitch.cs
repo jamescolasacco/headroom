@@ -22,6 +22,7 @@ public sealed class ServerSwitch
         _stopped = true;
         Log.Info("main", "stopped from Headroom Server: nobody can connect until it's started");
         SupportService.Shared.CancelCode();
+        SupportService.Shared.DeclineAll();
         SupportService.Shared.RevokeAll();
         foreach (var s in SessionManager.Active) s.Disconnect("Headroom Server was stopped on this computer");
         // The relay connection closes on its next tick: RelayService wants none while stopped.

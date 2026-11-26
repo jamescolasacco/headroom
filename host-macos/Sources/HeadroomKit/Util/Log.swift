@@ -21,7 +21,7 @@ public enum Log {
     public static var consoleEnabled = true
 
     private static let queue = DispatchQueue(label: "headroom.log", qos: .utility)
-    private static var file: FileHandle?
+    static var file: FileHandle? // (not private: tests point it at a handle that can't be written, as a full disk can't)
     private static let stamp: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
@@ -44,10 +44,10 @@ public enum Log {
             }
             if !fm.fileExists(atPath: path) { fm.createFile(atPath: path, contents: nil, attributes: [.posixPermissions: 0o600]) }
             let h = try FileHandle(forWritingTo: URL(fileURLWithPath: path))
-            h.seekToEndOfFile()
+            try h.seekToEnd()
             file = h
         } catch {
-            FileHandle.standardError.write("[log] could not open log file: \(error)\n".data(using: .utf8)!)
+            try? FileHandle.standardError.write(contentsOf: Data("[log] could not open log file: \(error)\n".utf8))
         }
     }
 
@@ -58,8 +58,11 @@ public enum Log {
         stampLock.unlock()
         let line = "\(ts) \(level.char) [\(tag)] \(message)\n"
         queue.async {
-            if consoleEnabled { FileHandle.standardOutput.write(line.data(using: .utf8)!) }
-            file?.write(line.data(using: .utf8)!)
+            let data = Data(line.utf8)
+            // A full disk or a closed console costs the line, never the engine: these calls report a failed write (the
+            // old write(_:) raised an Objective-C exception for it, which aborted the process).
+            if consoleEnabled { try? FileHandle.standardOutput.write(contentsOf: data) }
+            try? file?.write(contentsOf: data)
         }
     }
 

@@ -27,7 +27,9 @@ export class Session {
     this.onUnauthorized = onUnauthorized;
     this.leaveWith = leaveWith; // wraps the last step of leaving (the screen shrinks back into its tile)
     this.light = lightOf(host.hostId || host.id); // the computer's own light (ui/light.js)
-    this.prefs = loadPrefs(host.id);
+    // A guest's settings belong to the computer (its id from the code's look-up), not to the code: every code is new.
+    this.prefsId = host.support && host.hostId ? host.hostId : host.id;
+    this.prefs = loadPrefs(this.prefsId);
     this.monitors = [];
     this.monitorId = this.prefs.monitor || null;
     // Until the computer says what this session may do (welcome), offer nothing beyond watching.
@@ -98,7 +100,7 @@ export class Session {
     this.typing.setHost(this.hostOs);
 
     this.keyboard = new KeyboardInput({
-      conn: this.conn, mods: this.mods, sink, clipboard: this.clipboard, onUserGesture,
+      conn: this.conn, mods: this.mods, sink, clipboard: this.clipboard, onUserGesture, inputAllowed,
       onLocalHotkey: code => this._hotkey(code),
       softKeyboardHandles: e => this.softkbd?.handles(e),
       onKey: code => this.typing.key(code),
@@ -120,9 +122,10 @@ export class Session {
       onPress: () => this.typing.reset(), // a click puts the cursor somewhere else
     });
 
-    this.softkbd = new SoftKeyboard({ sink, signal: this.life.signal, conn: this.conn, keyboard: this.keyboard, mods: this.mods, touch: isTouchPrimary || isIPad, echo: this.typing });
+    this.softkbd = new SoftKeyboard({ sink, signal: this.life.signal, conn: this.conn, keyboard: this.keyboard, mods: this.mods, touch: isTouchPrimary || isIPad, echo: this.typing, inputAllowed });
     this.extraKeys = new ExtraKeysBar($('extra-keys'), {
       signal: this.life.signal, keyboard: this.keyboard, mods: this.mods, conn: this.conn,
+      special: action => this.special(action),
       onLayout: () => this.layoutChrome(),
       onKey: code => this.typing.key(code),
       typingEl: $('typing'),
@@ -205,7 +208,7 @@ export class Session {
 
   setPref(key, value) {
     this.prefs[key] = value;
-    savePrefs(this.host.id, { [key]: value });
+    savePrefs(this.prefsId, { [key]: value });
     switch (key) {
       case 'pinchTarget': this.mouse.endPinch(true); break;
       case 'inputMode': this.touch.setMode(this.inputMode); break;
@@ -248,7 +251,9 @@ export class Session {
     c.addEventListener('welcome', e => {
       const w = e.detail;
       this.monitors = w.monitors || [];
-      this.permissions = w.permissions || this.permissions;
+      // Back after a reconnect: what changed meanwhile (control turned off while it was away) applies as it would live.
+      if (this._welcomed && w.permissions) this._applyPermissions(w.permissions);
+      else this.permissions = w.permissions || this.permissions;
       this.touchPinch = w.touchPinch === true;
       this.elevated = w.elevated;
       this.hostInfo = w.host;
@@ -269,8 +274,13 @@ export class Session {
     });
     c.addEventListener('video-config', e => {
       const cfg = e.detail;
+      // Another display: where the pointer was, and the last taps, were on the one before (touch.js sends the
+      // pointer's place again before its next click).
+      const otherDisplay = this.videoConfig && cfg.monitor !== this.videoConfig.monitor;
+      if (otherDisplay) this.touch.releaseAll();
       this.videoConfig = cfg;
       this.presenter.configure(cfg);
+      if (otherDisplay) this.viewport.zoom = 1; // another display starts unzoomed, even one the same size as the last
       this.viewport.setSizes(cfg.width, cfg.height, cfg.sourceWidth, cfg.sourceHeight);
       this.monitorId = cfg.monitor;
       this._hideOverlay();
@@ -313,18 +323,18 @@ export class Session {
     });
     c.addEventListener('notice', e => toast(e.detail.message, 5000));
     // The person at the other computer changed what this session may do (control, clipboard, files).
-    c.addEventListener('permissions', e => {
-      const p = e.detail.permissions || {};
-      const was = this.permissions;
-      this.permissions = { ...this.permissions, ...p };
-      if (was.clipboard && !this.permissions.clipboard) this.clipboard.clear();
-      if ((was.clipboard && !this.permissions.clipboard) || (was.files && !this.permissions.files)) closeSheet();
-      if (was.audio && !this.permissions.audio) this.setAudio(false);
-      if (was.input && !this.permissions.input) { this._releaseInput(); toast('View only: they turned off control.', 5000); }
-      else if (!was.input && this.permissions.input) toast('You can control the screen now.', 4000);
-      this.toolbar?.refresh();
+    c.addEventListener('permissions', e => this._applyPermissions({ ...this.permissions, ...(e.detail.permissions || {}) }));
+    c.addEventListener('monitors', e => {
+      this.monitors = e.detail.monitors;
+      if (!this.monitors.some(m => m.id === this.monitorId)) this.monitorId = (this.monitors.find(m => m.primary) || this.monitors[0])?.id;
+      // A display woke up (the stream starts on it now): Auto's size for it, at once, so the first picture is that size.
+      const res = this.prefs.resolution;
+      if (res === 'auto' || res === 'device') {
+        const { maxWidth, maxHeight } = this._autoSize();
+        if (`${maxWidth}x${maxHeight}` !== this._sentSize) this.sendStart();
+      }
+      this.toolbar.refresh();
     });
-    c.addEventListener('monitors', e => { this.monitors = e.detail.monitors; this.toolbar.refresh(); });
     c.addEventListener('status', e => {
       const s = e.detail;
       if (s.capture === 'secure-desktop') {
@@ -357,7 +367,8 @@ export class Session {
         const text = {
           'bad-code': 'That code is wrong, expired or already used. Ask the person at the other computer for a new one.',
           declined: 'They declined, or didn\'t answer within 2 minutes. You can ask them for a new code.',
-          unauthorized: 'The person at the other computer ended the session. To connect again, ask them for a new code.',
+          // (A resume key that no longer works: away for more than 2 minutes, or the other computer restarted Headroom.)
+          unauthorized: 'This session can\'t continue. To connect again, ask the person at the other computer for a new code.',
         };
         this._overlay(titles[m.code], text[m.code], false, back);
       } else if (m.code === 'unauthorized') {
@@ -390,6 +401,31 @@ export class Session {
     });
   }
 
+  /**
+   * The person at the other computer changed what this session may do (control, clipboard, files, sound): live, or
+   * while it was reconnecting (its welcome says so).
+   */
+  _applyPermissions(next) {
+    const was = this.permissions;
+    this.permissions = next;
+    if (was.clipboard && !next.clipboard) this.clipboard.clear();
+    // Only the sheet that needed it closes (or More, which lists it): Settings, Displays or Shortcuts stay open.
+    const lost = [...(was.clipboard && !next.clipboard ? ['Clipboard'] : []), ...(was.files && !next.files ? ['Files'] : [])];
+    if (lost.length && [...lost, 'More'].includes(this.toolbar?._sheetLabel)) closeSheet();
+    if (was.audio && !next.audio) this.setAudio(false);
+    // Watching only: the keyboard goes too (its toolbar button goes; what's typed would go nowhere).
+    if (was.input && !next.input) {
+      this._releaseInput();
+      this.softkbd?.hide();
+      this.extraKeys?.hide(); // (kept pinned: it comes back with control)
+      toast('View only: they turned off control.', 5000);
+    } else if (!was.input && next.input) {
+      if (this.extraKeysPinned) this.extraKeys?.show();
+      toast('You can control the screen now.', 4000);
+    }
+    this.toolbar?.refresh();
+  }
+
   sendStart() {
     if (!this.conn?.isOpen) return;
     const res = this.prefs.resolution;
@@ -417,8 +453,10 @@ export class Session {
    */
   _autoSize() {
     const m = this.monitors.find(x => x.id === this.monitorId) || this.monitors[0];
-    if (!m?.width || !m?.height) return { maxWidth: 0, maxHeight: 0 };
     const v = this.viewport, dpr = window.devicePixelRatio || 1;
+    // No display listed yet (asleep: the computer starts the stream once one wakes): at most this screen's pixels, not
+    // all of the computer's (its first picture would be the session's biggest). The `monitors` message corrects it.
+    if (!m?.width || !m?.height) return { maxWidth: Math.round(v.viewer.clientWidth * dpr), maxHeight: Math.round(v.viewer.clientHeight * dpr) };
     // Before any video: the desktop fitted into this window.
     const shownW = v.encW ? v.encW * v.scale * dpr : Math.min(v.viewer.clientWidth, v.viewer.clientHeight * m.width / m.height) * dpr;
     const s = Math.min(1, Math.max(0.5, Math.ceil(shownW / m.width * 10 - 0.05) / 10));
@@ -440,7 +478,7 @@ export class Session {
     this.mouse.endPinch(true);
     this.monitorId = id;
     this.typing?.reset();
-    savePrefs(this.host.id, { monitor: id });
+    savePrefs(this.prefsId, { monitor: id });
     this.sendStart();
     this.toolbar.refresh();
   }
@@ -469,14 +507,19 @@ export class Session {
     this.mouse?.releaseAll();
     this.touch?.releaseAll();
     this.keyboard?.releaseAll();
+    // Ctrl, Alt, ⌘ or Shift left on from the keys bar would turn the first key after this into a shortcut.
+    this.mods?.clear();
   }
 
   _wireLifecycle() {
     window.addEventListener('blur', () => this.touch.releaseAll(), { signal: this.life.signal });
     this._onVis = () => {
       if (document.visibilityState === 'hidden') {
+        // The keyboard goes with the page; if the phone brings it back, typing picks up again (softkbd).
+        this.softkbd.suspend();
         this._releaseInput();
       } else {
+        this.softkbd.viewportChanged();
         this._requestWakeLock();
         this.conn.resume();
       }
@@ -486,12 +529,14 @@ export class Session {
     this._onTouchMove = e => { if (!e.target.closest?.('#sheet, #extra-keys, #toolbar')) e.preventDefault(); };
     this._onFs = () => this._fullscreenChanged();
     this._onMouseTop = e => { if (e.clientY < 6 && e.pointerType === 'mouse') this.toolbar.peek(2500); };
-    this._onDragOver = e => { if (this.permissions.files && e.dataTransfer?.types?.includes('Files')) { e.preventDefault(); this._dropHint(true); } };
+    // Files dragged over the session are never left to the browser: it would open them in place of the session.
+    this._onDragOver = e => { if (e.dataTransfer?.types?.includes('Files')) { e.preventDefault(); this._dropHint(this.permissions.files); } };
     this._onDragLeave = e => { if (!e.relatedTarget) this._dropHint(false); };
     this._onDrop = e => {
       this._dropHint(false);
-      if (!e.dataTransfer?.files?.length) return;
+      if (!e.dataTransfer?.types?.includes('Files')) return;
       e.preventDefault();
+      if (!this.permissions.files) { toast('File transfer isn\'t allowed'); return; }
       this.toolbar.uploadFiles([...e.dataTransfer.files]);
     };
     document.addEventListener('visibilitychange', this._onVis);
@@ -520,6 +565,9 @@ export class Session {
         top: `${vv.offsetTop}px`, left: `${vv.offsetLeft}px`, width: `${vv.width}px`, height: `${vv.height}px`, right: 'auto', bottom: 'auto',
       });
     }
+    // A keyboard that came back or went away by itself: typing (the dock, the toolbar, the picture's keyboard mode)
+    // follows it before anything is laid out.
+    this.softkbd?.viewportChanged();
     // What the on-screen keyboard covers of the page (messages are shown outside the session: layoutChrome).
     this._covered = vv ? Math.max(0, document.documentElement.clientHeight - vv.offsetTop - vv.height) : 0;
     this.layoutChrome();
@@ -610,6 +658,8 @@ export class Session {
   // ------------------------------------------------------------------ actions
 
   toggleKeyboard() {
+    // Watching only, there's nothing to type into: it can close, not open (a three-finger tap asks too).
+    if (!this.permissions.input && !this.softkbd.open && !this.extraKeys.visible) return;
     if (isTouchPrimary || isIPad) {
       this.softkbd.toggle();
       if (!this.softkbd.open && !this.extraKeysPinned) this.extraKeys.hide();
@@ -660,6 +710,7 @@ export class Session {
   }
 
   special(action) {
+    if (!this.permissions.input || !this.conn.isOpen) return; // watching only, or not connected: nothing to press
     switch (action) {
       case 'cad': this.conn.sendJson({ t: 'special', action: 'cad' }); break;
       case 'lock': this.conn.sendJson({ t: 'special', action: 'lock' }); break;
@@ -696,7 +747,7 @@ export class Session {
   }
 
   typeText(text) {
-    if (text) this.conn.sendJson({ t: 'text', s: text });
+    if (text && this.permissions.input && this.conn.isOpen) this.conn.sendJson({ t: 'text', s: text });
   }
 
   _hotkey(code) {

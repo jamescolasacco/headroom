@@ -28,6 +28,8 @@ public final class ClientSession: WebSocketPeer, VideoSink {
     private let shapesLock = NSLock()
     private var viewOnly = false
     private var audioEnabled = false
+    /// Whether this computer's settings let the session have its sound, as the viewer was last told (welcome, permissions).
+    private var audioAllowed = false
     private var epochBase = 0
     private var lastClipboardSent: String?
     private let clipLock = NSLock()
@@ -175,12 +177,20 @@ public final class ClientSession: WebSocketPeer, VideoSink {
     }
 
     private func completeHandshake(_ dev: PairedDevice, ip: String?, extra: JSONObject = [:]) {
+        // Stop server while this one was being let in (its sign-in's key looked up, an Accept): nobody can connect now.
+        if ServerSwitch.shared.stopped {
+            if dev.id.hasPrefix("guest:") { SupportService.shared.revoke(dev.id) }
+            sendJson(["t": "error", "code": "ended", "message": "Headroom Server is stopped on \(HostInfo.name)."])
+            transport?.close(code: .normalClosure, reason: "stopped")
+            return
+        }
         awaitingApproval = false
         device = dev
         handshakeDone = true
         let cfg = ConfigStore.current
         rights = AuthService.allowed(dev.id) ?? SessionRights(input: false, files: false, clipboard: false, guest: dev.id.hasPrefix("guest:"))
         viewOnly = !rights.input
+        audioAllowed = audioPermitted
         Log.info("session", "\(id): '\(dev.name)' connected from \(ip ?? "?")")
 
         sendJson(extra.merging([
@@ -193,13 +203,13 @@ public final class ClientSession: WebSocketPeer, VideoSink {
                 "input": !viewOnly,
                 "clipboard": rights.clipboard,
                 "files": rights.files,
-                "audio": cfg.permissions.audio && cfg.audio.enabled && !sameMachine,
+                "audio": audioAllowed,
             ],
             "limits": ["maxFps": cfg.video.maxFps, "maxBitrateKbps": cfg.video.maxBitrateKbps],
             "elevated": false,
             "hostTimeUs": Clock.nowUs,
         ]) { _, new in new })
-        if !viewOnly && !Permissions.accessibility {
+        if !viewOnly && !Permissions.accessibility && !TestInput.enabled { // test input posts nothing: no permission needed
             sendJson(["t": "notice", "level": "warn", "message": "This Mac hasn't given Headroom the Accessibility permission yet, so your mouse and keyboard can't control it. (System Settings → Privacy & Security → Accessibility)"])
         }
         SessionManager.register(self)
@@ -211,9 +221,13 @@ public final class ClientSession: WebSocketPeer, VideoSink {
         queue.async { [weak self] in
             guard let self, self.handshakeDone, !self.closed, let dev = self.device else { return }
             guard let r = AuthService.allowed(dev.id) else { self.disconnect("access ended"); return }
-            guard r != self.rights else { return }
+            // Sound is this computer's setting (not a right of its own): turned off, it stops for running sessions too.
+            let audio = self.audioPermitted
+            guard r != self.rights || audio != self.audioAllowed else { return }
             self.rights = r
             self.viewOnly = !r.input
+            self.audioAllowed = audio
+            if !audio { self.setAudio(false) }
             if self.viewOnly { InputInjector.shared.releaseAll(self.input) }
             if r.clipboard && self.pipeline != nil && !self.clipboardSubscribed {
                 self.clipboardSubscribed = true
@@ -222,11 +236,10 @@ public final class ClientSession: WebSocketPeer, VideoSink {
                 self.clipboardSubscribed = false
                 ClipboardService.shared.unsubscribe(self)
             }
-            let cfg = ConfigStore.current
             var p = r.json
-            p["audio"] = cfg.permissions.audio && cfg.audio.enabled && !self.sameMachine
+            p["audio"] = audio
             self.sendJson(["t": "permissions", "permissions": p])
-            Log.info("session", "\(self.id): now control=\(r.input) files=\(r.files) clipboard=\(r.clipboard)")
+            Log.info("session", "\(self.id): now control=\(r.input) files=\(r.files) clipboard=\(r.clipboard) sound=\(audio)")
         }
     }
 
@@ -318,6 +331,12 @@ public final class ClientSession: WebSocketPeer, VideoSink {
 
     /// The Windows-centric actions mapped to their Mac equivalents.
     private func handleSpecial(_ action: String) {
+        // Test input (HEADROOM_TEST_INPUT): recorded, never performed here; ⌥⌘Esc still goes to the recorder as its keys.
+        if TestInput.enabled {
+            InputInjector.shared.recordSpecial(action)
+            if action == "cad" { InputInjector.shared.chord(["MetaLeft", "AltLeft", "Escape"]) }
+            return
+        }
         switch action {
         case "cad":
             // No Ctrl+Alt+Del on a Mac: the closest thing is Force Quit Applications (⌥⌘Esc).
@@ -440,6 +459,12 @@ public final class ClientSession: WebSocketPeer, VideoSink {
 
     /// Viewer runs on this very Mac (loopback or one of our own addresses).
     private var sameMachine: Bool { transport?.relayed != true && NetInterfaces.isLocal(transport?.remoteIP) }
+
+    /// This computer's settings let the session have its sound.
+    private var audioPermitted: Bool {
+        let cfg = ConfigStore.current
+        return cfg.permissions.audio && cfg.audio.enabled && !sameMachine
+    }
 
     private func setAudio(_ wanted: Bool) {
         let cfg = ConfigStore.current
@@ -690,6 +715,9 @@ public final class ClientSession: WebSocketPeer, VideoSink {
     }
 
     // ------------------------------------------------------------------------------------------- teardown
+
+    /// Lets go of the keys and mouse buttons this viewer holds, without ending the session.
+    func releaseHeldInput() { InputInjector.shared.releaseAll(input) }
 
     /// Ends the session from this side. The viewer hears why first, in words for a person, so it shows
     /// "Session ended" with the reason instead of trying to reconnect.

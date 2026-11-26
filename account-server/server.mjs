@@ -203,6 +203,14 @@ function computerToken(store, d, c) {
   return crypto.createHmac('sha256', store.key).update(`headroom-computer-token|v1|${d.id}|${c.id}|${d.epoch || 0}`).digest('base64url');
 }
 
+/**
+ * What lets a computer without an account keep its relay id when it connects again: made for that id and that
+ * computer (its host id) alone, never stored, and only ever sent to that computer (in its relay hello).
+ */
+function relayKey(store, relayId, hostId) {
+  return crypto.createHmac('sha256', store.key).update(`headroom-relay-keep|v1|${relayId}|${hostId}`).digest('base64url');
+}
+
 const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 function totpSecret() {
   let bits = '', out = '';
@@ -308,6 +316,17 @@ async function readJson(req, limit = 64 * 1024) {
 }
 
 const str = (v, max = 256) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
+/** Text sent as UTF-8 in a header (a computer's name): Node reads header bytes as Latin-1. */
+const headerText = (v, max) => {
+  const raw = str(v, 4 * max);
+  const utf8 = Buffer.from(raw, 'latin1').toString('utf8');
+  return str(utf8.includes('�') ? raw : utf8, max);
+};
+/** Compares secrets in constant time. */
+const sameText = (a, b) => {
+  const x = Buffer.from(String(a)), y = Buffer.from(String(b));
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+};
 
 const TYPES = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
@@ -379,8 +398,9 @@ class WsLink extends Duplex {
     this.socket = socket;
     this.buf = head?.length ? Buffer.from(head) : Buffer.alloc(0);
     this.lastHeard = Date.now();
+    this.heard = 0; // chunks received: counts what arrived after a moment more reliably than the clock
     socket.setNoDelay(true);
-    socket.on('data', d => { this.lastHeard = Date.now(); this.buf = this.buf.length ? Buffer.concat([this.buf, d]) : d; this.parse(); });
+    socket.on('data', d => { this.lastHeard = Date.now(); this.heard++; this.buf = this.buf.length ? Buffer.concat([this.buf, d]) : d; this.parse(); });
     socket.on('end', () => socket.destroy());
     socket.on('error', () => socket.destroy());
     socket.on('close', () => { this.push(null); this.destroy(); });
@@ -466,9 +486,10 @@ export class Relay {
     return !!h && Date.now() - h.link.lastHeard < RELAY_SILENT_MS;
   }
 
-  guestHostsFrom(ip) {
+  /** Computers without an account connected from `ip` (not counting `except`, a relay id coming back). */
+  guestHostsFrom(ip, except) {
     let n = 0;
-    for (const h of this.hosts.values()) if (!h.computerId && h.ip === ip) n++;
+    for (const [id, h] of this.hosts) if (!h.computerId && h.ip === ip && id !== except) n++;
     return n;
   }
 
@@ -479,7 +500,8 @@ export class Relay {
     return n;
   }
 
-  attach(relayId, computerId, name, link, ip) {
+  /** `key`: for a computer without an account, what keeps its relay id when it connects again (see relayKey). */
+  attach(relayId, computerId, name, link, ip, key) {
     const old = this.hosts.get(relayId);
     if (old) old.link.destroy(); // reconnected (e.g. after a network change): the newest connection wins
     const h = { link, computerId, name, ip, since: Date.now(), tunnels: 0, slots: new Set() };
@@ -498,7 +520,7 @@ export class Relay {
       if (this.hosts.get(relayId) === h) { this.hosts.delete(relayId); log(`relay: '${name}' disconnected${computerId ? '' : ' (no account)'}`); }
     });
     link.on('error', () => link.destroy());
-    link.sendText(JSON.stringify({ t: 'hello', relayId, ping: 25 }));
+    link.sendText(JSON.stringify({ t: 'hello', relayId, ping: 25, ...(key ? { key } : {}) }));
     log(`relay: '${name}' connected${computerId ? '' : ' (no account)'}`);
   }
 
@@ -521,6 +543,23 @@ export class Relay {
       for (const sl of h.slots) this.slots.delete(sl);
       h.slots.clear();
     }
+  }
+
+  /**
+   * Whether the connection holding `relayId` still answers (a ping, within `ms`). A computer that connects again after
+   * a network change finds its old connection still here until it times out; that one doesn't answer.
+   */
+  async answers(relayId, ms = 2000) {
+    const h = this.hosts.get(relayId);
+    if (!h) return false;
+    const asked = Date.now(), before = h.link.heard;
+    h.link.ping();
+    while (Date.now() - asked < ms) {
+      await new Promise(r => setTimeout(r, 50));
+      if (this.hosts.get(relayId) !== h) return false; // it went away meanwhile
+      if (h.link.heard > before) return true;
+    }
+    return false;
   }
 
   /** The device a guest code's first 4 digits point to, if it's still valid and connected. */
@@ -1102,12 +1141,22 @@ export function createApp({ store, now = () => Date.now(), mail = sendMail }) {
         const ip = clientIp(req);
         if (!req.headers.authorization) {
           // A device that isn't signed in to an account: reachable only with a guest code. A fresh, unguessable
-          // relay id each time; a few per network address.
-          if (relay.guestHostsFrom(ip) >= GUEST_HOSTS_PER_ADDRESS) return rawResponse(socket, 429, 'Too Many', {}, '{"error":"rate-limited"}');
+          // relay id, and a key to keep it with: connecting again (a network change, a moment asleep) with both, it
+          // gets the same id back, so a guest it accepted (whose session continues at that id) can come back. A few
+          // per network address.
+          const hostId = str(req.headers['x-headroom-host-id'], 64);
+          const keep = str(req.headers['x-headroom-relay-id'], 64);
+          let kept = /^[\w-]{16,24}$/.test(keep) && sameText(str(req.headers['x-headroom-relay-key'], 128), relayKey(store, keep, hostId)) &&
+            !relay.hosts.get(keep)?.computerId && !store.data.computers.some(c => c.relayId === keep) ? keep : null;
+          // Never one that's still in use: a connection holding it that still answers keeps it (the computer's own old
+          // connection, gone with a network change, doesn't answer, and is replaced).
+          if (kept && await relay.answers(kept)) kept = null;
+          if (relay.guestHostsFrom(ip, kept) >= GUEST_HOSTS_PER_ADDRESS) return rawResponse(socket, 429, 'Too Many', {}, '{"error":"rate-limited"}');
           // They can't take the room account devices need.
-          if (relay.anonymous() >= Math.floor(MAX_HOSTS * 0.6)) return rawResponse(socket, 503, 'Busy', {}, '{"error":"busy"}');
+          if (relay.anonymous() >= Math.floor(MAX_HOSTS * 0.6) && !relay.hosts.has(kept)) return rawResponse(socket, 503, 'Busy', {}, '{"error":"busy"}');
           const link = acceptWebSocket(req, socket, head);
-          if (link) relay.attach(randomId(12), null, str(req.headers['x-headroom-name'], 64) || 'Device', link, ip);
+          const relayId = kept || randomId(12);
+          if (link) relay.attach(relayId, null, headerText(req.headers['x-headroom-name'], 64) || 'Device', link, ip, relayKey(store, relayId, hostId));
           return;
         }
         const { dev, account } = authenticate(req, 'computer');

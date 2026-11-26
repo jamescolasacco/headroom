@@ -57,6 +57,7 @@ export class TouchInput {
     this.held = null;                // a double tap's click, its release waiting TAP_AGAIN_MS: { tx, ty, timer }
     this.lastPress = null;           // the last press sent: { b (button), t, nx, ny, n (its click count) }
     this.cursor = { nx: 0.5, ny: 0.5 };
+    this.sentCursor = null;          // the pointer position the computer last got from here
     this.cursorLocalAt = 0;
     this.buttonDown = false;         // the left button
     this.rightDown = false;
@@ -109,19 +110,35 @@ export class TouchInput {
 
   // ------------------------------------------------------------------ helpers
 
-  _send(buf) { if (this.ctx.inputAllowed()) this.ctx.conn.sendBinary(buf); }
+  _send(buf) {
+    if (!this.ctx.inputAllowed()) return false;
+    this.ctx.conn.sendBinary(buf);
+    return true;
+  }
+
+  _sendCursor() {
+    const { nx, ny } = this.cursor;
+    if (this._send(P.mouseAbs(nx, ny))) this.sentCursor = { nx, ny };
+  }
 
   _moveTo(nx, ny) {
     this.cursor = { nx: Math.min(1, Math.max(0, nx)), ny: Math.min(1, Math.max(0, ny)) };
     this.cursorLocalAt = performance.now();
-    this._send(P.mouseAbs(this.cursor.nx, this.cursor.ny));
+    this._sendCursor();
     const v = this.ctx.viewport;
     this.ctx.cursor.setPosition(this.cursor.nx * v.srcW, this.cursor.ny * v.srcH, this.ctx.cursor.visible);
     if (this.mode === 'trackpad') v.follow(this.cursor.nx, this.cursor.ny, 56);
   }
 
   _button(b, down) {
-    if (down) { this.ctx.mods?.pressForClick(); this.ctx.onPress?.(); }
+    if (down) {
+      // The press goes where the pointer is shown. Trackpad mode adopts the computer's reports of it (someone there
+      // moved the mouse, an app moved it), which a Mac host doesn't count as moves of ours: it would press where
+      // our last move left it.
+      const s = this.sentCursor;
+      if (!s || s.nx !== this.cursor.nx || s.ny !== this.cursor.ny) this._sendCursor();
+      this.ctx.mods?.pressForClick(); this.ctx.onPress?.();
+    }
     this._send(P.mouseButton(b, down));
     if (b === 0) this.buttonDown = down;
     if (b === 2) this.rightDown = down;
@@ -237,6 +254,8 @@ export class TouchInput {
     if (e.pointerType !== 'touch') return;
     e.preventDefault();
     this.ctx.onUserGesture?.(e);
+    // Fingers again after a mouse or an iPad's trackpad (which show the pointer as this device's own): draw it here.
+    this.ctx.cursor.setMode('overlay');
     this._stopInertia();
     try { this.ctx.layer.setPointerCapture(e.pointerId); } catch { }
     const now = performance.now();
@@ -281,6 +300,8 @@ export class TouchInput {
         this.g.kind = 'multi-pending';
       }
       this.g.cx = c.x; this.g.cy = c.y; this.g.spread0 = this._spread(); this.g.spread = this.g.spread0;
+      // A finger joining a pinch (lifted and put back): the zoom goes on from how the fingers are now.
+      this.g.pinchSpread = this.g.spread0; this.g.pinchX = c.x; this.g.pinchY = c.y;
       this.g.vx = 0; this.g.vy = 0; this.g.lastMoveT = now;
     }
   }
@@ -493,7 +514,8 @@ export class TouchInput {
         return;
       }
       case 'multi-pending':
-        if (dur < TAP_MS + 150) {
+        // (Not after a finger already slid, dragged or panned: a second one joining that isn't a tap.)
+        if (dur < TAP_MS + 150 && !g.moved) {
           if (g.fingers === 2) {
             // The right-click goes where the fingers came down (touch mode), between them.
             const c = { x: g.ox, y: g.oy };
@@ -557,7 +579,7 @@ export class TouchInput {
       clearTimeout(this.g.holdTimer);
       if (this.g.multiFrame) cancelAnimationFrame(this.g.multiFrame);
     }
-    this.g = this.lastTap = this.lastTap2 = this.lastPress = null;
+    this.g = this.lastTap = this.lastTap2 = this.lastPress = this.sentCursor = null;
     this.scrollAccX = this.scrollAccY = 0;
     if (this.held) { clearTimeout(this.held.timer); this.held = null; }
     if (this.buttonDown) this._button(0, false);

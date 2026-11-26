@@ -137,3 +137,90 @@ test('switching apps while a guest is waiting keeps the same approval request', 
   c.resume();
   assert.equal(JSON.parse(socket.sent.at(-1)).t, 'keyframe');
 });
+
+test('a new video config waits for the host\'s keyframe; a decoder reset mid-stream asks for one', async t => {
+  const decoders = [];
+  globalThis.VideoDecoder = class {
+    constructor(init) { this.init = init; this.state = 'unconfigured'; this.decodeQueueSize = 0; this.chunks = []; decoders.push(this); }
+    configure() { this.state = 'configured'; }
+    decode(chunk) { this.chunks.push(chunk); }
+    close() { this.state = 'closed'; }
+  };
+  globalThis.EncodedVideoChunk = class { constructor(init) { Object.assign(this, init); } };
+  t.after(() => { delete globalThis.VideoDecoder; delete globalThis.EncodedVideoChunk; });
+  const posted = [];
+  const core = new DecoderCore({ kind: 'vtg', writer: { desiredSize: 1, write: async () => {} } }, m => posted.push(m));
+  t.after(() => core.close());
+  const asks = () => posted.filter(m => m.type === 'need-keyframe').map(m => m.reason);
+  // A session's first config (the worker's clock has barely started), then a resolution change: the host sends
+  // the new epoch's keyframe right after its config either way.
+  core.configure({ epoch: 1, codec: 'avc1.640028', description: new ArrayBuffer(8), width: 1280, height: 720 });
+  core.decode({ epoch: 1, frameId: 1, key: true, data: new ArrayBuffer(4), ts: 1 });
+  core.keyRequestAt = -Infinity; // (no earlier request to throttle against)
+  core.configure({ epoch: 2, codec: 'avc1.640028', description: new ArrayBuffer(8), width: 640, height: 360 });
+  assert.deepEqual(asks(), []);
+  // A delta before any keyframe can't be decoded: dropped, and a keyframe asked for (even right at the start).
+  core.decode({ epoch: 2, frameId: 2, key: false, data: new ArrayBuffer(4), ts: 2 });
+  assert.deepEqual(asks(), ['waiting-for-key']);
+  assert.equal(decoders.at(-1).chunks.length, 0);
+  core.decode({ epoch: 2, frameId: 3, key: true, data: new ArrayBuffer(4), ts: 3 });
+  assert.equal(decoders.at(-1).chunks.length, 1);
+  // The decoder fails mid-epoch: it's recreated and nothing more is coming by itself, so it asks.
+  core.keyRequestAt = -Infinity;
+  decoders.at(-1).init.error(new Error('decode failed'));
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.deepEqual(asks(), ['waiting-for-key', 'reset']);
+  assert.equal(decoders.at(-1).state, 'configured');
+});
+
+test('a guest whose session can no longer be resumed is told it ended instead of reconnecting forever', t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 1_700_000_000_000 });
+  const tryFor = (host, ms) => {
+    const c = new Connection(host);
+    const fatal = [];
+    c.addEventListener('fatal', e => fatal.push(e.detail));
+    c.connect();
+    c.ws.open();
+    c.ws.message({ t: 'welcome', resumeToken: 'key', relayPath: '/r/abcdefghijkl', support: !!host.support });
+    // The connection drops, and every try after it fails (the computer came back under another relay address).
+    c.ws.onclose({ code: 1006 });
+    let tries = 0;
+    for (let waited = 0; waited < ms && c.state !== 'closed'; waited += 6100) {
+      t.mock.timers.tick(6100);
+      if (c.ws) { tries++; c.ws.onclose({ code: 1006 }); }
+    }
+    return { c, fatal, tries };
+  };
+  const guest = tryFor({ url: 'https://relay.test/c/1234', name: 'Studio Mac', support: { code: '123456789', name: 'Sam' } }, 600_000);
+  assert.equal(guest.c.state, 'closed');
+  assert.deepEqual(guest.fatal.map(f => f.code), ['ended']);
+  assert.match(guest.fatal[0].message, /connection to Studio Mac was lost/);
+  assert.ok(guest.tries > 10 && guest.tries < 40, `tried ${guest.tries} times`);
+  guest.c.resume();
+  guest.c.reconnectNow();
+  assert.equal(guest.c.ws, null);
+  // Your own computer may just be asleep: that keeps being tried.
+  const own = tryFor({ url: 'https://relay.test/r/123456789', name: 'Studio Mac', token: 'device-key' }, 600_000);
+  assert.equal(own.c.state, 'reconnecting');
+  assert.deepEqual(own.fatal, []);
+  own.c.close();
+});
+
+test('a guest whose tries connect but never get back in also ends once its resume key has run out', t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 1_700_000_000_000 });
+  const c = new Connection({ url: 'https://relay.test/c/1234', name: 'Studio Mac', support: { code: '123456789', name: 'Sam' } });
+  const fatal = [];
+  c.addEventListener('fatal', e => fatal.push(e.detail));
+  c.connect();
+  c.ws.open();
+  c.ws.message({ t: 'welcome', resumeToken: 'key', relayPath: '/r/abcdefghijkl', support: true });
+  c.ws.onclose({ code: 1006 });
+  // From now on each try reaches something that accepts the socket and then never answers its hello.
+  for (let waited = 0; waited < 600_000 && c.state !== 'closed'; waited += 1000) {
+    t.mock.timers.tick(1000);
+    if (c.ws && c.ws.readyState === 0) c.ws.open();
+  }
+  assert.equal(c.state, 'closed');
+  assert.deepEqual(fatal.map(f => f.code), ['ended']);
+  assert.equal(c.ws, null);
+});

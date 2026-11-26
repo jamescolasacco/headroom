@@ -159,7 +159,7 @@ public final class WebHost: HttpApp {
                 if let v = body.int("maxFps") { c.video.maxFps = min(max(v, 10), 240) }
                 if let v = body.int("maxBitrateKbps") { c.video.maxBitrateKbps = min(max(v, 1000), 200_000) }
                 if let v = body.str("encoder"), ["auto", "hardware", "software"].contains(v) { c.video.encoder = v }
-                if let v = body.boolIfPresent("audio") { c.audio.enabled = v }
+                if let v = body.boolIfPresent("audio") { c.audio.enabled = v; rightsChanged = true } // sound stops for running sessions too
                 if let v = body.boolIfPresent("clipboard") { c.permissions.clipboard = v; rightsChanged = true }
                 if let v = body.boolIfPresent("fileTransfer") { c.permissions.fileTransfer = v; rightsChanged = true }
                 if let v = body.boolIfPresent("input") { c.permissions.input = v; rightsChanged = true }
@@ -187,6 +187,13 @@ public final class WebHost: HttpApp {
             return .json(["ok": true])
         case (.POST, "/account/sync"):
             return .json(["ok": AccountService.shared.sync()])
+        case (.GET, "/test-input"), (.POST, "/test-input/reset"):
+            // Test input (HEADROOM_TEST_INPUT with the test pattern): what reached the "app in front" instead of this Mac.
+            guard TestInput.enabled else {
+                return .json(["error": "test-input-off", "message": "Start the engine with HEADROOM_TEST_INPUT=<file.jsonl> and --test-pattern."], status: .notFound)
+            }
+            if req.method == .POST { TestInput.shared.reset() }
+            return .json(TestInput.shared.state)
         case (.POST, "/permissions/request"):
             // Shows the macOS prompt (or, once declined, the user must use System Settings).
             switch body.str("kind") {
@@ -239,6 +246,7 @@ public final class WebHost: HttpApp {
             "logDir": Paths.logDir,
             "permissions": Permissions.json,
             "testPattern": Displays.testPatternSize != nil,
+            "testInput": TestInput.logPath as Any?,
             "account": AccountService.shared.statusJson as Any?,
             "relay": RelayService.shared.statusJson,
             "support": SupportService.shared.statusJson,

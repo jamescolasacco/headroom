@@ -13,8 +13,9 @@ Headroom Viewer on the same network connects to a computer directly instead.
 ## How it works
 
 1. The computer opens a WebSocket to `/api/relay/control` — with its account credential, or with none (then it
-   gets a random, unguessable relay id each time and is reachable only with codes; at most 5 such computers per
-   network address).
+   gets a random, unguessable relay id, with a key in the relay's hello that gets the same id back when it connects
+   again (`X-Headroom-Relay-Id`/`X-Headroom-Relay-Key`), so a guest it accepted can resume after a network change or
+   a relay restart; it is reachable only with codes; at most 5 such computers per network address).
 2. For each viewer connection, the relay sends `{"t":"open","id":<nonce>,"client":<address>,"country":<cc>,
    "guest":<bool>}`; the computer opens a tunnel WebSocket to `/api/relay/tunnel/<nonce>` whose binary messages
    carry the viewer's bytes, and serves it like a direct connection (marked as relayed: never local).

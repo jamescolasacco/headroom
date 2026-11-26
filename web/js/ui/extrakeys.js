@@ -98,11 +98,12 @@ export class ExtraKeysBar {
    *   onHideKeyboard(), keyboardUp() (the on-screen keyboard's input has focus), reopenKeyboard() (focus it again,
    *   from inside a tap) }
    */
-  constructor(el, { signal, keyboard, mods, conn, onLayout, onKey, typingEl, onCopyText, onHideText, onHideKeyboard, keyboardUp, reopenKeyboard }) {
+  constructor(el, { signal, keyboard, mods, conn, special, onLayout, onKey, typingEl, onCopyText, onHideText, onHideKeyboard, keyboardUp, reopenKeyboard }) {
     this.el = el;
     this.keyboard = keyboard;
     this.mods = mods;
     this.conn = conn;
+    this.special = special || (action => conn.sendJson({ t: 'special', action })); // the session's: only with control
     this.onLayout = onLayout;
     this.onKey = onKey;
     this.visible = false;
@@ -247,7 +248,7 @@ export class ExtraKeysBar {
 
   _press(k) {
     if (k.mod) { this.mods.tap(k.code); return; }
-    if (k.action === 'cad') { this.conn.sendJson({ t: 'special', action: 'cad' }); return; }
+    if (k.action === 'cad') { this.special('cad'); return; }
     this._fire(k);
   }
 

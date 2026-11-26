@@ -111,6 +111,19 @@ public sealed class ViewerWindow : Form
         core.ContainsFullScreenElementChanged += (_, _) => SetFullscreen(core.ContainsFullScreenElement);
         core.DocumentTitleChanged += (_, _) => Text = string.IsNullOrWhiteSpace(core.DocumentTitle) ? "Headroom Viewer" : core.DocumentTitle.Replace("— Headroom", "— Headroom Viewer");
         core.WebMessageReceived += OnWebMessage;
+        // The page's process is gone, and its session with it (the page can't say so): the shortcut hook must stop taking
+        // Win and Alt+Tab for this window. A crashed page reloads, as in Headroom Viewer for Mac.
+        core.ProcessFailed += (_, e) =>
+        {
+            if (e.ProcessFailedKind is not (CoreWebView2ProcessFailedKind.RenderProcessExited or CoreWebView2ProcessFailedKind.BrowserProcessExited)) return;
+            if (SessionActive)
+            {
+                SessionActive = false;
+                SessionHost = null;
+                SessionChanged?.Invoke(this);
+            }
+            if (e.ProcessFailedKind == CoreWebView2ProcessFailedKind.RenderProcessExited) try { core.Reload(); } catch { }
+        };
         core.Navigate(_startUrl);
     }
 

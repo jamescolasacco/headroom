@@ -24,7 +24,8 @@ export class DecoderCore {
     this.lastOutputAt = 0;
     this.lastChunkAt = 0;
     this.chunksSinceOutput = 0;
-    this.keyRequestAt = 0;
+    // (Not 0: a worker's clock starts when the worker does, and its first request would look like a repeat.)
+    this.keyRequestAt = -Infinity;
     this.ctx = null;
     this.stats = { decoded: 0, dropped: 0, decodeMsSum: 0, errors: 0 };
     this.statsTimer = setInterval(() => this.flushStats(), 500);
@@ -40,10 +41,13 @@ export class DecoderCore {
       if (c.width !== cfg.width || c.height !== cfg.height) { c.width = cfg.width; c.height = cfg.height; }
       if (!this.ctx) this.ctx = c.getContext('2d', { alpha: false, desynchronized: true });
     }
-    this._createDecoder();
+    // The host's keyframe is already on its way: a new config always comes right before one. Asking for another
+    // cost a second whole picture at every reconnect, resolution change and display switch.
+    this._createDecoder(false);
   }
 
-  _createDecoder() {
+  /** A fresh decoder, waiting for a keyframe; `askForKey` when one isn't coming anyway (recovering mid-stream). */
+  _createDecoder(askForKey = true) {
     if (this.decoder && this.decoder.state !== 'closed') {
       try { this.decoder.close(); } catch { }
     }
@@ -71,7 +75,7 @@ export class DecoderCore {
     }
     this.lastOutputAt = performance.now();
     this.chunksSinceOutput = 0;
-    this._requestKey('configure');
+    if (askForKey) this._requestKey('reset');
   }
 
   decode(m) {

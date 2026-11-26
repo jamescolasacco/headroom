@@ -30,18 +30,31 @@ while [ $# -gt 0 ]; do
 done
 
 DEST="${HEADROOM_INSTALL_DIR:-/Applications}"
+
+# The updater runs this with HEADROOM_INSTALL_WAIT: whatever happens, Headroom Server must be running afterwards
+# (the new one, or the old one if something failed), or a computer someone reaches from afar would be gone; and
+# Headroom Viewer, which quit to update, opens again. An EXIT trap, not ERR: macOS's bash 3.2 runs no ERR trap
+# when a subshell (install_app) fails, or for `exit 1`.
+REOPEN_SERVER=0
+REOPEN_VIEWER=0
+if [ -n "${HEADROOM_INSTALL_WAIT:-}" ]; then
+  if [ "$LAUNCH" = 1 ] && [ "$ONLY" != "viewer" ]; then REOPEN_SERVER=1; fi
+  if [ "$VIEWER" = 1 ] && [ "$ONLY" != "server" ]; then REOPEN_VIEWER=1; fi
+fi
+reopen_after_failure() {
+  local status=$?
+  [ "$status" = 0 ] && return 0
+  if [ "$REOPEN_SERVER" = 1 ]; then open "$DEST/Headroom Server.app" || true; fi
+  if [ "$REOPEN_VIEWER" = 1 ]; then open "$DEST/Headroom Viewer.app" || true; fi
+  return "$status"
+}
+trap reopen_after_failure EXIT
+
 mkdir -p "$DEST" 2>/dev/null || true
 if [ ! -w "$DEST" ]; then
   if [ -n "${HEADROOM_INSTALL_DIR:-}" ]; then echo "Cannot install in $DEST" >&2; exit 1; fi
   DEST="$HOME/Applications"
   mkdir -p "$DEST"
-fi
-
-# The updater runs this with HEADROOM_INSTALL_WAIT: whatever happens, Headroom Server must be running afterwards
-# (the new one, or the old one if something failed), or a computer someone reaches from afar would be gone.
-if [ -n "${HEADROOM_INSTALL_WAIT:-}" ] && [ "$LAUNCH" = 1 ] && [ "$ONLY" != "viewer" ]; then
-  set -E # the trap also fires inside install_app
-  trap 'open "$DEST/Headroom Server.app" || true' ERR
 fi
 
 install_app() ( # name
@@ -67,8 +80,12 @@ install_app() ( # name
   elif pgrep -x "$exe" >/dev/null; then pkill -x "$exe"; sleep 1; fi
   if [ -e "$dst" ]; then mv "$dst" "$stage/previous"; fi
   if ! mv "$stage/new" "$dst"; then
-    if [ -e "$stage/previous" ]; then
-      mv "$stage/previous" "$dst" || echo "Previous installation retained at $stage/previous" >&2
+    if [ ! -e "$stage/previous" ]; then
+      echo "Couldn't install $dst" >&2
+    elif mv "$stage/previous" "$dst"; then
+      echo "Couldn't replace $dst: the version that was there is back in place" >&2
+    else
+      echo "Couldn't replace $dst: the previous installation is at $stage/previous" >&2
     fi
     return 1
   fi
