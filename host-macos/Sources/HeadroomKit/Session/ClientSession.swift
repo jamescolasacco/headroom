@@ -14,7 +14,7 @@ import NIOWebSocket
 /// Audio priority (asked for by the viewer, `audioPriority`): the sound comes first. The transport never drops it and
 /// keeps little picture below it; video may have ~1.1x the BDP in flight (64 KiB floor), congestion starts at 25 ms of
 /// queueing (or sound waiting 25 ms for the socket), and the video ceiling leaves room for the sound. If the path can't
-/// carry the sound (AudioRateWatch), it steps down: lossless -> Opus 512 -> 256 -> 128 -> 64 kbps, each step announced
+/// carry the sound (AudioRateWatch), it steps down: lossless -> Opus 510 -> 256 -> 128 -> 64 kbps, each step announced
 /// with `audio-mode`; only the viewer moves it back up.
 public final class ClientSession: WebSocketPeer, VideoSink {
     public let id = Bytes.base64Url(Bytes.random(6))

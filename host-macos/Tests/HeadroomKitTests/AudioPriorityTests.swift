@@ -1,3 +1,4 @@
+import COpus
 import XCTest
 @testable import HeadroomKit
 
@@ -81,6 +82,68 @@ final class AudioPriorityTests: XCTestCase {
         XCTAssertEqual(p, [3, 2, 0, 0, 0xDD, 0xCC, 0xBB, 0xAA, 0x10, 0x27, 0, 0, 0, 0, 0, 0, 0xE0, 0x01])
     }
 
+    // ------------------------------------------------------------------ libopus
+
+    /// The reason for libopus: AudioToolbox's Opus encoder high-passes everything (-7.8 dB at 40 Hz, -19 dB at 20 Hz).
+    /// Through the vendored libopus at the top rate the level stays within 0.5 dB, bass included.
+    func testLibopusKeepsTheBass() throws {
+        for hz in [20.0, 40, 60, 100, 1000] {
+            let e = try XCTUnwrap(OpusEncoder(kbps: AudioService.topOpusKbps))
+            defer { e.dispose() }
+            XCTAssertEqual(e.lookahead, 120)
+            var err: Int32 = 0
+            let d = try XCTUnwrap(opus_decoder_create(48000, 2, &err))
+            defer { opus_decoder_destroy(d) }
+            var decoded = [Float]()
+            for k in 0..<200 { // 2 s of a -12 dBFS sine
+                var f = [Float](repeating: 0, count: 960)
+                for i in 0..<480 {
+                    let v = Float(0.25 * sin(2 * Double.pi * hz * Double(k * 480 + i) / 48000))
+                    f[2 * i] = v
+                    f[2 * i + 1] = v
+                }
+                let packet = try XCTUnwrap(f.withUnsafeBufferPointer { e.encode($0.baseAddress!) })
+                var o = [Float](repeating: 0, count: 960)
+                let n = packet.withUnsafeBufferPointer { p in
+                    o.withUnsafeMutableBufferPointer { opus_decode_float(d, p.baseAddress, Int32(p.count), $0.baseAddress!, 480, 0) }
+                }
+                XCTAssertEqual(n, 480)
+                decoded += o
+            }
+            // The level over the second second (a whole number of cycles at every frequency here), left channel.
+            var a = 0.0, b = 0.0
+            for i in 48000..<96000 {
+                let w = 2 * Double.pi * hz * Double(i) / 48000
+                a += Double(decoded[2 * i]) * sin(w)
+                b += Double(decoded[2 * i]) * cos(w)
+            }
+            let level = 2 * (a * a + b * b).squareRoot() / 48000
+            XCTAssertEqual(20 * log10(level / 0.25), 0, accuracy: 0.5, "\(Int(hz)) Hz")
+        }
+    }
+
+    func testLibopusBitrateStepsInPlace() throws {
+        let e = try XCTUnwrap(OpusEncoder(kbps: AudioService.topOpusKbps))
+        defer { e.dispose() }
+        var m = TestMusic()
+        var pcm = [Float]()
+        m.append(frames: 48000, to: &pcm) // 1 s of sound
+        func kbps(_ frames: Range<Int>) -> Int {
+            let bytes = pcm.withUnsafeBufferPointer { all in frames.reduce(0) { $0 + (e.encode(all.baseAddress! + $1 * 960)?.count ?? 0) } }
+            return bytes * 8 * 100 / frames.count / 1000
+        }
+        let top = kbps(0..<50)
+        e.setBitrate(kbps: 128) // a step down, in place: the same stream carries on
+        XCTAssertEqual(e.kbps, 128)
+        _ = kbps(50..<55)
+        let stepped = kbps(55..<100)
+        XCTAssertGreaterThan(top, 400)
+        XCTAssertLessThanOrEqual(top, 520)
+        XCTAssertGreaterThan(stepped, 90)
+        XCTAssertLessThan(stepped, 150)
+        XCTAssertEqual(OPUS_APPLICATION_RESTRICTED_LOWDELAY, 2051)
+    }
+
     // ------------------------------------------------------------------ silence and what each viewer gets
 
     func testDigitalSilenceIsWhatTwentyFourBitsCallZero() {
@@ -102,7 +165,7 @@ final class AudioPriorityTests: XCTestCase {
     func testDeliveryPerViewer() {
         typealias F = AudioService.Format
         let lossless = F(mode: .pcm24, priority: true)
-        let compressed = F(mode: .opus, priority: true, kbps: 512)
+        let compressed = F(mode: .opus, priority: true, kbps: 510)
         let stepped = F(mode: .opus, priority: true, kbps: 128)
         let standard = F(mode: .opus, priority: false, kbps: 128)
         func d(_ f: F, zero: Bool, prevZero: Bool = true, hold: Bool = false) -> AudioService.Delivery {
@@ -113,8 +176,8 @@ final class AudioPriorityTests: XCTestCase {
         XCTAssertEqual(d(lossless, zero: true, prevZero: false), .silence)
         XCTAssertEqual(d(lossless, zero: true), .silence)
         XCTAssertEqual(d(lossless, zero: true, hold: true), .silence)
-        XCTAssertEqual(d(compressed, zero: false), .opus(kbps: 512, priority: true))
-        XCTAssertEqual(d(compressed, zero: true, prevZero: false), .opus(kbps: 512, priority: true)) // carries the end of the sound
+        XCTAssertEqual(d(compressed, zero: false), .opus(kbps: 510, priority: true))
+        XCTAssertEqual(d(compressed, zero: true, prevZero: false), .opus(kbps: 510, priority: true)) // carries the end of the sound
         XCTAssertEqual(d(compressed, zero: true), .silence)
         XCTAssertEqual(d(compressed, zero: true, hold: true), .silence)
         XCTAssertEqual(d(stepped, zero: false), .opus(kbps: 128, priority: true))
@@ -127,10 +190,10 @@ final class AudioPriorityTests: XCTestCase {
     }
 
     func testWireRates() {
-        XCTAssertEqual(AudioService.topOpusKbps, 512)
-        XCTAssertEqual(AudioService.opusSteps, [512, 256, 128, 64])
+        XCTAssertEqual(AudioService.topOpusKbps, 510)
+        XCTAssertEqual(AudioService.opusSteps, [510, 256, 128, 64])
         XCTAssertEqual(AudioService.wireKbps(.init(mode: .pcm24, priority: true)), 2304 + 15)
-        XCTAssertEqual(AudioService.wireKbps(.init(mode: .opus, priority: true, kbps: 512)), 512 + 15)
+        XCTAssertEqual(AudioService.wireKbps(.init(mode: .opus, priority: true, kbps: 510)), 510 + 15)
         XCTAssertEqual(AudioService.wireKbps(.init(mode: .opus, priority: true, kbps: 64)), 64 + 15)
     }
 
@@ -315,10 +378,10 @@ final class AudioPriorityTests: XCTestCase {
     func testStepDownLadder() {
         let lossless = ClientSession.audioLadder(.pcm24)
         XCTAssertEqual(lossless.map(\.mode), [.pcm24, .opus, .opus, .opus, .opus])
-        XCTAssertEqual(lossless.dropFirst().map(\.kbps), [512, 256, 128, 64])
+        XCTAssertEqual(lossless.dropFirst().map(\.kbps), [510, 256, 128, 64])
         XCTAssertTrue(lossless.allSatisfy(\.priority))
         let compressed = ClientSession.audioLadder(.opus)
-        XCTAssertEqual(compressed.map(\.kbps), [512, 256, 128, 64])
+        XCTAssertEqual(compressed.map(\.kbps), [510, 256, 128, 64])
         // Lossless on a 2 Mb/s path: top-rate Opus fits.
         XCTAssertEqual(ClientSession.stepDown(lossless, from: 0, carriedKbps: 2000), 1)
         // Top-rate Opus on ~400 kb/s: 256 fits (271 <= 320).

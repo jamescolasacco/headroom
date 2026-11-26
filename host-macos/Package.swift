@@ -22,6 +22,7 @@ let package = Package(
         .target(
             name: "HeadroomKit",
             dependencies: [
+                "COpus",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
@@ -31,7 +32,26 @@ let package = Package(
                 .product(name: "SwiftASN1", package: "swift-asn1"),
             ]
         ),
-        .testTarget(name: "HeadroomKitTests", dependencies: ["HeadroomKit"]),
+        // libopus 1.6.1 (BSD-3-Clause; Sources/COpus/libopus/SOURCE.txt), the sound's Opus encoder: floating point,
+        // portable C only (no CPU-specific code, no deep-learning parts), so it builds for arm64 and x86_64 alike.
+        .target(
+            name: "COpus",
+            path: "Sources/COpus",
+            exclude: ["libopus/COPYING", "libopus/AUTHORS", "libopus/SOURCE.txt"],
+            cSettings: [
+                .headerSearchPath("libopus/include"),
+                .headerSearchPath("libopus/celt"),
+                .headerSearchPath("libopus/silk"),
+                .headerSearchPath("libopus/silk/float"),
+                .headerSearchPath("libopus/src"),
+                .define("OPUS_BUILD"),
+                .define("VAR_ARRAYS"),
+                .define("HAVE_LRINT"),
+                .define("HAVE_LRINTF"),
+                .define("PACKAGE_VERSION", to: "\"1.6.1\""),
+            ]
+        ),
+        .testTarget(name: "HeadroomKitTests", dependencies: ["HeadroomKit", "COpus"]),
         .executableTarget(name: "headroom", dependencies: ["HeadroomKit"]),
         .testTarget(name: "HeadroomServerTests", dependencies: ["HeadroomServer"]),
         // Menu-bar app: status item, notifications, settings window (the engine's admin page in a WKWebView),

@@ -1,11 +1,12 @@
 import AudioToolbox
+import COpus
 import CoreGraphics
 import CoreMedia
 import Foundation
 import ScreenCaptureKit
 
-/// System audio ("what you hear") via ScreenCaptureKit, cut into 10 ms frames, then per viewer: Opus (AudioToolbox's
-/// encoder) or lossless PCM (signed 24-bit). One capture shared by all viewers; started with the first subscriber,
+/// System audio ("what you hear") via ScreenCaptureKit, cut into 10 ms frames, then per viewer: Opus (libopus, see
+/// OpusEncoder) or lossless PCM (signed 24-bit). One capture shared by all viewers; started with the first subscriber,
 /// stopped after the last leaves. Each frame carries the host-clock time of its first sample at capture.
 ///
 /// Viewers without audio priority get what they always did: Opus at this computer's bitrate, and after 200 ms of
@@ -46,12 +47,10 @@ public final class AudioService: NSObject, SCStreamOutput, SCStreamDelegate {
         public let wire: [UInt8]
     }
 
-    /// The highest bitrate AudioToolbox's Opus encoder honours: it advertises 6–512 kbps (kAudioConverterApplicable-
-    /// EncodeBitRates) and its output follows the setting up to 512 (494 kbps of the test music, the same ~96% of the
-    /// setting as at 128 or 256); above that it doesn't grow (~501 kbps whatever the setting, packets capped at 638 B).
-    public static let topOpusKbps = 512
+    /// Opus's highest bitrate for stereo (libopus caps it at 510 kbps; the Windows host uses the same ladder).
+    public static let topOpusKbps = 510
     /// Opus bitrates a viewer with priority steps down through when its path can't carry the one before.
-    public static let opusSteps = [512, 256, 128, 64]
+    public static let opusSteps = [510, 256, 128, 64]
     /// Lossless: 48000 x 2 x 24 bits.
     public static let pcm24Kbps = 2304
 
@@ -87,14 +86,11 @@ public final class AudioService: NSObject, SCStreamOutput, SCStreamDelegate {
     private var silentFrames = 0         // quiet frames in a row (the 200 ms rule of viewers without priority)
     private var previousAllZero = true   // the frame before was digital silence (nothing for an Opus encoder to flush)
     private var lastFrame = [Float]()    // the frame before, to prime an Opus encoder that starts mid-stream
-    private var encoders: [EncoderKey: OpusEncoder] = [:]
-    private var legacyKbps: Int?         // fixed when the first encoder for viewers without priority is made, as before
+    /// Viewers without priority share one encoder at this computer's bitrate (fixed when it's made, as before); each
+    /// viewer with priority has its own, fed every frame, whose bitrate changes in place when its path steps it down.
+    private var sharedEncoder: OpusEncoder?
+    private var priorityEncoders: [ObjectIdentifier: OpusEncoder] = [:]
     private var timestampsLogged = false
-
-    private struct EncoderKey: Hashable {
-        let priority: Bool
-        let kbps: Int
-    }
 
     /// Tests only (with the test pattern): HEADROOM_TEST_AUDIO=1 plays a quiet 440 Hz tone instead of this Mac's sound,
     /// HEADROOM_TEST_AUDIO=music the deterministic test signal (TestMusic), so the whole path runs without the Screen
@@ -369,31 +365,36 @@ public final class AudioService: NSObject, SCStreamOutput, SCStreamDelegate {
         if peak < 1e-5 { silentFrames += 1 } else { silentFrames = 0 }
         let legacyHold = peak < 1e-5 && silentFrames > 20
 
-        lock.lock(); let subs = Array(subscribers.values); lock.unlock()
-        let legacy = subs.contains { !$0.format.priority && $0.format.mode == .opus } ? legacyKbps ?? Self.configuredOpusKbps : 0
-        var plans: [(Subscriber, Delivery)] = []
-        plans.reserveCapacity(subs.count)
-        var priorityOpus = Set<Int>()
-        for s in subs {
-            let d = Self.delivery(s.format, allZero: allZero, previousAllZero: previousAllZero, legacyHold: legacyHold, legacyKbps: legacy)
-            plans.append((s, d))
-            if s.format.priority && s.format.mode == .opus { priorityOpus.insert(s.format.kbps) }
+        lock.lock(); let subs = Array(subscribers); lock.unlock()
+        let legacy = subs.contains { !$0.value.format.priority && $0.value.format.mode == .opus } ? sharedEncoder?.kbps ?? Self.configuredOpusKbps : 0
+        // Viewers with priority, Opus: their own encoder sees every frame (silence too), so each stays one continuous
+        // stream; a step down changes its bitrate in place. A new one starts primed with the frame before.
+        var priorityPackets: [ObjectIdentifier: Packet] = [:]
+        var live = Set<ObjectIdentifier>()
+        for (id, s) in subs where s.format.priority && s.format.mode == .opus {
+            live.insert(id)
+            let e: OpusEncoder
+            if let have = priorityEncoders[id] {
+                e = have
+                if e.kbps != s.format.kbps { e.setBitrate(kbps: s.format.kbps) }
+            } else {
+                guard let made = OpusEncoder(kbps: s.format.kbps) else { continue }
+                if lastFrame.count == Self.frameSamples * Self.channels {
+                    _ = lastFrame.withUnsafeBufferPointer { made.encode($0.baseAddress!) }
+                }
+                priorityEncoders[id] = made
+                e = made
+            }
+            if let p = encodePacket(e, start: start, timeUs: timeUs) { priorityPackets[id] = p }
         }
-        // Encoders of priority streams see every frame (silence too) so each stays one continuous stream; one nobody
-        // uses any more is dropped, so a later one starts clean (primed with the frame before).
-        for key in encoders.keys where key.priority && !priorityOpus.contains(key.kbps) {
-            encoders.removeValue(forKey: key)?.dispose()
-        }
-        var opus: [EncoderKey: Packet?] = [:]
-        for kbps in priorityOpus.sorted() {
-            let key = EncoderKey(priority: true, kbps: kbps)
-            opus[key] = encodePacket(key, start: start, timeUs: timeUs)
-        }
+        for id in priorityEncoders.keys where !live.contains(id) { priorityEncoders.removeValue(forKey: id)?.dispose() }
+
+        var sharedPacket: Packet??
         var pcmPacket: Packet?
         var silencePacket: Packet?
-        for (s, d) in plans {
+        for (id, s) in subs {
             let p: Packet?
-            switch d {
+            switch Self.delivery(s.format, allZero: allZero, previousAllZero: previousAllZero, legacyHold: legacyHold, legacyKbps: legacy) {
             case .none:
                 p = nil
             case .silence:
@@ -407,14 +408,15 @@ public final class AudioService: NSObject, SCStreamOutput, SCStreamDelegate {
                     pcmPacket = Packet(seq: seq, timeUs: timeUs, codec: .pcm24, wire: wire)
                 }
                 p = pcmPacket
-            case .opus(let kbps, let priority):
-                let key = EncoderKey(priority: priority, kbps: kbps)
-                if opus[key] == nil {
-                    // Viewers without priority: encoded only when a packet goes out (as before).
-                    if !priority && legacyKbps == nil { legacyKbps = kbps }
-                    opus[key] = encodePacket(key, start: start, timeUs: timeUs)
+            case .opus(_, true):
+                p = priorityPackets[id]
+            case .opus(let kbps, false):
+                // Viewers without priority: one shared encoder, run only when a packet goes out (as before).
+                if sharedPacket == nil {
+                    if sharedEncoder == nil { sharedEncoder = OpusEncoder(kbps: kbps) }
+                    sharedPacket = sharedEncoder.map { encodePacket($0, start: start, timeUs: timeUs) } ?? nil
                 }
-                p = opus[key] ?? nil
+                p = sharedPacket ?? nil
             }
             if let p { s.fn(p) }
         }
@@ -427,26 +429,17 @@ public final class AudioService: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
-    private func encodePacket(_ key: EncoderKey, start: Int, timeUs: Int64) -> Packet? {
-        if encoders[key] == nil {
-            guard let e = OpusEncoder(kbps: key.kbps) else { return nil }
-            // A priority stream starting mid-stream (a step down, a new viewer) gets the frame before first, so its
-            // lookahead holds real samples and its first packet continues the timeline.
-            if key.priority && lastFrame.count == Self.frameSamples * Self.channels {
-                _ = lastFrame.withUnsafeBufferPointer { e.encode($0.baseAddress!) }
-            }
-            encoders[key] = e
-        }
-        guard let e = encoders[key] else { return nil }
+    private func encodePacket(_ e: OpusEncoder, start: Int, timeUs: Int64) -> Packet? {
         let payload: [UInt8]? = pcm.withUnsafeBufferPointer { e.encode($0.baseAddress! + start) }
         guard let payload else { return nil }
         return Packet(seq: seq, timeUs: timeUs, codec: .opus, wire: Wire.audio(codec: .opus, seq: seq, timeUs: timeUs, payload: payload))
     }
 
     private func reset() {
-        for e in encoders.values { e.dispose() }
-        encoders.removeAll()
-        legacyKbps = nil
+        sharedEncoder?.dispose()
+        sharedEncoder = nil
+        for e in priorityEncoders.values { e.dispose() }
+        priorityEncoders.removeAll()
         pcm.removeAll()
         clock = SampleClock()
         silentFrames = 0
@@ -466,7 +459,7 @@ public final class AudioService: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// What one viewer gets for a frame. With priority: a packet for every frame; digital silence is a silence
     /// packet, except, for Opus, the first silent frame after sound: that packet still carries the end of the sound
-    /// (the encoder's 312-sample lookahead), and without it the decoder would cut the sound short. Without priority,
+    /// (the encoder's lookahead, 120 samples), and without it the decoder would cut the sound short. Without priority,
     /// as before: Opus at this computer's bitrate, and nothing once digital silence has lasted 200 ms.
     static func delivery(_ f: Format, allZero: Bool, previousAllZero: Bool, legacyHold: Bool, legacyKbps: Int) -> Delivery {
         if f.priority {
@@ -494,71 +487,49 @@ public final class AudioService: NSObject, SCStreamOutput, SCStreamDelegate {
 
 // ---------------------------------------------------------------------------------------------- Opus encoder
 
-/// AudioToolbox's Opus encoder: 48 kHz float stereo in, one 10 ms packet out per call. Audio queue only.
+/// libopus (vendored, 1.6.1): 48 kHz float stereo in, one 10 ms packet out per call. Restricted low delay (CELT only,
+/// 120 samples of lookahead), music, VBR, complexity 10, like the Windows host. AudioToolbox's Opus encoder can't be
+/// used for music: it high-passes everything (-7.8 dB at 40 Hz, -19 dB at 20 Hz) whatever its settings. Audio queue
+/// only.
 final class OpusEncoder {
-    private let converter: AudioConverterRef
+    private let encoder: OpaquePointer
     private var out = [UInt8](repeating: 0, count: 1500)
-    let kbps: Int
+    private(set) var kbps: Int
+    /// Samples (per channel) the decoded sound lags what went in.
+    let lookahead: Int
 
     init?(kbps: Int) {
-        var inFmt = AudioStreamBasicDescription(mSampleRate: Double(AudioService.sampleRate), mFormatID: kAudioFormatLinearPCM,
-                                                mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked, mBytesPerPacket: 8,
-                                                mFramesPerPacket: 1, mBytesPerFrame: 8, mChannelsPerFrame: 2, mBitsPerChannel: 32, mReserved: 0)
-        var outFmt = AudioStreamBasicDescription(mSampleRate: Double(AudioService.sampleRate), mFormatID: kAudioFormatOpus, mFormatFlags: 0,
-                                                 mBytesPerPacket: 0, mFramesPerPacket: UInt32(AudioService.frameSamples), mBytesPerFrame: 0,
-                                                 mChannelsPerFrame: 2, mBitsPerChannel: 0, mReserved: 0)
-        var c: AudioConverterRef?
-        guard AudioConverterNew(&inFmt, &outFmt, &c) == noErr, let c else {
-            Log.warn("audio", "Opus encoder unavailable")
+        var err: Int32 = 0
+        guard let e = opus_encoder_create(Int32(AudioService.sampleRate), 2, OPUS_APPLICATION_RESTRICTED_LOWDELAY, &err), err == OPUS_OK else {
+            Log.warn("audio", "Opus encoder unavailable (\(err))")
             return nil
         }
-        var bitrate = UInt32(kbps * 1000)
-        AudioConverterSetProperty(c, kAudioConverterEncodeBitRate, UInt32(MemoryLayout<UInt32>.size), &bitrate)
-        converter = c
+        encoder = e
+        self.kbps = kbps
+        copus_encoder_set(e, OPUS_SET_BITRATE_REQUEST, Int32(kbps * 1000))
+        copus_encoder_set(e, OPUS_SET_VBR_REQUEST, 1)
+        copus_encoder_set(e, OPUS_SET_SIGNAL_REQUEST, OPUS_SIGNAL_MUSIC)
+        copus_encoder_set(e, OPUS_SET_COMPLEXITY_REQUEST, 10)
+        var la: Int32 = 0
+        copus_encoder_get(e, OPUS_GET_LOOKAHEAD_REQUEST, &la)
+        lookahead = Int(la)
+    }
+
+    func dispose() { opus_encoder_destroy(encoder) }
+
+    /// A step down (or back up): the stream carries on without a break.
+    func setBitrate(kbps: Int) {
+        guard kbps != self.kbps else { return }
+        copus_encoder_set(encoder, OPUS_SET_BITRATE_REQUEST, Int32(kbps * 1000))
         self.kbps = kbps
     }
 
-    func dispose() { AudioConverterDispose(converter) }
-
-    private final class InputState {
-        var base: UnsafePointer<Float>
-        var framesLeft: Int
-        init(base: UnsafePointer<Float>, framesLeft: Int) { self.base = base; self.framesLeft = framesLeft }
-    }
-
-    private static let noMoreInput: OSStatus = 0x6E6F_6D72 // 'nomr'
-
     /// One packet from 480 interleaved stereo frames at `samples`.
     func encode(_ samples: UnsafePointer<Float>) -> [UInt8]? {
-        let state = InputState(base: samples, framesLeft: AudioService.frameSamples)
-        var packets: UInt32 = 1
-        var desc = AudioStreamPacketDescription()
-        let conv = converter
-        let st: OSStatus = out.withUnsafeMutableBytes { out in
-            var abl = AudioBufferList(mNumberBuffers: 1, mBuffers: AudioBuffer(mNumberChannels: 2, mDataByteSize: UInt32(out.count), mData: out.baseAddress))
-            return withExtendedLifetime(state) {
-                AudioConverterFillComplexBuffer(conv, { _, ioPackets, ioData, _, user in
-                    let s = Unmanaged<InputState>.fromOpaque(user!).takeUnretainedValue()
-                    guard s.framesLeft > 0 else {
-                        ioPackets.pointee = 0
-                        return OpusEncoder.noMoreInput
-                    }
-                    let n = min(Int(ioPackets.pointee), s.framesLeft)
-                    ioData.pointee.mNumberBuffers = 1
-                    ioData.pointee.mBuffers.mNumberChannels = 2
-                    ioData.pointee.mBuffers.mDataByteSize = UInt32(n * 8)
-                    ioData.pointee.mBuffers.mData = UnsafeMutableRawPointer(mutating: s.base)
-                    s.base += n * 2
-                    s.framesLeft -= n
-                    ioPackets.pointee = UInt32(n)
-                    return noErr
-                }, Unmanaged.passUnretained(state).toOpaque(), &packets, &abl, &desc)
-            }
-        }
-        guard st == noErr || st == Self.noMoreInput, packets == 1, desc.mDataByteSize > 0 else { return nil }
-        let off = Int(desc.mStartOffset), len = Int(desc.mDataByteSize)
-        guard off + len <= out.count else { return nil }
-        return Array(out[off..<(off + len)])
+        let enc = encoder
+        let n = out.withUnsafeMutableBufferPointer { opus_encode_float(enc, samples, Int32(AudioService.frameSamples), $0.baseAddress!, Int32($0.count)) }
+        guard n > 0 else { return nil }
+        return Array(out[0..<Int(n)])
     }
 }
 
