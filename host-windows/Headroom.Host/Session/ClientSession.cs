@@ -24,6 +24,11 @@ namespace Headroom.Host.Session;
 /// (control/cursor &gt; audio &gt; video) and video frames are cut into 64 KiB fragments, so a cursor update or
 /// audio packet never waits behind a large keyframe.
 ///
+/// Audio priority (the viewer's choice, for music): sound is never dropped here, video fragments are 16 KiB, video
+/// gets about one bandwidth-delay product in flight (64 KiB at least) and backs off at 25 ms of queueing or as soon
+/// as sound waits, its ceiling leaves room for the sound, and a sound the connection can't carry steps down
+/// (lossless, then Opus from 510 kbps) rather than ever being dropped.
+///
 /// Latency control on TCP: frames are never queued. The pipeline asks <see cref="CanSendVideo"/> before
 /// encoding; it's false while a frame is waiting for the socket or while unacknowledged bytes exceed
 /// ~1.5x the bandwidth-delay product. Sharpening passes of a still screen ask <see cref="CanSendRefinement"/>
@@ -34,8 +39,12 @@ public sealed class ClientSession : IVideoSink
 {
     private readonly WebSocket _ws;
     private readonly IPAddress? _remoteIp;
+    /// <summary>The connection's socket (through the relay: its loopback end), and through the relay the tunnel's end of that hop.</summary>
+    private readonly System.Net.Sockets.Socket? _socket, _tunnelSocket;
     private readonly CancellationTokenSource _cts = new();
     private readonly Stopwatch _clock = Stopwatch.StartNew();
+    /// <summary>Where <see cref="_clock"/> started, as a Stopwatch timestamp: puts times taken elsewhere (when sound was captured) on it.</summary>
+    private readonly long _clockStart = Stopwatch.GetTimestamp();
     private readonly InputContext _input = new();
 
     private readonly ConcurrentQueue<(byte[] Data, WebSocketMessageType Type)> _control = new();
@@ -55,6 +64,32 @@ public sealed class ClientSession : IVideoSink
     /// <summary>Whether this PC's settings let the session have its sound, as the viewer was last told (welcome, permissions).</summary>
     private bool _audioAllowed;
     private readonly object _audioGate = new();
+    // The sound the viewer asked for (`start`, `audio`) and what it gets, under _audioGate.
+    private bool _audioPcm;
+    private bool _audioPriority;
+    /// <summary>It asked for a sound this host doesn't make (it gets Opus): say so once.</summary>
+    private bool _audioUnsupported;
+    /// <summary>Bandwidth steps down from what it asked for (with priority): lossless to Opus, then Opus's rate.</summary>
+    private int _audioStep;
+    private AudioService.Format _audioFormat;
+    /// <summary>The last `audio-mode` the viewer got (null: none, so it assumes Opus without priority).</summary>
+    private string? _audioModeTold;
+    private readonly Action<AudioService.Packet> _onAudio;
+    /// <summary>Audio priority in effect (asked for, and sound on): the transport puts sound first and video yields to it.</summary>
+    private volatile bool _priority;
+    /// <summary>What the sound needs of the connection, kept free of video while <see cref="_priority"/>.</summary>
+    private volatile int _audioKbps;
+    private long _audioBacklogSinceUs;  // more than AudioBacklogPackets of sound waiting since then (0: not)
+    private long _audioStepUs;          // the last bandwidth step
+    private volatile bool _audioStepDue; // the tick loop steps the sound down
+    private long _audioDropped;         // packets let go past PriorityAudioQueue
+    private int _socketSendBuffer = -1, _tunnelReceiveBuffer = -1; // as they were before audio priority (-1: untouched)
+    /// <summary>Audio priority: up to ~2 s of sound waits to be sent; past that the oldest goes, so the delay stays bounded.</summary>
+    private const int PriorityAudioQueue = 200;
+    /// <summary>... and more than ~300 ms of it waiting for ~2 s means the connection can't carry the sound.</summary>
+    private const int AudioBacklogPackets = 30;
+    /// <summary>Audio priority, through the relay: the loopback hop to RelayService keeps this little (each end).</summary>
+    private const int PriorityLoopbackBuffer = 16 * 1024;
     private int _epochBase;
     private string? _lastClipboardSent;
     private bool _clipboardSubscribed;
@@ -104,13 +139,17 @@ public sealed class ClientSession : IVideoSink
 
     private long NowUs => _clock.ElapsedTicks * 1_000_000 / Stopwatch.Frequency;
 
-    public ClientSession(WebSocket ws, IPAddress? remoteIp, bool relayed = false, bool guest = false, string? country = null)
+    public ClientSession(WebSocket ws, IPAddress? remoteIp, bool relayed = false, bool guest = false, string? country = null,
+        System.Net.Sockets.Socket? socket = null, System.Net.Sockets.Socket? tunnelSocket = null)
     {
         _ws = ws;
         _remoteIp = remoteIp;
         _relayed = relayed;
         _guest = guest;
         Country = country;
+        _socket = socket;
+        _tunnelSocket = tunnelSocket;
+        _onAudio = OnAudioPacket;
         var v = ConfigStore.Current.Video;
         _maxKbps = v.MaxBitrateKbps;
         _minKbps = v.MinBitrateKbps;
@@ -514,6 +553,7 @@ public sealed class ClientSession : IVideoSink
                 HandleSpecial(Str(root, "action") ?? "");
                 break;
             case "audio":
+                RequestAudio(root, "mode", "priority", start: false);
                 SetAudio(Bool(root, "enabled"));
                 break;
             case "file-token" when rights.Files:
@@ -559,7 +599,11 @@ public sealed class ClientSession : IVideoSink
     {
         _startJson = root.GetRawText();
         // Sound needs no display, so it follows the request even while there's no picture to show.
-        if (!retry && root.TryGetProperty("audio", out var a)) SetAudio(a.GetBoolean());
+        if (!retry)
+        {
+            RequestAudio(root, "audioMode", "audioPriority", start: true);
+            SetAudio(root.TryGetProperty("audio", out var a) ? a.GetBoolean() : (bool?)null);
+        }
         var cfg = ConfigStore.Current;
         var monitors = Displays.Enumerate();
         if (monitors.Count == 0)
@@ -663,8 +707,41 @@ public sealed class ClientSession : IVideoSink
         }
     }
 
-    private void SetAudio(bool enabled)
+    /// <summary>
+    /// The sound the viewer asks for: in `start` (absent: Opus without priority) or `audio` (absent: as it was). Asking
+    /// again, or for something else, undoes the bandwidth steps. Applied by <see cref="SetAudio"/>.
+    /// </summary>
+    private void RequestAudio(JsonElement root, string modeName, string priorityName, bool start)
     {
+        lock (_audioGate)
+        {
+            bool pcm = _audioPcm, priority = _audioPriority, asked = false;
+            if (root.TryGetProperty(modeName, out var m) && m.ValueKind == JsonValueKind.String)
+            {
+                var mode = m.GetString();
+                pcm = mode == "pcm24";
+                if (mode != "pcm24" && mode != "opus") _audioUnsupported = true;
+                asked = true;
+            }
+            else if (start) pcm = false;
+            if (root.TryGetProperty(priorityName, out var p) && p.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            {
+                priority = p.GetBoolean();
+                asked = true;
+            }
+            else if (start) priority = false;
+            // `start` repeats the request with every stream change: only a different one undoes the steps there.
+            if (pcm != _audioPcm || priority != _audioPriority || (asked && !start)) _audioStep = 0;
+            _audioPcm = pcm;
+            _audioPriority = priority;
+        }
+    }
+
+    /// <summary>Sound on or off (null: as it is), with what the viewer asked for (<see cref="RequestAudio"/>).</summary>
+    private void SetAudio(bool? on)
+    {
+        bool enabled;
+        lock (_audioGate) enabled = on ?? _audioEnabled;
         var cfg = ConfigStore.Current;
         enabled &= cfg.Audio.Enabled && cfg.Permissions.Audio;
         if (enabled && SameMachine)
@@ -677,22 +754,157 @@ public sealed class ClientSession : IVideoSink
                 Enqueue(new { t = "notice", level = "info", message = "Audio is off: you're viewing this PC from itself, which would echo." });
             }
         }
-        // (The viewer's messages and a settings change can both get here.)
+        // (The viewer's messages, the tick loop and a settings change can all get here.)
         lock (_audioGate)
         {
-            if (enabled == _audioEnabled) return;
-            _audioEnabled = enabled;
-            if (enabled) AudioService.Instance.Subscribe(OnAudioPacket);
-            else AudioService.Instance.Unsubscribe(OnAudioPacket);
+            var format = AudioFormatLocked();
+            bool was = _audioEnabled, change = enabled != was || (enabled && format != _audioFormat);
+            if (change)
+            {
+                _audioEnabled = enabled;
+                _audioFormat = format;
+            }
+            // Told, and the transport set, before the first packet of it is queued (control goes out ahead of sound).
+            if (enabled) TellAudioModeLocked(null);
+            if (!change) return;
+            ApplyPriorityLocked();
+            if (enabled && !was) AudioService.Instance.Subscribe(_onAudio, format);
+            else if (!enabled) AudioService.Instance.Unsubscribe(_onAudio);
+            else AudioService.Instance.Update(_onAudio, format);
         }
     }
 
+    /// <summary>What the viewer gets now: what it asked for, less the bandwidth steps the connection forced.</summary>
+    private AudioService.Format AudioFormatLocked()
+    {
+        if (!_audioPriority) return new AudioService.Format(_audioPcm, false, 0);
+        int step = _audioStep;
+        if (_audioPcm)
+        {
+            if (step == 0) return new AudioService.Format(true, true, AudioService.PcmKbps);
+            step--;
+        }
+        var ladder = AudioService.PriorityOpusKbps;
+        return new AudioService.Format(false, true, ladder[Math.Min(step, ladder.Length - 1)]);
+    }
+
+    /// <summary>
+    /// `audio-mode` when what the viewer gets changed, or with a reason. A viewer that only ever gets Opus without
+    /// priority is told nothing, as by older hosts.
+    /// </summary>
+    private void TellAudioModeLocked(string? reason)
+    {
+        var f = _audioFormat;
+        if (reason == null && _audioUnsupported) reason = "unsupported";
+        string mode = f.Pcm ? "pcm24" : "opus";
+        int kbps = f.Pcm ? AudioService.PcmKbps : f.Priority ? f.Kbps : AudioService.NormalOpusKbps;
+        string told = $"{mode}/{f.Priority}/{kbps}";
+        bool assumed = _audioModeTold == null && !f.Pcm && !f.Priority;
+        if (reason == null && (assumed || told == _audioModeTold)) return;
+        _audioModeTold = told;
+        _audioUnsupported = false;
+        Enqueue(reason == null
+            ? new { t = "audio-mode", mode, priority = f.Priority, kbps }
+            : (object)new { t = "audio-mode", mode, priority = f.Priority, kbps, reason });
+    }
+
+    /// <summary>The transport follows the sound: priority while it's on and asked for.</summary>
+    private void ApplyPriorityLocked()
+    {
+        var f = _audioFormat;
+        bool on = _audioEnabled && f.Priority;
+        // The sound's rate, its 16-byte headers and ~4 bytes of framing every 10 ms (16 kbps), and a tenth to spare.
+        _audioKbps = on ? (int)(((f.Pcm ? AudioService.PcmKbps : f.Kbps) + 16) * 1.1) : 0;
+        if (on == _priority) return;
+        _priority = on;
+        Volatile.Write(ref _audioBacklogSinceUs, 0);
+        SetSocketBuffers(on);
+        Log.Info("session", $"{Id}: audio priority {(on ? "on" : "off")}");
+    }
+
+    /// <summary>
+    /// With audio priority, a relayed session keeps little in its loopback hop to RelayService (this socket's send buffer,
+    /// the tunnel's receive buffer), so sound never queues behind much picture there. Sockets facing the network keep
+    /// Windows' own sizing (its ideal send backlog follows the path): a fixed SO_SNDBUF there would also cap the bytes in
+    /// flight, so on a long path it would cut the throughput, the sound's included, rather than the queue.
+    /// </summary>
+    private void SetSocketBuffers(bool priority)
+    {
+        if (!_relayed) return;
+        try
+        {
+            if (_socket != null)
+            {
+                if (_socketSendBuffer < 0) _socketSendBuffer = _socket.SendBufferSize;
+                _socket.SendBufferSize = priority ? PriorityLoopbackBuffer : _socketSendBuffer;
+            }
+            if (_tunnelSocket != null)
+            {
+                if (_tunnelReceiveBuffer < 0) _tunnelReceiveBuffer = _tunnelSocket.ReceiveBufferSize;
+                _tunnelSocket.ReceiveBufferSize = priority ? PriorityLoopbackBuffer : _tunnelReceiveBuffer;
+            }
+        }
+        catch (Exception ex) when (ex is System.Net.Sockets.SocketException or ObjectDisposedException)
+        {
+            Log.Debug("session", $"{Id}: socket buffers: {ex.Message}");
+        }
+    }
+
+    /// <summary>A Stopwatch timestamp (when sound was captured) on this session's clock: <see cref="NowUs"/>, welcome's hostTimeUs, pong's host.</summary>
+    private long AudioUs(long ticks)
+    {
+        long d = ticks - _clockStart, f = Stopwatch.Frequency;
+        return d / f * 1_000_000 + d % f * 1_000_000 / f;
+    }
+
+    /// <summary>On the capture thread (or the audio clock's): queues the packet and nothing more (never _audioGate).</summary>
     private void OnAudioPacket(AudioService.Packet p)
     {
-        // Drop audio rather than build a backlog: late audio is worse than a gap.
-        if (_audio.Count > 25) return;
-        _audio.Enqueue(Wire.Audio(p.Sequence, p.TimeUs, p.Data));
+        if (!_priority)
+        {
+            // Drop audio rather than build a backlog: late audio is worse than a gap.
+            if (_audio.Count > 25) return;
+            _audio.Enqueue(Wire.Audio(p.Codec, p.Sequence, AudioUs(p.Timestamp), p.Data));
+            _sendSignal.Release();
+            return;
+        }
+        // Audio priority: never dropped here. Up to ~2 s waits (past that the oldest goes, so the delay stays bounded), and
+        // more than ~300 ms waiting for ~2 s means the connection can't carry this sound: the tick loop steps it down.
+        if (_audio.Count >= PriorityAudioQueue && _audio.TryDequeue(out _)) Interlocked.Increment(ref _audioDropped);
+        _audio.Enqueue(Wire.Audio(p.Codec, p.Sequence, AudioUs(p.Timestamp), p.Data));
         _sendSignal.Release();
+        if (_audio.Count <= AudioBacklogPackets)
+        {
+            Volatile.Write(ref _audioBacklogSinceUs, 0);
+            return;
+        }
+        long now = NowUs, since = Volatile.Read(ref _audioBacklogSinceUs);
+        if (since == 0) Volatile.Write(ref _audioBacklogSinceUs, now);
+        else if (now - since > 2_000_000 && now - Volatile.Read(ref _audioStepUs) > 2_000_000) _audioStepDue = true;
+    }
+
+    /// <summary>
+    /// The connection hasn't carried this sound for ~2 s (more than ~300 ms of it waiting): lossless becomes Opus at the
+    /// top rate, Opus steps its rate down, each step told with reason "bandwidth". Never back up by itself (the viewer can
+    /// ask again), and never down to dropping it.
+    /// </summary>
+    private void StepAudioDown(long now)
+    {
+        _audioStepDue = false;
+        lock (_audioGate)
+        {
+            if (!_audioEnabled || !_audioFormat.Priority || now - Volatile.Read(ref _audioStepUs) <= 2_000_000) return;
+            if (_audioStep >= AudioService.PriorityOpusKbps.Length - 1 + (_audioPcm ? 1 : 0)) return; // as low as it goes
+            _audioStep++;
+            Volatile.Write(ref _audioStepUs, now);
+            Volatile.Write(ref _audioBacklogSinceUs, 0);
+            _audioFormat = AudioFormatLocked();
+            TellAudioModeLocked("bandwidth");
+            ApplyPriorityLocked();
+            AudioService.Instance.Update(_onAudio, _audioFormat);
+            var f = _audioFormat;
+            Log.Info("session", $"{Id}: the connection can't carry the sound; now {(f.Pcm ? "lossless" : $"Opus {f.Kbps} kbps")}");
+        }
     }
 
     // ------------------------------------------------------------------------------------------- video sink
@@ -756,6 +968,8 @@ public sealed class ClientSession : IVideoSink
         {
             bool ok;
             if (Volatile.Read(ref _videoQueued) > 0) ok = false;
+            // Audio priority: sound waiting to be sent means the connection is full, and the picture gives way first.
+            else if (_priority && _audio.Count > 2) ok = false;
             else
             {
                 lock (_flowGate)
@@ -791,6 +1005,8 @@ public sealed class ClientSession : IVideoSink
         // ~1.5x bandwidth-delay product using delivery rate, with sane floors/caps.
         double rateBytesPerMs = DeliveryRateKbps() / 8.0;
         double rtt = _minRttMs == double.MaxValue ? 50 : _minRttMs;
+        // Audio priority: about one bandwidth-delay product of picture in flight, so little of it ever waits ahead of sound.
+        if (_priority) return Math.Clamp((long)(rateBytesPerMs * rtt * 1.1), 64 * 1024, 6 * 1024 * 1024);
         long bdp = (long)(rateBytesPerMs * (rtt + 40) * 1.5);
         long floor = Math.Max(256 * 1024, _targetKbps * 1000L / 8 / 10); // at least 100 ms of target bitrate
         return Math.Clamp(bdp, floor, 6 * 1024 * 1024);
@@ -897,7 +1113,7 @@ public sealed class ClientSession : IVideoSink
                 if (current != null)
                 {
                     var data = current.Data;
-                    int len = Math.Min(Wire.MaxFragmentPayload, data.Length - offset);
+                    int len = Math.Min(_priority ? Wire.PriorityFragmentPayload : Wire.MaxFragmentPayload, data.Length - offset);
                     var flags = (current.KeyFrame ? Wire.VideoFlags.Key : 0)
                                 | (current.Refinement ? Wire.VideoFlags.Refine : 0)
                                 | (offset == 0 ? Wire.VideoFlags.First : 0)
@@ -949,11 +1165,14 @@ public sealed class ClientSession : IVideoSink
             AttachCursor();
             try { FollowDisplays(now); }
             catch (Exception ex) { Log.Warn("session", $"{Id}: display check failed: {ex.Message}"); }
+            if (_audioStepDue) StepAudioDown(now);
             AdaptBitrate(now);
             if (now - lastStats >= 1_000_000)
             {
                 lastStats = now;
                 SendStats(now);
+                long dropped = Interlocked.Exchange(ref _audioDropped, 0);
+                if (dropped > 0) Log.Warn("session", $"{Id}: {dropped} sound packets let go after ~2 s waiting for the connection");
             }
         }
     }
@@ -1002,6 +1221,9 @@ public sealed class ClientSession : IVideoSink
         }
     }
 
+    /// <summary>The most video may use: with audio priority, the cap less what the sound needs.</summary>
+    private int VideoCeilingKbps => _priority ? Math.Max(_minKbps, _maxKbps - _audioKbps) : _maxKbps;
+
     private void AdaptBitrate(long now)
     {
         if (_pipeline == null) return;
@@ -1021,8 +1243,8 @@ public sealed class ClientSession : IVideoSink
             // Congested = a ready frame spent >40% of a tick waiting for the network, or the path shows queueing
             // delay (bufferbloat) beyond what serialization explains, two ticks running. One big frame (a whole new
             // screen) holds the next back for a tick: that's the picture, not the link. Sharpening passes wait for an
-            // idle path (CanSendRefinement), so they never count.
-            _congestedTicks = blocked > 100_000 || queueDelay > 60 ? _congestedTicks + 1 : 0;
+            // idle path (CanSendRefinement), so they never count. With audio priority, queueing shows at 25 ms already.
+            _congestedTicks = blocked > 100_000 || queueDelay > (_priority ? 25 : 60) ? _congestedTicks + 1 : 0;
             congested = _congestedTicks >= 2;
         }
         int target = _targetKbps;
@@ -1042,8 +1264,9 @@ public sealed class ClientSession : IVideoSink
         {
             // Up only while the stream uses at least half of it: a screen that's mostly still says nothing about
             // what the link can carry (between page jumps the target climbed to 33 Mb/s on a 10 Mb/s link).
-            target = Math.Min(_maxKbps, (int)(target * 1.12) + 200);
+            target = Math.Min(VideoCeilingKbps, (int)(target * 1.12) + 200);
         }
+        if (_priority) target = Math.Min(target, VideoCeilingKbps);
         if (target != _targetKbps && Math.Abs(target - _targetKbps) > _targetKbps * 0.04)
         {
             _targetKbps = target;
@@ -1124,7 +1347,11 @@ public sealed class ClientSession : IVideoSink
         lock (_streamGate) _startJson = null;
         InputInjector.Instance.ReleaseAll(_input);
         DetachCursor();
-        if (_audioEnabled) AudioService.Instance.Unsubscribe(OnAudioPacket);
+        lock (_audioGate)
+        {
+            if (_audioEnabled) AudioService.Instance.Unsubscribe(_onAudio);
+            _audioEnabled = false;
+        }
         lock (_rightsGate)
         {
             _closed = true;

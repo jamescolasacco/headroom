@@ -292,9 +292,13 @@ public static class WebHost
                 return;
             }
             // Disable Nagle on the underlying socket: input acks and cursor updates must not be delayed.
-            ctx.Features.Get<IConnectionSocketFeature>()?.Socket?.NoDelay = true;
+            var socket = ctx.Features.Get<IConnectionSocketFeature>()?.Socket;
+            if (socket != null) socket.NoDelay = true;
             using var ws = await ctx.WebSockets.AcceptWebSocketAsync(new WebSocketAcceptContext { DangerousEnableCompression = false });
-            var session = new ClientSession(ws, ctx.Connection.RemoteIpAddress, IsRelayed(ctx), IsGuest(ctx), ctx.Features.Get<RelayedViewer>()?.Country);
+            // With audio priority a relayed session keeps its loopback hop small: this socket and the tunnel's end of it.
+            var tunnel = IsRelayed(ctx) ? RelayService.Tunnel(ctx.Connection.RemotePort)?.Loopback : null;
+            var session = new ClientSession(ws, ctx.Connection.RemoteIpAddress, IsRelayed(ctx), IsGuest(ctx), ctx.Features.Get<RelayedViewer>()?.Country,
+                socket, tunnel);
             await session.RunAsync(lifetime.ApplicationStopping);
         });
 
