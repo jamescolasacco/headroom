@@ -449,7 +449,7 @@ export class Toolbar {
       if (control.getAttribute?.('role') === 'group' && !control.hasAttribute('aria-label')) control.setAttribute('aria-label', label);
       return h('div', {}, h('h3', {}, label), h('div', { class: 'row' }, control));
     };
-    this._sheet('Settings', el => {
+    this._sheet('Settings', (el, signal) => {
       el.append(row('Scaling', segmented([
         { value: 'fit', label: 'Fit' }, { value: 'actual', label: '1:1' }, { value: 'fill', label: 'Fill' },
       ], p.scaling, v => s.setPref('scaling', v))));
@@ -475,6 +475,24 @@ export class Toolbar {
           { value: 'pc', label: 'PC' },
           { value: 'cmdctrl', label: '⌘ = Ctrl' },
         ], p.keyboardProfile, v => s.setPref('keyboardProfile', v))));
+      }
+      // Sound for music: audio priority keeps a steady reserve of sound and makes the video give way to it.
+      if (s.permissions.audio && s.audio.supported) {
+        const quality = row('Sound quality', segmented([
+          { value: 'compressed', label: 'Compressed' }, { value: 'lossless', label: 'Lossless' },
+        ], p.audioQuality === 'lossless' ? 'lossless' : 'compressed', v => s.setPref('audioQuality', v)));
+        const status = h('p', { class: 'muted small' });
+        const show = () => {
+          quality.hidden = !p.audioPriority;
+          status.hidden = !s.audioOn;
+          status.textContent = s.soundStatus();
+        };
+        el.append(row('Audio priority', segmented([
+          { value: false, label: 'Off' }, { value: true, label: 'On' },
+        ], !!p.audioPriority, v => { s.setPref('audioPriority', v); show(); })), quality, status);
+        show();
+        const timer = setInterval(show, 500);
+        signal.addEventListener('abort', () => clearInterval(timer));
       }
       // The technical options, folded away: most sessions never need them.
       const more = h('details', {}, h('summary', {}, 'Picture and network'));

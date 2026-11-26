@@ -186,8 +186,8 @@ export class Connection extends EventTarget {
         });
         break;
       }
-      case H2C.AUDIO:
-        this.emit('audio', { seq: view.getUint32(4, true), timeUs: Number(view.getBigInt64(8, true)), data: new Uint8Array(data, 16) });
+      case H2C.AUDIO: // [0x03][u8 codec: 0 Opus, 1 PCM s24le, 2 silence][u16 0][u32 seq][i64 host µs][payload]
+        this.emit('audio', { codec: view.getUint8(1), seq: view.getUint32(4, true), timeUs: Number(view.getBigInt64(8, true)), data: new Uint8Array(data, 16) });
         break;
     }
   }

@@ -135,6 +135,10 @@ public static class WebHost
             {
                 ctx.Request.Path = "/admin.html"; // the settings window
             }
+            // A session's WebSocket runs over a PingStream, so it can ping the viewer (audio priority's queue estimate). The
+            // WebSockets middleware below takes this feature when it runs; its handshake and framing stay as they were.
+            if (path == "/ws" && ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpUpgradeFeature>() is { } upgrade)
+                ctx.Features.Set<Microsoft.AspNetCore.Http.Features.IHttpUpgradeFeature>(new PingUpgradeFeature(upgrade));
             await next();
         });
 
@@ -297,8 +301,9 @@ public static class WebHost
             using var ws = await ctx.WebSockets.AcceptWebSocketAsync(new WebSocketAcceptContext { DangerousEnableCompression = false });
             // With audio priority a relayed session keeps its loopback hop small: this socket and the tunnel's end of it.
             var tunnel = IsRelayed(ctx) ? RelayService.Tunnel(ctx.Connection.RemotePort)?.Loopback : null;
+            var pings = (ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpUpgradeFeature>() as PingUpgradeFeature)?.Pings;
             var session = new ClientSession(ws, ctx.Connection.RemoteIpAddress, IsRelayed(ctx), IsGuest(ctx), ctx.Features.Get<RelayedViewer>()?.Country,
-                socket, tunnel);
+                socket, tunnel, pings);
             await session.RunAsync(lifetime.ApplicationStopping);
         });
 

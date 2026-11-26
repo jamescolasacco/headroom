@@ -10,6 +10,12 @@ import NIOWebSocket
 /// `canSendRefinement` instead: only into an idle path. The client acks each frame on arrival, which gives
 /// delivery rate and queueing delay (RTT above the observed minimum) — the inputs to the bitrate controller
 /// (AIMD between the min and max limits).
+///
+/// Audio priority (asked for by the viewer, `audioPriority`): the sound comes first. The transport never drops it and
+/// keeps little picture below it; video may have ~1.1x the BDP in flight (64 KiB floor), congestion starts at 25 ms of
+/// queueing (or sound waiting 25 ms for the socket), and the video ceiling leaves room for the sound. If the path can't
+/// carry the sound (AudioRateWatch), it steps down: lossless -> Opus 512 -> 256 -> 128 -> 64 kbps, each step announced
+/// with `audio-mode`; only the viewer moves it back up.
 public final class ClientSession: WebSocketPeer, VideoSink {
     public let id = Bytes.base64Url(Bytes.random(6))
     public let connectedAt = Date()
@@ -30,6 +36,32 @@ public final class ClientSession: WebSocketPeer, VideoSink {
     private var audioEnabled = false
     /// Whether this computer's settings let the session have its sound, as the viewer was last told (welcome, permissions).
     private var audioAllowed = false
+    // What sound the viewer asked for (session queue): Opus or lossless, with or without audio priority. With priority,
+    // `audioStep` is how far down the ladder (audioLadder) the path made it step; only the viewer moves it back up.
+    private var audioMode: AudioService.Mode = .opus
+    private var audioPriority = false
+    private var audioStep = 0
+    /// Asked for a mode this host doesn't have: said with the next audio-mode.
+    private var audioUnsupported = false
+    private var subscribedFormat: AudioService.Format?
+    /// The last audio-mode sent (nil: none yet, so the viewer assumes Opus without priority).
+    private var announcedFormat: AudioService.Format?
+    /// Audio on with priority: the transport and flow control are set for it.
+    private var priorityActive = false
+    // The step-down watch, run per packet on the audio queue (under audioLock).
+    private let audioLock = NSLock()
+    private var rateWatch = AudioRateWatch()
+    private var rateWatchArmed = false
+    private var stepPending = false
+    /// The end-to-end rule (session queue): the path's queueing delay stayed over 300 ms for 2 s with the picture already
+    /// at its floor, so the sound itself doesn't fit. After any step, 5 s for the queue to drain before judging again.
+    private var overloadWatch = PathBacklogWatch()
+    private var audioStepHoldUntilUs: Int64 = 0
+    // How long sound waited for the socket, logged every 30 s (session queue).
+    private var audioLogSinceUs: Int64 = 0
+    private var audioLogPackets = 0
+    private var audioLogP95Ms = 0.0
+    private var audioLogMaxMs = 0.0
     private var epochBase = 0
     private var lastClipboardSent: String?
     private let clipLock = NSLock()
@@ -54,7 +86,7 @@ public final class ClientSession: WebSocketPeer, VideoSink {
     // Flow control / congestion state, under `flowLock` (touched by the pipeline and the event loop too).
     private let flowLock = NSLock()
     /// Frames sent and not acked yet. `behind`: sent while a sharpening pass was still on its way.
-    private var inflight: [UInt32: (sentUs: Int64, bytes: Int, refinement: Bool, behind: Bool)] = [:]
+    private var inflight: [UInt32: (sentUs: Int64, bytes: Int, refinement: Bool, behind: Bool, firstUs: Int64, firstBytes: Int, paceKbps: Int)] = [:]
     private var inflightBytes = 0
     private var minRttMs = Double.greatestFiniteMagnitude
     private var minRttResetUs: Int64 = 0
@@ -62,8 +94,26 @@ public final class ClientSession: WebSocketPeer, VideoSink {
     private var ackWindow: [(us: Int64, bytes: Int)] = []
     private var ackWindowBytes = 0
     private var targetKbps: Int
+    /// The bitrate controller's ceiling: `capKbps`, less the sound's room with audio priority.
     private var maxKbps: Int
+    /// The viewer's cap, within this computer's limits.
+    private var capKbps: Int
     private var minKbps: Int
+    /// The session has audio priority: tighter in-flight budget and congestion threshold, room left for the sound.
+    private var priorityFlow = false
+    /// With audio priority: what big frames say the path carries for video, and the pace set from it.
+    private var pathEstimate = VideoPathEstimate()
+    private var paceKbps = 0
+    /// welcome sent -> `start` received, before any sound or picture flows: the path's round trip without a queue. With
+    /// audio priority it seeds the minimum RTT, which the first frames can't give when lossless sound has already filled
+    /// the path (they measured 494 ms on a 40 ms path, and the queue went unseen).
+    private var welcomeSentUs: Int64 = 0
+    private var handshakeRttMs: Double?
+    /// With audio priority the transport pings the viewer every tick: the answers' round trips (last 2 s) and the
+    /// smallest seen (session queue).
+    private var pongs: [(us: Int64, rttMs: Double)] = []
+    private var pongCount = 0
+    private var pongMinMs = Double.greatestFiniteMagnitude
     private var lastRateChangeUs: Int64 = 0
     private var lastCongestionUs: Int64 = 0
     private var blockedSinceUs: Int64 = 0
@@ -82,6 +132,7 @@ public final class ClientSession: WebSocketPeer, VideoSink {
         self.transport = transport
         let v = ConfigStore.current.video
         maxKbps = v.maxBitrateKbps
+        capKbps = v.maxBitrateKbps
         minKbps = v.minBitrateKbps
         targetKbps = min(v.startBitrateKbps, maxKbps)
     }
@@ -209,6 +260,7 @@ public final class ClientSession: WebSocketPeer, VideoSink {
             "elevated": false,
             "hostTimeUs": Clock.nowUs,
         ]) { _, new in new })
+        welcomeSentUs = Clock.nowUs
         if !viewOnly && !Permissions.accessibility && !TestInput.enabled { // test input posts nothing: no permission needed
             sendJson(["t": "notice", "level": "warn", "message": "This Mac hasn't given Headroom the Accessibility permission yet, so your mouse and keyboard can't control it. (System Settings → Privacy & Security → Accessibility)"])
         }
@@ -296,6 +348,10 @@ public final class ClientSession: WebSocketPeer, VideoSink {
         case "ping":
             sendJson(["t": "pong", "id": root.int("id") as Any?, "ts": root.double("ts") ?? 0, "host": Clock.nowUs])
         case "start":
+            if welcomeSentUs > 0 {
+                handshakeRttMs = Double(Clock.nowUs - welcomeSentUs) / 1000
+                welcomeSentUs = 0
+            }
             startStream(root)
         case "keyframe":
             pipeline?.requestKeyframe()
@@ -318,6 +374,7 @@ public final class ClientSession: WebSocketPeer, VideoSink {
         case "special" where !viewOnly:
             handleSpecial(root.str("action") ?? "")
         case "audio":
+            takeAudioRequest(mode: root.str("mode"), priority: root.boolIfPresent("priority"), fromStart: false)
             setAudio(root.bool("enabled"))
         case "file-token" where rights.files:
             if let path = root.str("path"), let dev = device {
@@ -360,7 +417,8 @@ public final class ClientSession: WebSocketPeer, VideoSink {
             // Asleep (a sleeping display isn't listed) or the lid closed: wake it, and start when there's one to show.
             if waitingStart == nil { Log.info("session", "\(id): no display yet (asleep, or the lid is closed); waking it") }
             waitingStart = root
-            if let a = root.boolIfPresent("audio") { setAudio(a) }
+            takeAudioRequest(mode: root.str("audioMode"), priority: root.boolIfPresent("audioPriority"), fromStart: true)
+            if let a = root.boolIfPresent("audio") { setAudio(a) } else if audioEnabled { applyAudioFormat() }
             SessionManager.wakeDisplay()
             lastWakeUs = Clock.nowUs
             tellNoDisplay()
@@ -374,8 +432,11 @@ public final class ClientSession: WebSocketPeer, VideoSink {
         // Never exceed what the display can show.
         maxFps = min(maxFps, max(30, Int(monitor.refreshHz.rounded())))
         let clientMax = root.int("maxBitrateKbps") ?? cfg.video.maxBitrateKbps
+        takeAudioRequest(mode: root.str("audioMode"), priority: root.boolIfPresent("audioPriority"), fromStart: true)
+        let reserve = priorityActive ? audioReserveKbps : 0
         flowLock.lock()
-        maxKbps = min(max(clientMax, cfg.video.minBitrateKbps), cfg.video.maxBitrateKbps)
+        capKbps = min(max(clientMax, cfg.video.minBitrateKbps), cfg.video.maxBitrateKbps)
+        maxKbps = Self.videoCeiling(capKbps: capKbps, minKbps: minKbps, audioKbps: reserve)
         targetKbps = min(max(targetKbps, minKbps), maxKbps)
         let bitrate = targetKbps, ceiling = maxKbps
         flowLock.unlock()
@@ -384,7 +445,7 @@ public final class ClientSession: WebSocketPeer, VideoSink {
                                         encoderPreference: cfg.video.encoder)
         if let p = pipeline { p.updateSettings(settings) } else { pipeline = VideoPipeline(settings: settings, sink: self, initialEpoch: epochBase) }
         attachCursor()
-        if let a = root.boolIfPresent("audio") { setAudio(a) }
+        if let a = root.boolIfPresent("audio") { setAudio(a) } else if audioEnabled { applyAudioFormat() }
         if rights.clipboard && !clipboardSubscribed {
             clipboardSubscribed = true
             ClipboardService.shared.subscribe(self) { [weak self] text in self?.onClipboardChanged(text) }
@@ -477,16 +538,179 @@ public final class ClientSession: WebSocketPeer, VideoSink {
                 sendJson(["t": "notice", "level": "info", "message": "Audio is off: you're viewing this Mac from itself, which would echo."])
             }
         }
-        guard enabled != audioEnabled else { return }
+        guard enabled != audioEnabled else {
+            if enabled { applyAudioFormat() }
+            return
+        }
         audioEnabled = enabled
         if enabled {
-            AudioService.shared.subscribe(self) { [weak self] p in
-                self?.transport?.sendAudio(Wire.audio(seq: p.seq, timeUs: p.timeUs, opus: p.data))
-            }
+            let f = effectiveAudioFormat
+            subscribedFormat = f
+            AudioService.shared.subscribe(self, format: f) { [weak self] p in self?.onAudioPacket(p) }
         } else {
             AudioService.shared.unsubscribe(self)
+            subscribedFormat = nil
+        }
+        applyAudioFormat(starting: enabled)
+    }
+
+    /// `audioMode` / `audioPriority` of a `start`, or `mode` / `priority` of an `audio` message (absent: unchanged).
+    /// Asking for a mode again (an `audio` message with `mode`, a `start` with a different one, priority turned on)
+    /// starts from the top again after a step down; a `start` that repeats the same mode keeps the step.
+    private func takeAudioRequest(mode: String?, priority: Bool?, fromStart: Bool) {
+        if let m = mode {
+            let parsed = AudioService.Mode(rawValue: m)
+            if parsed == nil {
+                audioUnsupported = true
+                Log.info("audio", "\(id): asked for sound as '\(m.prefix(16))', which this host doesn't have; Opus instead")
+            }
+            let next = parsed ?? .opus
+            if !fromStart || next != audioMode { audioStep = 0 }
+            audioMode = next
+        }
+        if let p = priority, p != audioPriority {
+            audioPriority = p
+            audioStep = 0
         }
     }
+
+    /// The formats a session with priority steps down through when its path can't carry the one before: lossless (if
+    /// asked for), then Opus from the top bitrate down.
+    static func audioLadder(_ mode: AudioService.Mode) -> [AudioService.Format] {
+        let opus = AudioService.opusSteps.map { AudioService.Format(mode: .opus, priority: true, kbps: $0) }
+        return mode == .pcm24 ? [AudioService.Format(mode: .pcm24, priority: true)] + opus : opus
+    }
+
+    /// Where to step down to: the first format below `current` whose rate fits in `fraction` of what the path carried
+    /// (kbps of sound reaching the socket while its queue grew); the last one if none does.
+    static func stepDown(_ ladder: [AudioService.Format], from current: Int, carriedKbps: Double, fraction: Double = 0.8) -> Int {
+        guard current + 1 < ladder.count else { return current }
+        var i = current + 1
+        while i < ladder.count - 1 && Double(AudioService.wireKbps(ladder[i])) > carriedKbps * fraction { i += 1 }
+        return i
+    }
+
+    private var effectiveAudioFormat: AudioService.Format {
+        guard audioPriority else { return AudioService.Format(mode: audioMode, priority: false, kbps: AudioService.configuredOpusKbps) }
+        let ladder = Self.audioLadder(audioMode)
+        return ladder[min(audioStep, ladder.count - 1)]
+    }
+
+    /// Room the picture leaves for the sound with audio priority (its rate plus ~10% for the network's headers).
+    private var audioReserveKbps: Int { Int(Double(AudioService.wireKbps(effectiveAudioFormat)) * 1.1) }
+
+    private static func kbps(_ f: AudioService.Format) -> Int {
+        f.mode == .pcm24 ? AudioService.pcm24Kbps : f.priority ? f.kbps : AudioService.configuredOpusKbps
+    }
+
+    private static func describe(_ f: AudioService.Format) -> String {
+        f.mode == .pcm24 ? "lossless (\(AudioService.pcm24Kbps) kbps)" : "Opus \(kbps(f)) kbps"
+    }
+
+    /// After anything that can change this session's sound: asked for, stepped down, turned on or off. Sets the
+    /// transport and flow control for priority, moves the subscription, and tells the viewer (audio-mode) when what
+    /// it gets differs from what it was told (or assumes: Opus without priority).
+    private func applyAudioFormat(reason: String? = nil, starting: Bool = false) {
+        let active = audioEnabled && audioPriority
+        if active != priorityActive {
+            priorityActive = active
+            transport?.setAudioPriority(active)
+            flowLock.lock()
+            priorityFlow = active
+            // Nothing measured yet (the usual case: priority asked for in `start`): the picture starts modestly, so its
+            // first big frames can't swamp a slow path before the bitrate controller has heard from it.
+            if active && ackWindow.isEmpty && inflight.isEmpty && minRttMs == .greatestFiniteMagnitude {
+                targetKbps = min(targetKbps, max(minKbps, Self.priorityStartKbps))
+            }
+            if active, let h = handshakeRttMs, h < minRttMs { minRttMs = h }
+            let target = targetKbps
+            paceKbps = active ? Self.videoPaceKbps(targetKbps: target, minKbps: minKbps, pathKbps: pathEstimate.paceKbps(nowUs: Clock.nowUs)) : 0
+            let pace = paceKbps
+            flowLock.unlock()
+            if active {
+                transport?.setVideoPace(kbps: pace)
+                pipeline?.setBitrate(target)
+            }
+            audioLogSinceUs = Clock.nowUs
+            audioLogPackets = 0; audioLogP95Ms = 0; audioLogMaxMs = 0
+            Log.info("audio", active
+                ? "\(id): audio priority on: sound first, video fragments 16 KiB, send buffer 16/48 KiB, TCP_NOTSENT_LOWAT 16 KiB"
+                : "\(id): audio priority off")
+        }
+        applyVideoCeiling()
+        guard audioEnabled else {
+            audioLock.lock(); rateWatchArmed = false; rateWatch.reset(); audioLock.unlock()
+            return
+        }
+        let f = effectiveAudioFormat
+        if f != subscribedFormat {
+            AudioService.shared.setFormat(self, f)
+            subscribedFormat = f
+        }
+        audioLock.lock()
+        rateWatch.reset()
+        rateWatchArmed = active && audioStep + 1 < Self.audioLadder(audioMode).count
+        audioLock.unlock()
+
+        var why = reason
+        if audioUnsupported { audioUnsupported = false; why = why ?? "unsupported" }
+        let isDefault = f.mode == .opus && !f.priority
+        let differs = announcedFormat.map { $0 != f } ?? !isDefault
+        guard why != nil || differs || (starting && !isDefault) else { return }
+        announcedFormat = f
+        var msg: JSONObject = ["t": "audio-mode", "mode": f.mode.rawValue, "priority": f.priority, "kbps": Self.kbps(f)]
+        if let why { msg["reason"] = why }
+        sendJson(msg)
+        Log.info("audio", "\(id): sound is \(Self.describe(f))\(f.priority ? " with priority" : "")\(why.map { " (\($0))" } ?? "")")
+    }
+
+    /// Audio queue (AudioService's): every packet for this session.
+    private func onAudioPacket(_ p: AudioService.Packet) {
+        guard let t = transport else { return }
+        t.sendAudio(p.wire)
+        audioLock.lock()
+        guard rateWatchArmed, !stepPending else { audioLock.unlock(); return }
+        let flow = t.audioFlow
+        let verdict = rateWatch.update(nowUs: Clock.nowUs, backlogUs: flow.backlogUs, queuedBytes: flow.queuedBytes, writtenBytes: flow.writtenBytes)
+        guard case .tooSlow(let carried) = verdict else { audioLock.unlock(); return }
+        stepPending = true
+        audioLock.unlock()
+        queue.async { [weak self] in
+            self?.stepAudioDown(carriedKbps: carried, why: "its queue here held over 300 ms for 2 s while the path carried \(Int(carried)) kbps of it")
+        }
+    }
+
+    /// The path can't carry this sound (AudioRateWatch): one step down the ladder, or more if what it carried says so.
+    /// Never back up on its own: the viewer can ask again.
+    private func stepAudioDown(carriedKbps: Double?, why: String) {
+        audioLock.lock(); stepPending = false; audioLock.unlock()
+        guard audioEnabled, audioPriority, !closed else { return }
+        let ladder = Self.audioLadder(audioMode)
+        let from = min(audioStep, ladder.count - 1)
+        let to = carriedKbps.map { Self.stepDown(ladder, from: from, carriedKbps: $0) } ?? min(from + 1, ladder.count - 1)
+        guard to > from else { return }
+        audioStep = to
+        audioStepHoldUntilUs = Clock.nowUs + 5_000_000
+        overloadWatch.reset()
+        Log.warn("audio", "\(id): \(why): \(Self.describe(ladder[from])) doesn't fit, stepping down to \(Self.describe(ladder[to]))")
+        applyAudioFormat(reason: "bandwidth")
+    }
+
+    /// The picture's ceiling: with audio priority it leaves room for the sound. Session queue.
+    private func applyVideoCeiling() {
+        let reserve = priorityActive ? audioReserveKbps : 0
+        flowLock.lock()
+        let ceiling = Self.videoCeiling(capKbps: capKbps, minKbps: minKbps, audioKbps: reserve)
+        guard ceiling != maxKbps else { flowLock.unlock(); return }
+        maxKbps = ceiling
+        var apply = false
+        if targetKbps > maxKbps { targetKbps = maxKbps; apply = true }
+        let target = targetKbps
+        flowLock.unlock()
+        if apply { pipeline?.setBitrate(target) }
+    }
+
+    static func videoCeiling(capKbps: Int, minKbps: Int, audioKbps: Int) -> Int { max(minKbps, capKbps - audioKbps) }
 
     // ------------------------------------------------------------------------------------------- video sink
 
@@ -543,12 +767,38 @@ public final class ClientSession: WebSocketPeer, VideoSink {
     }
 
     /// ~1.5x bandwidth-delay product using delivery rate, with sane floors/caps. Caller holds flowLock.
+    /// With audio priority, ~1.1x with a 64 KiB floor (priorityVideoBudget): less picture ahead of the sound.
     private func inflightBudgetBytes() -> Int {
-        let rateBytesPerMs = deliveryRateKbps() / 8.0
         let rtt = minRttMs == .greatestFiniteMagnitude ? 50 : minRttMs
+        if priorityFlow { return Self.priorityVideoBudget(deliveryKbps: deliveryRateKbps(), minRttMs: rtt) }
+        let rateBytesPerMs = deliveryRateKbps() / 8.0
         let bdp = Int(rateBytesPerMs * (rtt + 40) * 1.5)
         let floor = max(256 * 1024, targetKbps * 1000 / 8 / 10) // at least 100 ms of target bitrate
         return min(max(bdp, floor), 6 * 1024 * 1024)
+    }
+
+    /// Video allowed unacknowledged with audio priority: ~1.1x the bandwidth-delay product (the picture's delivery rate
+    /// times the path's minimum RTT), at least 64 KiB, at most 6 MiB.
+    static func priorityVideoBudget(deliveryKbps: Double, minRttMs: Double) -> Int {
+        let bdp = deliveryKbps / 8.0 * max(0, minRttMs) * 1.1 // kbps / 8 = bytes per ms
+        return min(max(Int(bdp), 64 * 1024), 6 * 1024 * 1024)
+    }
+
+    /// Queueing delay (smoothed RTT above the minimum) that counts as congestion: 60 ms, or 25 with audio priority.
+    static func congestionDelayMs(priority: Bool) -> Double { priority ? 25 : 60 }
+
+    /// Where the picture's bitrate starts for a session with audio priority, before anything is measured.
+    static let priorityStartKbps = 2500
+
+    /// With audio priority, video leaves no faster than this (the transport paces its fragments): 1.5x the bitrate
+    /// target, so frames of the average size never wait while a big one (a whole new screen) is spread out instead of
+    /// landing in the path's bottleneck all at once ahead of the sound.
+    /// Once big frames have measured the path, its pace (VideoPathEstimate.paceKbps: just under what the path carries
+    /// for video), never above that and never under 100 kbps, so the picture doesn't stop.
+    static func videoPaceKbps(targetKbps: Int, minKbps: Int, pathKbps: Double?) -> Int {
+        let byTarget = max(targetKbps, minKbps) * 3 / 2
+        guard let path = pathKbps else { return byTarget }
+        return max(100, min(byTarget, Int(path)))
     }
 
     /// What arrived in the last second, in kbps (none: 0). Caller holds flowLock.
@@ -572,14 +822,15 @@ public final class ClientSession: WebSocketPeer, VideoSink {
     public func videoFrameWillComplete(_ frame: EncodedVideoFrame) {
         flowLock.lock()
         let behind = inflight.values.contains { $0.refinement }
-        inflight[frame.frameId] = (Clock.nowUs, frame.data.count, frame.refinement, behind)
+        inflight[frame.frameId] = (Clock.nowUs, frame.data.count, frame.refinement, behind, frame.firstWriteUs, frame.firstFragmentBytes, paceKbps)
         inflightBytes += frame.data.count
         flowLock.unlock()
     }
 
     private func onAck(_ frameId: UInt32) {
-        flowLock.lock(); defer { flowLock.unlock() }
+        flowLock.lock()
         let now = Clock.nowUs
+        var newPace = 0
         // Acks are cumulative-ish: anything older than the acked frame is also delivered.
         for (fid, v) in inflight where Int32(bitPattern: fid &- frameId) <= 0 {
             inflight[fid] = nil
@@ -605,9 +856,38 @@ public final class ClientSession: WebSocketPeer, VideoSink {
                     if sample < minRttMs { minRttMs = sample }
                     srttMs = srttMs == 0 ? sample : srttMs * 0.875 + sample * 0.125
                 }
+                // With audio priority a big frame also says what the path carries for video: pace by it at once.
+                if priorityFlow && minRttMs != .greatestFiniteMagnitude {
+                    if pathEstimate.add(bytes: v.bytes, firstFragment: v.firstBytes, firstWriteUs: v.firstUs, ackUs: now, minRttMs: minRttMs, paceKbps: v.paceKbps) {
+                        paceKbps = Self.videoPaceKbps(targetKbps: targetKbps, minKbps: minKbps, pathKbps: pathEstimate.paceKbps(nowUs: now))
+                        newPace = paceKbps
+                    }
+                }
             }
         }
         if inflightBytes < 0 { inflightBytes = 0 }
+        flowLock.unlock()
+        if newPace > 0 { transport?.setVideoPace(kbps: newPace) }
+    }
+
+    public func webSocketPong(rttUs: Int64) {
+        let now = Clock.nowUs, ms = Double(rttUs) / 1000
+        pongs.append((now, ms))
+        pongs.removeAll { now - $0.us > 2_000_000 }
+        pongCount += 1
+        if ms < pongMinMs { pongMinMs = ms }
+    }
+
+    /// With audio priority: how much is queued on the way to the viewer (ms), from the pings: the smallest round trip
+    /// of the last second (jitter doesn't count, a standing queue does), or how long the oldest unanswered ping has
+    /// been out if that's longer, less the path's own round trip (the smallest seen, or the handshake's). Session queue.
+    private func pathQueueMs(_ now: Int64) -> Double? {
+        let base = min(pongMinMs, handshakeRttMs ?? .greatestFiniteMagnitude)
+        guard base < .greatestFiniteMagnitude else { return nil }
+        let recent = pongs.filter { now - $0.us <= 1_000_000 }.map(\.rttMs).min()
+        let waiting = Double(transport?.oldestPingAgeUs ?? 0) / 1000
+        guard recent != nil || waiting > 0 else { return nil }
+        return max(0, max(recent ?? 0, waiting) - base)
     }
 
     // ------------------------------------------------------------------------------------------- periodic
@@ -640,6 +920,7 @@ public final class ClientSession: WebSocketPeer, VideoSink {
         }
         attachCursor()
         if waitingStart != nil { followDisplays(now) }
+        if priorityActive { transport.sendPing() }
         adaptBitrate(now)
         if now - lastStatsUs >= 1_000_000 {
             lastStatsUs = now
@@ -649,6 +930,11 @@ public final class ClientSession: WebSocketPeer, VideoSink {
 
     private func adaptBitrate(_ now: Int64) {
         guard let pipeline else { return }
+        // With audio priority, sound that waited for the socket means the picture is taking its room; and the pings say
+        // what's queued beyond this computer.
+        let audioWaitUs = priorityActive ? transport?.takeAudioTickMaxUs() ?? 0 : 0
+        let pathQueue = priorityActive ? pathQueueMs(now) : nil
+        let bytesOut = priorityActive ? transport?.priorityBytesOut ?? 0 : 0
         flowLock.lock()
         let blocked = blockedUsSinceTick + (blockedSinceUs != 0 ? now - blockedSinceUs : 0)
         blockedUsSinceTick = 0
@@ -658,12 +944,15 @@ public final class ClientSession: WebSocketPeer, VideoSink {
             minRttResetUs = now
             if inflight.isEmpty { minRttMs = .greatestFiniteMagnitude }
         }
-        let queueDelay = minRttMs == .greatestFiniteMagnitude ? 0 : srttMs - minRttMs
+        // With audio priority the pings' estimate (jitter doesn't count), else the frames' smoothed RTT over their minimum.
+        let queueDelay = priorityFlow && pathQueue != nil ? pathQueue! : minRttMs == .greatestFiniteMagnitude ? 0 : srttMs - minRttMs
         // Congested = a ready frame spent >40% of a tick waiting for the network, or the path shows queueing delay
         // (bufferbloat) beyond what serialization explains, two ticks running. One big frame (a whole new screen)
         // holds the next back for a tick: that's the picture, not the link. Sharpening passes wait for an idle path
         // (canSendRefinement), so they never count.
-        congestedTicks = blocked > 100_000 || queueDelay > 60 ? congestedTicks + 1 : 0
+        // With audio priority the threshold is 25 ms, and sound that waited over 25 ms for the socket counts too.
+        let audioLate = priorityFlow && audioWaitUs > 25_000
+        congestedTicks = blocked > 100_000 || queueDelay > Self.congestionDelayMs(priority: priorityFlow) || audioLate ? congestedTicks + 1 : 0
         let congested = congestedTicks >= 2
         var target = targetKbps
         if congested {
@@ -680,14 +969,28 @@ public final class ClientSession: WebSocketPeer, VideoSink {
             // what the link can carry (between page jumps the target climbed to 33 Mb/s on a 10 Mb/s link).
             target = min(maxKbps, Int(Double(target) * 1.12) + 200)
         }
+        // With audio priority the picture never aims above ~90% of what big frames showed the path carries for it.
+        if priorityFlow, let path = pathEstimate.pathKbps(nowUs: now) { target = min(target, max(minKbps, Int(path * 0.9))) }
         var apply = false
         if target != targetKbps && Double(abs(target - targetKbps)) > Double(targetKbps) * 0.04 {
             targetKbps = target
             lastRateChangeUs = now
             apply = true
         }
+        if priorityFlow { paceKbps = Self.videoPaceKbps(targetKbps: targetKbps, minKbps: minKbps, pathKbps: pathEstimate.paceKbps(nowUs: now)) }
+        let pace = priorityFlow ? paceKbps : 0
+        // The sound itself doesn't fit (with audio priority): the path stays queued over 300 ms although the picture is
+        // already at its floor. Fresh RTT samples only: a smoothed RTT nobody updated says nothing about now.
+        // The picture has yielded (paced to what the path carries for it, its bitrate cut to near its floor).
+        let videoAtFloor = targetKbps <= minKbps * 2
         flowLock.unlock()
         if apply { pipeline.setBitrate(target) }
+        if pace > 0 { transport?.setVideoPace(kbps: pace) }
+        if priorityActive && now >= audioStepHoldUntilUs, let q = pathQueue,
+           let carried = overloadWatch.update(nowUs: now, queueDelayMs: q, videoAtFloor: videoAtFloor, pongs: pongCount, bytesOut: bytesOut) {
+            stepAudioDown(carriedKbps: carried, why: "the way to the viewer stayed queued over 300 ms for 2 s without draining "
+                + "(the picture at its floor; it carried ~\(Int(carried)) kbps)")
+        }
     }
 
     private func sendStats(_ now: Int64) {
@@ -702,7 +1005,7 @@ public final class ClientSession: WebSocketPeer, VideoSink {
         let minRtt = minRttMs == .greatestFiniteMagnitude ? 0 : minRttMs
         let srtt = srttMs, target = targetKbps
         flowLock.unlock()
-        sendJson([
+        var stats: JSONObject = [
             "t": "stats",
             "fps": (Double(frames) / secs * 10).rounded() / 10,
             "kbps": (Double(bytes) * 8 / 1000 / secs).rounded(),
@@ -711,7 +1014,31 @@ public final class ClientSession: WebSocketPeer, VideoSink {
             "encoder": pipeline?.encoderName as Any?,
             "frameRttMs": (srtt * 10).rounded() / 10,
             "minRttMs": (minRtt * 10).rounded() / 10,
-        ])
+        ]
+        if priorityActive, let t = transport {
+            // How long sound waited from being queued to reaching the socket (last second), and what's still waiting.
+            let r = t.takeAudioQueueReport()
+            stats["audioQueueMs"] = (r.p95Ms * 10).rounded() / 10
+            stats["audioQueueMaxMs"] = (r.maxMs * 10).rounded() / 10
+            stats["audioBacklogMs"] = (r.backlogMs * 10).rounded() / 10
+            stats["audioDropped"] = r.dropped
+            logAudioQueue(r, now: now)
+        }
+        sendJson(stats)
+    }
+
+    /// Every 30 s with audio priority: how long sound waited for the socket (worst second's p95, and the maximum).
+    private func logAudioQueue(_ r: AudioQueueReport, now: Int64) {
+        audioLogPackets += r.packets
+        audioLogP95Ms = max(audioLogP95Ms, r.p95Ms)
+        audioLogMaxMs = max(audioLogMaxMs, r.maxMs)
+        guard now - audioLogSinceUs >= 30_000_000 else { return }
+        Log.info("audio", "\(id): sound waited for the socket: p95 \(String(format: "%.1f", audioLogP95Ms)) ms (worst second), "
+            + "max \(String(format: "%.1f", audioLogMaxMs)) ms over \(audioLogPackets) packets; dropped \(r.dropped)")
+        audioLogSinceUs = now
+        audioLogPackets = 0
+        audioLogP95Ms = 0
+        audioLogMaxMs = 0
     }
 
     // ------------------------------------------------------------------------------------------- teardown
@@ -760,4 +1087,116 @@ public final class ClientSession: WebSocketPeer, VideoSink {
     private func sendJson(_ obj: JSONObject) {
         transport?.sendText(JSON.bytes(obj))
     }
+}
+
+/// Sound with audio priority that the path can't carry: its queue held more than 300 ms for over 2 s while sound kept
+/// reaching the socket, but less of it than was made. Then `tooSlow` says how much got through (kbps), to pick what
+/// fits. A stall (next to nothing got through) says nothing about the rate, and a queue that keeps up isn't too much
+/// sound: both wait for the next window.
+struct AudioRateWatch {
+    static let backlogLimitUs: Int64 = 300_000
+    static let windowUs: Int64 = 2_000_000
+
+    enum Verdict: Equatable {
+        case fine
+        case tooSlow(carriedKbps: Double)
+    }
+
+    private var window: (us: Int64, queued: Int64, written: Int64)?
+
+    /// Per packet: how long the oldest queued packet has waited, and bytes queued / written so far.
+    mutating func update(nowUs: Int64, backlogUs: Int64, queuedBytes: Int64, writtenBytes: Int64) -> Verdict {
+        guard backlogUs > Self.backlogLimitUs else { window = nil; return .fine }
+        guard let w = window else {
+            window = (nowUs, queuedBytes, writtenBytes)
+            return .fine
+        }
+        let span = nowUs - w.us
+        guard span > Self.windowUs else { return .fine }
+        window = (nowUs, queuedBytes, writtenBytes)
+        let queued = queuedBytes - w.queued, written = writtenBytes - w.written
+        if written * 10 < queued { return .fine }        // a stall
+        if written * 100 >= queued * 97 { return .fine } // keeping up with what's made
+        return .tooSlow(carriedKbps: Double(written) * 8 / (Double(span) / 1000)) // bits per ms = kbps
+    }
+
+    mutating func reset() { window = nil }
+}
+
+/// What the path carries for video, measured on big frames (with audio priority): a frame's bytes (less its first
+/// fragment, which leaves at once) over the time from that first fragment leaving to its ack, less the path's minimum
+/// RTT. Sound sharing the path is left out by itself (its bytes cross in between). A frame paced faster than the path
+/// measures the path; one paced slower measures the pace (`limitedByPace`), and then the pace climbs 10% a frame
+/// until the path shows (`paceKbps`).
+struct VideoPathEstimate {
+    struct Sample {
+        let us: Int64
+        let kbps: Double
+        let limitedByPace: Bool
+    }
+
+    static let minBytes = 32 * 1024
+    static let minSpanMs = 40.0
+    static let maxAgeUs: Int64 = 15_000_000
+
+    private(set) var samples: [Sample] = []
+
+    /// A frame was acked: whether it was big and slow enough to count.
+    @discardableResult
+    mutating func add(bytes: Int, firstFragment: Int = 0, firstWriteUs: Int64, ackUs: Int64, minRttMs: Double, paceKbps: Int) -> Bool {
+        guard bytes >= Self.minBytes, firstWriteUs > 0 else { return false }
+        let spanMs = Double(ackUs - firstWriteUs) / 1000 - minRttMs
+        guard spanMs >= Self.minSpanMs else { return false }
+        let kbps = Double(max(0, bytes - firstFragment)) * 8 / spanMs
+        samples.append(Sample(us: ackUs, kbps: kbps, limitedByPace: paceKbps > 0 && kbps >= Double(paceKbps) * 0.95))
+        if samples.count > 3 { samples.removeFirst() }
+        return true
+    }
+
+    /// The median of the last three recent samples (the lower of two): what to pace by.
+    func kbps(nowUs: Int64) -> Double? { Self.median(samples.filter { nowUs - $0.us <= Self.maxAgeUs }) }
+
+    /// The same, from samples the path limited (not the pace): what the path really carries.
+    func pathKbps(nowUs: Int64) -> Double? { Self.median(samples.filter { nowUs - $0.us <= Self.maxAgeUs && !$0.limitedByPace }) }
+
+    /// What to pace video by: just under what the path showed it carries, or 10% over the pace when the last big frame
+    /// was held back by the pace (the path's limit isn't known yet). Nil until a recent big frame says.
+    func paceKbps(nowUs: Int64) -> Double? {
+        guard let last = samples.last, nowUs - last.us <= Self.maxAgeUs else { return nil }
+        if last.limitedByPace { return last.kbps * 1.1 }
+        return pathKbps(nowUs: nowUs).map { $0 * 0.97 }
+    }
+
+    private static func median(_ s: [Sample]) -> Double? {
+        let k = s.map(\.kbps).sorted()
+        return k.isEmpty ? nil : k[(k.count - 1) / 2]
+    }
+}
+
+/// The sound itself is more than the way to the viewer carries (with audio priority, the picture already at its
+/// floor): the queue on the way (PathQueue, from pings) stayed over 300 ms for more than 2 s and didn't drain meanwhile
+/// (fell less than 50 ms), while answers kept coming (a stall says nothing about the rate). A queue that drains, even
+/// slowly (what built up before a step down), says the sound now fits. Then what the path carried: what was sent over
+/// the window divided by (1 + the queue's growth), since a queue grows by (sent - carried) / carried.
+struct PathBacklogWatch {
+    static let limitMs = 300.0
+    static let windowUs: Int64 = 2_000_000
+
+    private var start: (us: Int64, delayMs: Double, pongs: Int, bytesOut: Int64)?
+
+    /// Per tick: the queue (ms), whether the picture is at its floor, answers so far, bytes sent so far. Returns what
+    /// the path carried (kbps) when the sound doesn't fit.
+    mutating func update(nowUs: Int64, queueDelayMs: Double, videoAtFloor: Bool, pongs: Int, bytesOut: Int64) -> Double? {
+        guard videoAtFloor, queueDelayMs > Self.limitMs else { start = nil; return nil }
+        guard let s = start else { start = (nowUs, queueDelayMs, pongs, bytesOut); return nil }
+        let spanUs = nowUs - s.us
+        guard spanUs > Self.windowUs else { return nil }
+        start = (nowUs, queueDelayMs, pongs, bytesOut)
+        guard pongs - s.pongs >= 3, queueDelayMs > s.delayMs - 50 else { return nil }
+        let spanMs = Double(spanUs) / 1000
+        let growth = max(0, (queueDelayMs - s.delayMs) / spanMs)
+        return Double(bytesOut - s.bytesOut) * 8 / spanMs / (1 + growth)
+    }
+
+    mutating func reset() { start = nil }
 }

@@ -41,10 +41,12 @@ JSON control messages, and binary frames carry media and input. Binary layouts a
    monitor, fps or resolution:
    ```json
    { "t": "start", "monitor": "\\\\.\\DISPLAY1", "maxFps": 15, "maxBitrateKbps": 20000,
-     "maxWidth": 0, "maxHeight": 0, "audio": false }
+     "maxWidth": 0, "maxHeight": 0, "audio": false, "audioMode": "opus", "audioPriority": false }
    ```
    Headroom's own viewers start every session muted: `audio` stays false until the person unmutes (then
    `{"t":"audio","enabled":true}`, and true in later `start`s), so the host sends no sound before that.
+   `audioMode` (`"opus"` or `"pcm24"`) and `audioPriority` choose the sound (see Audio in section 5); without them
+   a host sends Opus without priority.
 
 Tokens come from an account ([ACCOUNTS.md](ACCOUNTS.md)) or an accepted guest's resume key, and are never placed
 in URLs. Through the relay, the same protocol runs under `https://<relay>/r/<relay id>/`.
@@ -131,9 +133,32 @@ The host only ever sees plain key codes.
 
 - **Clipboard**: `{"t":"clip","text":"…"}` goes in both directions. `{"t":"clip-get"}` asks the host for
   its current clipboard.
-- **Audio**: `{"t":"audio","enabled":bool}` turns audio on or off. The host sends **`0x03` audio** as
-  `[0x03][3 rsv][u32 seq][i64 host µs][Opus packet]`: 48 kHz stereo, 10 ms CELT frames. The host sends
-  nothing during silence, so the client re-buffers on sequence gaps.
+- **Audio**: `{"t":"audio","enabled":bool,"mode":"opus"|"pcm24","priority":bool}` turns audio on or off and,
+  when `mode`/`priority` are present, changes them (absent: they stay as they were). The host sends **`0x03`
+  audio** as `[0x03][u8 codec][u16 rsv][u32 seq][i64 host µs][payload]`, one packet per 10 ms of 48 kHz stereo,
+  `seq` +1 per packet, the time being the capture time of the packet's first sample:
+  - codec 0: an Opus packet (CELT, 10 ms). Older hosts send only this, with byte 1 = 0.
+  - codec 1 (`pcm24`): 480 frames of signed 24-bit little-endian interleaved PCM (2880 bytes), lossless.
+  - codec 2: silence, payload = u16 frame count (480); only with priority on, for every frame of digital silence.
+  Without priority, a host may send nothing while it's silent (the Mac after 200 ms of digital silence, Windows while
+  the device delivers nothing), so the client re-buffers on sequence gaps. With **priority**:
+  - The timeline has no holes: every all-zero frame is a silence packet, played as exactly 480 zeros. In an Opus
+    session the first all-zero frame after sound is still an Opus packet (it carries the end of the sound held in the
+    encoder's look-ahead); the client keeps one Opus decoder running and never feeds or resets it on silence packets.
+    Decoded Opus trails the timestamps by the encoder's look-ahead (2.5 ms for the restricted low-delay CELT used).
+  - The host never drops audio, keeps video from queueing ahead of it (video fragments of 4–16 KiB, paced to what the
+    path carries; small socket buffers) and makes video give up bandwidth first. It sends a WebSocket ping every
+    250 ms with its 8-byte send time to measure the queue end to end; viewers answer as WebSocket requires
+    (browsers do it themselves).
+  - If the sound can't be carried (its queue stays over 300 ms for 2 s), the host steps down at once to the highest
+    rung that fits the measured rate: lossless → Opus 510/512 → 256 → 128 → 64 kbps, at least 5 s apart. It
+    never steps back up by itself: an `audio` message with `mode` asks again, and turning priority on starts over.
+  - `stats` also carries `audioQueueMs` (p95 over the last second), `audioQueueMaxMs`, `audioBacklogMs` and
+    `audioDropped`.
+  - The client keeps a steady reserve that absorbs network jitter and clock drift, changing it only in silence.
+  The host says what it sends with `{"t":"audio-mode","mode":"opus"|"pcm24","priority":bool,"kbps":n}` whenever
+  that changes (`kbps` is 2304 for pcm24); `"reason":"bandwidth"` marks a step down, `"unsupported"` an unknown mode
+  (it sends Opus). Older hosts never send it: assume Opus without priority.
 - **Files**: `{"t":"file-token","path":"…","id":"…"}` makes the host reply with `file-token` and a
   2-minute single-use `token` for `GET /api/files/download?t=`.
 - **Host → client**:

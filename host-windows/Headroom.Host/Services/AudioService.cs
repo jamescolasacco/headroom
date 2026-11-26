@@ -51,6 +51,13 @@ public sealed class AudioService
     public static int NormalOpusKbps => Math.Clamp(ConfigStore.Current.Audio.BitrateKbps, 32, 256);
 
     /// <summary>
+    /// What a viewer's sound costs on the wire (kbps, before WebSocket and TCP): the payload's rate, plus its 16-byte header
+    /// and ~4 bytes of framing every 10 ms (as the Mac host's wireKbps).
+    /// </summary>
+    public static int WireKbps(Format f) =>
+        (f.Pcm ? PcmKbps : f.Priority ? f.Kbps : NormalOpusKbps) + Wire.AudioHeaderSize * 8 * 100 / 1000 + 4 * 8 * 100 / 1000;
+
+    /// <summary>
     /// Tests only: `headroom run --test-audio=music` sends the deterministic signal of <see cref="TestMusic"/> instead of
     /// this PC's sound. A flag rather than an environment variable, because Headroom Server starts its engine as
     /// `headroom run` too and would inherit a variable left set; neither it nor the service (`agent`) passes this flag.

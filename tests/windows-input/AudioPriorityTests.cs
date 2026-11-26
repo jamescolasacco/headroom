@@ -10,7 +10,7 @@ internal static class AudioPriorityTests
     /// <summary>The framer's clock in these tests: ticks per second.</summary>
     private const long F = 10_000_000;
 
-    internal static void Run()
+    internal static async Task Run()
     {
         // This PC's settings are read for Opus without priority: an empty folder of its own gives the defaults.
         Environment.SetEnvironmentVariable("HEADROOM_DATA", Path.Combine(Path.GetTempPath(), "headroom-audio-test-" + Environment.ProcessId));
@@ -21,6 +21,262 @@ internal static class AudioPriorityTests
         Packetizer();
         CaptureClock();
         Console.WriteLine("Windows audio: wire layout, 24-bit PCM, test signal, timeline on the clock and every viewer's packets passed");
+        Transport();
+        await Pings();
+        Console.WriteLine("Windows audio priority transport: pacing, path estimate, step-down rules and WebSocket pings passed");
+    }
+
+    private static bool Near(double? value, double expected, double accuracy = 0.1) => value is { } v && Math.Abs(v - expected) <= accuracy;
+
+    // The Mac host's tests of the same rules (host-macos/Tests/HeadroomKitTests/AudioPriorityTests.swift), with its numbers.
+    private static void Transport()
+    {
+        Check(AudioService.WireKbps(new AudioService.Format(true, true, AudioService.PcmKbps)) == 2304 + 15
+              && AudioService.WireKbps(new AudioService.Format(false, true, 510)) == 510 + 15
+              && AudioService.WireKbps(new AudioService.Format(false, true, 64)) == 64 + 15, "what each sound costs on the wire");
+
+        // This session's queue: 512 kbps of Opus made (640 B / 10 ms), the path carrying half; the backlog over 300 ms.
+        var rate = new AudioRateWatch();
+        long queued = 0, written = 0;
+        int firstSlow = -1;
+        double carriedSlow = 0;
+        for (int i = 0; i < 300; i++)
+        {
+            queued += 640;
+            written += 320;
+            var verdict = rate.Update(i * 10_000L, 400_000, queued, written);
+            if (verdict != null && firstSlow < 0)
+            {
+                firstSlow = i;
+                carriedSlow = verdict.Value;
+            }
+        }
+        Check(firstSlow == 201 && Math.Abs(carriedSlow - 256) <= 3, $"too slow after a 2 s window, ~256 kbps carried ({firstSlow}, {carriedSlow:0.0})");
+        rate.Reset();
+        queued = 0;
+        for (int i = 0; i < 500; i++)
+        {
+            queued += 2896;
+            Check(rate.Update(i * 10_000L, 500_000, queued, 0) == null, "a stall says nothing about the rate");
+        }
+        rate.Reset();
+        queued = written = 0;
+        for (int i = 0; i < 500; i++)
+        {
+            queued += 2896;
+            written += 2896;
+            Check(rate.Update(i * 10_000L, 500_000, queued, written) == null, "a queue that keeps up isn't too much sound");
+        }
+        rate.Reset();
+        for (int i = 0; i < 600; i++)
+        {
+            queued += 2896;
+            written += 1448;
+            Check(rate.Update(i * 10_000L, i % 100 == 99 ? 200_000 : 400_000, queued, written) == null, "a backlog that dips under 300 ms every second");
+        }
+
+        var lossless = ClientSession.AudioLadder(true);
+        var compressed = ClientSession.AudioLadder(false);
+        Check(lossless.Length == 5 && lossless[0].Pcm && lossless.Skip(1).Select(f => f.Kbps).SequenceEqual(new[] { 510, 256, 128, 64 })
+              && lossless.All(f => f.Priority) && compressed.Select(f => f.Kbps).SequenceEqual(new[] { 510, 256, 128, 64 }), "the ladders");
+        Check(ClientSession.StepDown(lossless, 0, 2000) == 1 && ClientSession.StepDown(compressed, 0, 400) == 1
+              && ClientSession.StepDown(compressed, 0, 200) == 2 && ClientSession.StepDown(compressed, 0, 10) == 3
+              && ClientSession.StepDown(lossless, 1, 2000) == 2 && ClientSession.StepDown(compressed, 3, 10) == 3,
+            "steps down to the highest rate that fits 80% of what was carried, at least one step");
+
+        var pacer = new VideoPacer();
+        Check(pacer.Take(1_000_000, 0) == null, "no pace: never held back");
+        pacer.SetRate(1600, 0); // 200 kB/s
+        int fragment = Wire.PriorityFragmentPayload + Wire.VideoHeaderSize + 4;
+        Check(pacer.Take(fragment, 0) == null, "the first fragment goes at once");
+        var secondWait = pacer.Take(fragment, 0);
+        Check(Near(secondWait, fragment / 200_000.0 * 1_000_000, 5_000), $"the next waits ~83 ms ({secondWait})");
+        var spread = new VideoPacer();
+        spread.SetRate(1600, 0);
+        long clock = 0;
+        int sent = 0;
+        while (sent < 160_000)
+        {
+            var hold = spread.Take(fragment, clock);
+            if (hold != null) clock += hold.Value;
+            else sent += fragment - Wire.VideoHeaderSize - 4;
+        }
+        Check(Math.Abs(clock - (0.8e6 - fragment / 200_000.0 * 1e6)) <= 60_000, $"a 160 kB frame at 200 kB/s takes ~0.8 s ({clock} µs)");
+        spread.SetRate(80_000, clock);
+        Check(spread.Burst == 100_000 && spread.FragmentPayload == 16 * 1024, "fast: a 10 ms bucket, 16 KiB fragments");
+        spread.SetRate(4000, clock);
+        Check(spread.FragmentPayload == 10_000, "fragments of ~20 ms of the pace");
+        spread.SetRate(800, clock);
+        Check(spread.FragmentPayload == 4096 && new VideoPacer().FragmentPayload == 16 * 1024, "4 KiB at the least, 16 KiB unpaced");
+        Check(ClientSession.VideoPaceKbps(2000, 800, null) == 3000 && ClientSession.VideoPaceKbps(100, 800, null) == 1200
+              && ClientSession.VideoPaceKbps(3000, 800, 1400) == 1400 && ClientSession.VideoPaceKbps(1000, 800, 10000) == 1500
+              && ClientSession.VideoPaceKbps(1000, 800, 20) == 100, "the pace: 1.5x the target, or the path's, never under 100 kbps");
+
+        var path = new VideoPathEstimate();
+        Check(path.Add(90_000, 16_000, 1_000_000, 1_540_000, 40, 3750), "a big frame counts");
+        Check(Near(path.Kbps(1_600_000), 1184) && Near(path.PathKbps(1_600_000), 1184) && Near(path.PaceKbps(1_600_000), 1184 * 0.97),
+            "74 kB in 500 ms: the path's 1184 kbps, paced just under it");
+        Check(!path.Add(20_000, 0, 2_000_000, 2_400_000, 40, 3750) && !path.Add(60_000, 0, 2_000_000, 2_070_000, 40, 3750),
+            "small or quick frames don't count");
+        Check(path.Add(100_000, 4096, 3_000_000, 3_540_000, 40, 1500), "a frame the pace held back");
+        var held = path.Samples[path.Samples.Count - 1];
+        Check(held.LimitedByPace && Math.Abs(held.Kbps - (100_000 - 4096) * 8 / 500.0) <= 0.1 && Near(path.PaceKbps(3_600_000), held.Kbps * 1.1)
+              && Near(path.PathKbps(3_600_000), 1184) && Near(path.Kbps(3_600_000), 1184), "the pace climbs 10%; the path's figure stays");
+        Check(path.Add(100_000, 0, 4_000_000, 4_540_000, 40, 1760) && !path.Samples[path.Samples.Count - 1].LimitedByPace
+              && Near(path.PathKbps(4_600_000), 1184) && Near(path.PaceKbps(4_600_000), 1184 * 0.97), "paced 10% over the path, it measures the path");
+        Check(path.Kbps(4_540_000 + VideoPathEstimate.MaxAgeUs + 1) == null && path.PaceKbps(4_540_000 + VideoPathEstimate.MaxAgeUs + 1) == null,
+            "old samples are forgotten");
+
+        // The way to the viewer: 512 kbps of sound into a ~200 kb/s path, the queue growing 1.56 ms per ms, answers coming.
+        var backlog = new PathBacklogWatch();
+        int firstTick = -1;
+        double carriedPath = 0;
+        for (int tick = 0; tick < 20; tick++)
+        {
+            var verdict = backlog.Update(tick * 250_000L, 350 + tick * 390.0, true, tick, tick * 16_000L);
+            if (verdict != null && firstTick < 0)
+            {
+                firstTick = tick;
+                carriedPath = verdict.Value;
+            }
+        }
+        Check(firstTick == 9 && Math.Abs(carriedPath - 512 / (1 + 1.56)) <= 2, $"the path carried ~200 kbps ({firstTick}, {carriedPath:0.0})");
+        backlog.Reset();
+        for (int tick = 0; tick < 20; tick++)
+            Check(backlog.Update(tick * 250_000L, 600, false, tick, tick * 16_000L) == null, "the picture yields first");
+        backlog.Reset();
+        for (int tick = 0; tick < 40; tick++)
+            Check(backlog.Update(tick * 250_000L, 2000 - tick * 25.0, true, tick, tick * 8000L) == null, "a draining queue: the sound fits now");
+        backlog.Reset();
+        for (int tick = 0; tick < 40; tick++)
+            Check(backlog.Update(tick * 250_000L, 400 + tick * 250.0, true, 0, 0) == null, "a stall: no answers, nothing learnt");
+        backlog.Reset();
+        for (int tick = 0; tick < 20; tick++)
+            Check(backlog.Update(tick * 250_000L, 290, true, tick, tick * 16_000L) == null, "under 300 ms: nothing to judge");
+
+        Check(ClientSession.PriorityVideoBudget(5000, 40) == 64 * 1024 && ClientSession.PriorityVideoBudget(100_000, 50) == 687_500
+              && ClientSession.PriorityVideoBudget(1_000_000, 500) == 6 * 1024 * 1024 && ClientSession.PriorityVideoBudget(0, 50) == 64 * 1024,
+            "about 1.1x the BDP in flight, 64 KiB to 6 MiB");
+        Check(ClientSession.CongestionDelayMs(true) == 25 && ClientSession.CongestionDelayMs(false) == 60, "congestion at 25 ms of queueing with priority");
+        Check(ClientSession.VideoCeiling(40000, 800, 2550) == 37450 && ClientSession.VideoCeiling(2000, 800, 2550) == 800
+              && ClientSession.VideoCeiling(40000, 800, 0) == 40000, "the video ceiling leaves room for the sound");
+        Check(ClientSession.PriorityStartKbps == 2500, "priority video starts at 2.5 Mb/s");
+    }
+
+    /// <summary>The viewer's side of an upgraded connection: what it sent, handed out in reads of a set size; what we write, kept.</summary>
+    private sealed class FakeConnection : Stream
+    {
+        private readonly byte[] _incoming;
+        private readonly int _chunk;
+        private int _readAt;
+        public readonly List<byte> Written = new();
+        public TaskCompletionSource HoldBigWrites = new();
+
+        public FakeConnection(byte[] incoming, int chunk, bool hold = false)
+        {
+            _incoming = incoming;
+            _chunk = chunk;
+            if (!hold) HoldBigWrites.SetResult();
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Flush() { }
+        public override Task FlushAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public override int Read(byte[] buffer, int offset, int count) => ReadInto(buffer.AsSpan(offset, count));
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => new ValueTask<int>(ReadInto(buffer.Span));
+
+        private int ReadInto(Span<byte> buffer)
+        {
+            int n = Math.Min(Math.Min(_chunk, buffer.Length), _incoming.Length - _readAt);
+            _incoming.AsSpan(_readAt, n).CopyTo(buffer);
+            _readAt += n;
+            return n;
+        }
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            lock (Written) Written.AddRange(buffer.AsSpan(offset, count).ToArray());
+        }
+
+        public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (buffer.Length > 100) await HoldBigWrites.Task;
+            lock (Written) Written.AddRange(buffer.ToArray());
+        }
+    }
+
+    private static async Task Pings()
+    {
+        // What a browser sends (masked frames), with pongs among other frames: split into reads of any size, they pass
+        // through unchanged and the pongs' 8 bytes come out.
+        var frames = new List<byte>();
+        var key = new byte[] { 0x11, 0x22, 0x33, 0x44 };
+        void Frame(int opcode, byte[] payload, bool masked = true)
+        {
+            frames.Add((byte)(0x80 | opcode));
+            int m = masked ? 0x80 : 0;
+            if (payload.Length < 126) frames.Add((byte)(m | payload.Length));
+            else if (payload.Length < 65536)
+            {
+                frames.Add((byte)(m | 126));
+                frames.Add((byte)(payload.Length >> 8));
+                frames.Add((byte)payload.Length);
+            }
+            else
+            {
+                frames.Add((byte)(m | 127));
+                for (int shift = 56; shift >= 0; shift -= 8) frames.Add((byte)((long)payload.Length >> shift));
+            }
+            if (masked) frames.AddRange(key);
+            for (int i = 0; i < payload.Length; i++) frames.Add(masked ? (byte)(payload[i] ^ key[i & 3]) : payload[i]);
+        }
+        byte[] Payload(long value)
+        {
+            var b = new byte[8];
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(b, value);
+            return b;
+        }
+        Frame(1, System.Text.Encoding.ASCII.GetBytes("hello"));
+        Frame(0xA, Payload(123456789));
+        Frame(2, new byte[300]);
+        Frame(0xA, new byte[] { 1, 2, 3, 4 });
+        Frame(0xA, Payload(-5));
+        Frame(9, Array.Empty<byte>());
+        Frame(2, new byte[70_000]);
+        Frame(0xA, Payload(42), masked: false);
+        Frame(8, new byte[] { 3, 0xE8 });
+        var bytes = frames.ToArray();
+        foreach (int chunk in new[] { 1, 3, 7, 4096, bytes.Length })
+        {
+            var pings = new PingStream(new FakeConnection(bytes, chunk));
+            var pongs = new List<long>();
+            pings.Pong = pongs.Add;
+            var read = new List<byte>();
+            var buffer = new byte[5000];
+            int n;
+            while ((n = await pings.ReadAsync(buffer.AsMemory())) > 0) read.AddRange(buffer.AsSpan(0, n).ToArray());
+            Check(read.SequenceEqual(bytes), $"the viewer's frames pass through unchanged (reads of {chunk})");
+            Check(pongs.SequenceEqual(new long[] { 123456789, -5, 42 }), $"pongs found in reads of {chunk}: {string.Join(", ", pongs)}");
+        }
+
+        // A ping: 10 bytes (FIN + ping, not masked, its 8 bytes little-endian), never inside a frame being written.
+        var connection = new FakeConnection(Array.Empty<byte>(), 1, hold: true);
+        var stream = new PingStream(connection);
+        var big = new byte[1000];
+        Array.Fill(big, (byte)7);
+        var frameWrite = stream.WriteAsync(big).AsTask();
+        var ping = stream.SendPingAsync(0x0102030405060708);
+        await Task.Delay(50);
+        Check(connection.Written.Count == 0 && !ping.IsCompleted, "a ping waits for the frame being written");
+        connection.HoldBigWrites.SetResult();
+        await Task.WhenAll(frameWrite, ping);
+        Check(connection.Written.SequenceEqual(big.Concat(new byte[] { 0x89, 8, 8, 7, 6, 5, 4, 3, 2, 1 })), "the ping goes after the whole frame");
     }
 
     private static void Check(bool ok, string what)
