@@ -59,6 +59,11 @@ public sealed unsafe class MfH264Encoder : IDisposable
     private readonly int _outputBufferSize;
     private readonly Queue<(long Time, long SubmitTicks)> _pending = new();
     private volatile bool _disposed;
+    private volatile bool _stopping;            // Dispose has begun: what still comes out is dropped
+    private readonly ManualResetEventSlim _drained = new(false);
+    private const int DrainTimeoutMs = 500;
+    // HEADROOM_MF_NODRAIN=1 stops an async MFT without draining it first (as before), to tell what the drain changes.
+    private static readonly bool SkipDrain = Environment.GetEnvironmentVariable("HEADROOM_MF_NODRAIN") == "1";
     private int _inFlight;
     private int _bitrateKbps;
     private readonly int _fps;
@@ -77,7 +82,7 @@ public sealed unsafe class MfH264Encoder : IDisposable
 
     public static MfH264Encoder Create(GpuDevice gpu, EncoderOptions opts, Action<EncodedPacket> onOutput)
     {
-        MediaFoundationRuntime.EnsureStarted();
+        using (MfTrace.Call("MFStartup")) MediaFoundationRuntime.EnsureStarted();
         var errors = new List<string>();
         if (opts.Preference != "software")
         {
@@ -92,8 +97,8 @@ public sealed unsafe class MfH264Encoder : IDisposable
                 {
                     errors.Add($"{name}: {ex.Message}");
                     Log.Warn("encoder", $"hardware encoder '{name}' failed: {ex.Message}");
-                    try { act.ShutdownObject(); } catch { }
-                    act.Dispose();
+                    try { using (MfTrace.Call("IMFActivate.ShutdownObject", act)) act.ShutdownObject(); } catch { }
+                    using (MfTrace.Call("IMFActivate.Release", act)) act.Dispose();
                 }
             }
         }
@@ -110,7 +115,7 @@ public sealed unsafe class MfH264Encoder : IDisposable
                 {
                     errors.Add($"{name}: {ex.Message}");
                     Log.Warn("encoder", $"software encoder '{name}' failed: {ex.Message}");
-                    act.Dispose();
+                    using (MfTrace.Call("IMFActivate.Release", act)) act.Dispose();
                 }
             }
         }
@@ -119,7 +124,7 @@ public sealed unsafe class MfH264Encoder : IDisposable
 
     private static string SafeName(IMFActivate act)
     {
-        try { return act.GetString(TransformAttributeKeys.MftFriendlyNameAttribute) ?? "H.264 encoder"; }
+        try { using (MfTrace.Call("IMFActivate.GetString(FriendlyName)", act)) return act.GetString(TransformAttributeKeys.MftFriendlyNameAttribute) ?? "H.264 encoder"; }
         catch { return "H.264 encoder"; }
     }
 
@@ -130,11 +135,21 @@ public sealed unsafe class MfH264Encoder : IDisposable
         // MFTEnum2 can filter by adapter so multi-GPU systems pick the encoder on the capturing GPU.
         try
         {
-            using var attrs = MediaFactory.MFCreateAttributes(1);
-            attrs.Set(MFT_ENUM_ADAPTER_LUID, (ulong)luid);
-            MediaFactory.MFTEnum2(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER, null, output, attrs, out var arr, out var count);
-            for (int i = 0; i < count; i++) list.Add(new IMFActivate(Marshal.ReadIntPtr(arr, i * IntPtr.Size)));
-            if (arr != 0) Marshal.FreeCoTaskMem(arr);
+            IMFAttributes attrs;
+            using (MfTrace.Call("MFCreateAttributes")) attrs = MediaFactory.MFCreateAttributes(1);
+            try
+            {
+                using (MfTrace.Call("IMFAttributes.Set(adapter LUID)", attrs)) attrs.Set(MFT_ENUM_ADAPTER_LUID, (ulong)luid);
+                nint arr;
+                uint count;
+                using (MfTrace.Call("MFTEnum2")) MediaFactory.MFTEnum2(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER, null, output, attrs, out arr, out count);
+                for (int i = 0; i < count; i++) list.Add(new IMFActivate(Marshal.ReadIntPtr(arr, i * IntPtr.Size)));
+                if (arr != 0) Marshal.FreeCoTaskMem(arr);
+            }
+            finally
+            {
+                using (MfTrace.Call("IMFAttributes.Release", attrs)) attrs.Dispose();
+            }
         }
         catch (Exception ex)
         {
@@ -142,10 +157,13 @@ public sealed unsafe class MfH264Encoder : IDisposable
         }
         if (list.Count == 0)
         {
-            MediaFactory.MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER, null, output, out var arr, out var count);
+            nint arr;
+            uint count;
+            using (MfTrace.Call("MFTEnumEx(hardware)")) MediaFactory.MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER, null, output, out arr, out count);
             for (int i = 0; i < count; i++) list.Add(new IMFActivate(Marshal.ReadIntPtr(arr, i * IntPtr.Size)));
             if (arr != 0) Marshal.FreeCoTaskMem(arr);
         }
+        if (MfTrace.Enabled) MfTrace.Note($"{list.Count} hardware encoder(s) on adapter {luid:X}");
         return list;
     }
 
@@ -153,7 +171,9 @@ public sealed unsafe class MfH264Encoder : IDisposable
     {
         var list = new List<IMFActivate>();
         var output = new RegisterTypeInfo { GuidMajorType = MediaTypeGuids.Video, GuidSubtype = VideoFormatGuids.H264 };
-        MediaFactory.MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER, null, output, out var arr, out var count);
+        nint arr;
+        uint count;
+        using (MfTrace.Call("MFTEnumEx(software)")) MediaFactory.MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER, null, output, out arr, out count);
         for (int i = 0; i < count; i++) list.Add(new IMFActivate(Marshal.ReadIntPtr(arr, i * IntPtr.Size)));
         if (arr != 0) Marshal.FreeCoTaskMem(arr);
         // Put Microsoft's encoder first: it's the one guaranteed to accept our settings.
@@ -162,7 +182,7 @@ public sealed unsafe class MfH264Encoder : IDisposable
 
         static bool IsMs(IMFActivate a)
         {
-            try { return a.GetGUID(MFT_TRANSFORM_CLSID_Attribute) == CLSID_MSH264EncoderMFT; } catch { return false; }
+            try { using (MfTrace.Call("IMFActivate.GetGUID(CLSID)", a)) return a.GetGUID(MFT_TRANSFORM_CLSID_Attribute) == CLSID_MSH264EncoderMFT; } catch { return false; }
         }
     }
 
@@ -178,46 +198,59 @@ public sealed unsafe class MfH264Encoder : IDisposable
         _bitrateKbps = opts.BitrateKbps;
         _frameDuration = 10_000_000L / _fps;
 
-        _mft = activate.ActivateObject<IMFTransform>();
+        using (MfTrace.Call("IMFActivate.ActivateObject(IMFTransform)", activate)) _mft = activate.ActivateObject<IMFTransform>();
+        if (MfTrace.Enabled) MfTrace.Note($"MFT {_mft.NativePointer:X} '{name}'");
+        IMFAttributes? attrs = null;
         try
         {
-            var attrs = _mft.Attributes;
+            using (MfTrace.Call("IMFTransform.GetAttributes", _mft)) attrs = _mft.Attributes;
             uint isAsync = 0;
-            try { isAsync = attrs.GetUInt32(TransformAttributeKeys.TransformAsync); } catch { }
+            try { using (MfTrace.Call("IMFAttributes.GetUINT32(TransformAsync)", attrs)) isAsync = attrs.GetUInt32(TransformAttributeKeys.TransformAsync); } catch { }
             IsAsync = isAsync != 0;
-            if (IsAsync) attrs.Set(TransformAttributeKeys.TransformAsyncUnlock, 1u).CheckError();
-            try { attrs.Set(MF_LOW_LATENCY, 1u); } catch { }
+            if (IsAsync) using (MfTrace.Call("IMFAttributes.Set(TransformAsyncUnlock)", attrs)) attrs.Set(TransformAttributeKeys.TransformAsyncUnlock, 1u).CheckError();
+            try { using (MfTrace.Call("IMFAttributes.Set(LowLatency)", attrs)) attrs.Set(MF_LOW_LATENCY, 1u); } catch { }
 
             if (hardware)
             {
                 uint d3d11Aware = 0;
-                try { d3d11Aware = attrs.GetUInt32(TransformAttributeKeys.D3D11Aware); } catch { }
+                try { using (MfTrace.Call("IMFAttributes.GetUINT32(D3D11Aware)", attrs)) d3d11Aware = attrs.GetUInt32(TransformAttributeKeys.D3D11Aware); } catch { }
                 if (d3d11Aware == 0) throw new NotSupportedException("encoder is not D3D11 aware");
-                _mft.ProcessMessage(TMessageType.MessageSetD3DManager, (nuint)gpu.MfDeviceManager.NativePointer);
+                nint manager;
+                using (MfTrace.Call("GpuDevice.MfDeviceManager")) manager = gpu.MfDeviceManager.NativePointer;
+                using (MfTrace.Call("IMFTransform.ProcessMessage(SetD3DManager)", _mft)) _mft.ProcessMessage(TMessageType.MessageSetD3DManager, (nuint)manager);
             }
 
             // ---- codec properties. Must precede SetOutputType: encoders latch GOP/rate control when the
             //      output type is set (NVIDIA ignored the GOP when it was only set afterwards).
-            _codec = CodecApi.From(_mft.NativePointer);
+            using (MfTrace.Call("QueryInterface(ICodecAPI)", _mft)) _codec = CodecApi.From(_mft.NativePointer);
             ApplyCodecSettings(opts, hardware, log: true);
 
             // ---- output type first (required by hardware encoders)
-            using (var outType = MediaFactory.MFCreateMediaType())
+            IMFMediaType outType;
+            using (MfTrace.Call("MFCreateMediaType(output)")) outType = MediaFactory.MFCreateMediaType();
+            try
             {
-                outType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video).CheckError();
-                outType.Set(MediaTypeAttributeKeys.Subtype, VideoFormatGuids.H264).CheckError();
-                outType.Set(MediaTypeAttributeKeys.AvgBitrate, (uint)(opts.BitrateKbps * 1000)).CheckError();
-                MediaFactory.MFSetAttributeSize(outType, MediaTypeAttributeKeys.FrameSize, (uint)Width, (uint)Height).CheckError();
-                MediaFactory.MFSetAttributeRatio(outType, MediaTypeAttributeKeys.FrameRate, (uint)_fps, 1).CheckError();
-                MediaFactory.MFSetAttributeRatio(outType, MediaTypeAttributeKeys.PixelAspectRatio, 1, 1).CheckError();
-                outType.Set(MediaTypeAttributeKeys.InterlaceMode, 2u).CheckError(); // MFVideoInterlace_Progressive
-                outType.Set(MediaTypeAttributeKeys.Mpeg2Profile, 100u).CheckError(); // High
-                // VUI: BT.709 primaries/transfer/matrix, limited or full range. Browsers honour these.
-                outType.Set(MediaTypeAttributeKeys.VideoPrimaries, 2u);      // MFVideoPrimaries_BT709
-                outType.Set(MediaTypeAttributeKeys.TransferFunction, 5u);    // MFVideoTransFunc_709
-                outType.Set(MediaTypeAttributeKeys.YuvMatrix, 1u);           // MFVideoTransferMatrix_BT709
-                outType.Set(MediaTypeAttributeKeys.VideoNominalRange, opts.FullRange ? 1u : 2u); // 0_255 : 16_235
-                _mft.SetOutputType(0, outType, 0);
+                using (MfTrace.Call("IMFAttributes.Set x12 (output type)", outType))
+                {
+                    outType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video).CheckError();
+                    outType.Set(MediaTypeAttributeKeys.Subtype, VideoFormatGuids.H264).CheckError();
+                    outType.Set(MediaTypeAttributeKeys.AvgBitrate, (uint)(opts.BitrateKbps * 1000)).CheckError();
+                    MediaFactory.MFSetAttributeSize(outType, MediaTypeAttributeKeys.FrameSize, (uint)Width, (uint)Height).CheckError();
+                    MediaFactory.MFSetAttributeRatio(outType, MediaTypeAttributeKeys.FrameRate, (uint)_fps, 1).CheckError();
+                    MediaFactory.MFSetAttributeRatio(outType, MediaTypeAttributeKeys.PixelAspectRatio, 1, 1).CheckError();
+                    outType.Set(MediaTypeAttributeKeys.InterlaceMode, 2u).CheckError(); // MFVideoInterlace_Progressive
+                    outType.Set(MediaTypeAttributeKeys.Mpeg2Profile, 100u).CheckError(); // High
+                    // VUI: BT.709 primaries/transfer/matrix, limited or full range. Browsers honour these.
+                    outType.Set(MediaTypeAttributeKeys.VideoPrimaries, 2u);      // MFVideoPrimaries_BT709
+                    outType.Set(MediaTypeAttributeKeys.TransferFunction, 5u);    // MFVideoTransFunc_709
+                    outType.Set(MediaTypeAttributeKeys.YuvMatrix, 1u);           // MFVideoTransferMatrix_BT709
+                    outType.Set(MediaTypeAttributeKeys.VideoNominalRange, opts.FullRange ? 1u : 2u); // 0_255 : 16_235
+                }
+                using (MfTrace.Call("IMFTransform.SetOutputType", _mft)) _mft.SetOutputType(0, outType, 0);
+            }
+            finally
+            {
+                using (MfTrace.Call("IMFMediaType.Release(output)", outType)) outType.Dispose();
             }
 
             // ---- input type: NV12
@@ -225,58 +258,77 @@ public sealed unsafe class MfH264Encoder : IDisposable
             for (int i = 0; ; i++)
             {
                 IMFMediaType t;
-                try { t = _mft.GetInputAvailableType(0, i); }
+                try { using (MfTrace.Call("IMFTransform.GetInputAvailableType", _mft)) t = _mft.GetInputAvailableType(0, i); }
                 catch { break; }
-                if (t.GetGUID(MediaTypeAttributeKeys.Subtype) == VideoFormatGuids.NV12) { inType = t; break; }
-                t.Dispose();
+                bool nv12;
+                using (MfTrace.Call("IMFMediaType.GetGUID(Subtype)", t)) nv12 = t.GetGUID(MediaTypeAttributeKeys.Subtype) == VideoFormatGuids.NV12;
+                if (nv12) { inType = t; break; }
+                using (MfTrace.Call("IMFMediaType.Release", t)) t.Dispose();
             }
             if (inType == null)
             {
-                inType = MediaFactory.MFCreateMediaType();
-                inType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video).CheckError();
-                inType.Set(MediaTypeAttributeKeys.Subtype, VideoFormatGuids.NV12).CheckError();
+                using (MfTrace.Call("MFCreateMediaType(input) + IMFAttributes.Set x2"))
+                {
+                    inType = MediaFactory.MFCreateMediaType();
+                    inType.Set(MediaTypeAttributeKeys.MajorType, MediaTypeGuids.Video).CheckError();
+                    inType.Set(MediaTypeAttributeKeys.Subtype, VideoFormatGuids.NV12).CheckError();
+                }
             }
-            using (inType)
+            try
             {
-                MediaFactory.MFSetAttributeSize(inType, MediaTypeAttributeKeys.FrameSize, (uint)Width, (uint)Height).CheckError();
-                MediaFactory.MFSetAttributeRatio(inType, MediaTypeAttributeKeys.FrameRate, (uint)_fps, 1).CheckError();
-                MediaFactory.MFSetAttributeRatio(inType, MediaTypeAttributeKeys.PixelAspectRatio, 1, 1);
-                inType.Set(MediaTypeAttributeKeys.InterlaceMode, 2u);
-                inType.Set(MediaTypeAttributeKeys.VideoPrimaries, 2u);
-                inType.Set(MediaTypeAttributeKeys.TransferFunction, 5u);
-                inType.Set(MediaTypeAttributeKeys.YuvMatrix, 1u);
-                inType.Set(MediaTypeAttributeKeys.VideoNominalRange, opts.FullRange ? 1u : 2u);
-                if (!hardware) inType.Set(MediaTypeAttributeKeys.DefaultStride, (uint)Width);
-                _mft.SetInputType(0, inType, 0);
+                using (MfTrace.Call("IMFAttributes.Set x9 (input type)", inType))
+                {
+                    MediaFactory.MFSetAttributeSize(inType, MediaTypeAttributeKeys.FrameSize, (uint)Width, (uint)Height).CheckError();
+                    MediaFactory.MFSetAttributeRatio(inType, MediaTypeAttributeKeys.FrameRate, (uint)_fps, 1).CheckError();
+                    MediaFactory.MFSetAttributeRatio(inType, MediaTypeAttributeKeys.PixelAspectRatio, 1, 1);
+                    inType.Set(MediaTypeAttributeKeys.InterlaceMode, 2u);
+                    inType.Set(MediaTypeAttributeKeys.VideoPrimaries, 2u);
+                    inType.Set(MediaTypeAttributeKeys.TransferFunction, 5u);
+                    inType.Set(MediaTypeAttributeKeys.YuvMatrix, 1u);
+                    inType.Set(MediaTypeAttributeKeys.VideoNominalRange, opts.FullRange ? 1u : 2u);
+                    if (!hardware) inType.Set(MediaTypeAttributeKeys.DefaultStride, (uint)Width);
+                }
+                using (MfTrace.Call("IMFTransform.SetInputType", _mft)) _mft.SetInputType(0, inType, 0);
+            }
+            finally
+            {
+                using (MfTrace.Call("IMFMediaType.Release(input)", inType)) inType.Dispose();
             }
 
             // Re-apply after type negotiation: some drivers reset properties when types are set.
             ApplyCodecSettings(opts, hardware, log: false);
 
-            var info = _mft.GetOutputStreamInfo(0);
+            OutputStreamInfo info;
+            using (MfTrace.Call("IMFTransform.GetOutputStreamInfo", _mft)) info = _mft.GetOutputStreamInfo(0);
             _providesSamples = (info.Flags & (int)OutputStreamInfoFlags.OutputStreamProvidesSamples) != 0;
             _outputBufferSize = Math.Max(info.Size, Width * Height * 3 / 2);
+            if (MfTrace.Enabled) MfTrace.Note($"output stream flags 0x{info.Flags:X}, size {info.Size}: output samples {(_providesSamples ? "the encoder's" : "ours")}");
 
-            _mft.ProcessMessage(TMessageType.MessageCommandFlush, 0);
-            _mft.ProcessMessage(TMessageType.MessageNotifyBeginStreaming, 0);
-            _mft.ProcessMessage(TMessageType.MessageNotifyStartOfStream, 0);
+            using (MfTrace.Call("IMFTransform.ProcessMessage(CommandFlush)", _mft)) _mft.ProcessMessage(TMessageType.MessageCommandFlush, 0);
+            using (MfTrace.Call("IMFTransform.ProcessMessage(NotifyBeginStreaming)", _mft)) _mft.ProcessMessage(TMessageType.MessageNotifyBeginStreaming, 0);
+            using (MfTrace.Call("IMFTransform.ProcessMessage(NotifyStartOfStream)", _mft)) _mft.ProcessMessage(TMessageType.MessageNotifyStartOfStream, 0);
 
             if (IsAsync)
             {
-                _events = _mft.QueryInterface<IMFMediaEventGenerator>();
+                using (MfTrace.Call("QueryInterface(IMFMediaEventGenerator)", _mft)) _events = _mft.QueryInterface<IMFMediaEventGenerator>();
                 _eventThread = new Thread(EventLoop) { IsBackground = true, Name = "mft-events", Priority = ThreadPriority.AboveNormal };
                 _eventThread.Start();
             }
 
             Log.Info("encoder", $"using '{Name}' ({(hardware ? "hardware" : "software")}, {(IsAsync ? "async" : "sync")}) {Width}x{Height}@{_fps} {opts.BitrateKbps} kbps, " +
-                $"frames up to {VbvBits(opts.BitrateKbps) / 8 / 1024} KB{(hardware ? $", quality {QualityVsSpeed}" : "")}");
+                $"frames up to {VbvBits(opts.BitrateKbps) / 8 / 1024} KB{(hardware ? $", quality {QualityVsSpeed}" : "")}, output flags 0x{info.Flags:X}");
         }
         catch
         {
-            _codec?.Dispose();
-            _events?.Dispose();
-            _mft.Dispose();
+            using (MfTrace.Call("ICodecAPI.Release (failed)")) _codec?.Dispose();
+            using (MfTrace.Call("IMFMediaEventGenerator.Release (failed)", _events)) _events?.Dispose();
+            using (MfTrace.Call("IMFTransform.Release (failed)", _mft)) _mft.Dispose();
             throw;
+        }
+        finally
+        {
+            // GetAttributes hands over a reference of its own.
+            if (attrs != null) using (MfTrace.Call("IMFAttributes.Release", attrs)) attrs.Dispose();
         }
     }
 
@@ -323,9 +375,17 @@ public sealed unsafe class MfH264Encoder : IDisposable
     {
         if (_disposed) return false;
         if (IsAsync && !_needInput.Wait(waitMs)) return false;
-        using var buffer = MediaFactory.MFCreateDXGISurfaceBuffer(typeof(ID3D11Texture2D).GUID, nv12, 0, false);
-        try { buffer.CurrentLength = buffer.MaxLength; } catch { }
-        return Submit(buffer, timeHns, forceKeyFrame);
+        IMFMediaBuffer buffer;
+        using (MfTrace.Call("MFCreateDXGISurfaceBuffer", nv12)) buffer = MediaFactory.MFCreateDXGISurfaceBuffer(typeof(ID3D11Texture2D).GUID, nv12, 0, false);
+        try
+        {
+            try { using (MfTrace.Call("IMFMediaBuffer.SetCurrentLength", buffer)) buffer.CurrentLength = buffer.MaxLength; } catch { }
+            return Submit(buffer, timeHns, forceKeyFrame);
+        }
+        finally
+        {
+            using (MfTrace.Call("IMFMediaBuffer.Release(input)", buffer)) buffer.Dispose();
+        }
     }
 
     /// <summary>Submit NV12 bytes (software encoder path).</summary>
@@ -333,38 +393,58 @@ public sealed unsafe class MfH264Encoder : IDisposable
     {
         if (_disposed) return false;
         if (IsAsync && !_needInput.Wait(20)) return false;
-        using var buffer = MediaFactory.MFCreateMemoryBuffer(nv12.Length);
-        buffer.Lock(out var ptr, out _, out _);
-        try { nv12.CopyTo(new Span<byte>((void*)ptr, nv12.Length)); }
-        finally { buffer.Unlock(); }
-        buffer.CurrentLength = nv12.Length;
-        return Submit(buffer, timeHns, forceKeyFrame);
+        IMFMediaBuffer buffer;
+        using (MfTrace.Call("MFCreateMemoryBuffer(input)")) buffer = MediaFactory.MFCreateMemoryBuffer(nv12.Length);
+        try
+        {
+            nint ptr;
+            using (MfTrace.Call("IMFMediaBuffer.Lock", buffer)) buffer.Lock(out ptr, out _, out _);
+            try { nv12.CopyTo(new Span<byte>((void*)ptr, nv12.Length)); }
+            finally { using (MfTrace.Call("IMFMediaBuffer.Unlock", buffer)) buffer.Unlock(); }
+            using (MfTrace.Call("IMFMediaBuffer.SetCurrentLength", buffer)) buffer.CurrentLength = nv12.Length;
+            return Submit(buffer, timeHns, forceKeyFrame);
+        }
+        finally
+        {
+            using (MfTrace.Call("IMFMediaBuffer.Release(input)", buffer)) buffer.Dispose();
+        }
     }
 
     private bool Submit(IMFMediaBuffer buffer, long timeHns, bool forceKeyFrame)
     {
-        using var sample = MediaFactory.MFCreateSample();
-        sample.AddBuffer(buffer);
-        sample.SampleTime = timeHns;
-        sample.SampleDuration = _frameDuration;
-        lock (_mftGate)
+        IMFSample sample;
+        using (MfTrace.Call("MFCreateSample(input)")) sample = MediaFactory.MFCreateSample();
+        try
         {
-            if (forceKeyFrame) _codec?.SetUInt32(CodecApi.AVEncVideoForceKeyFrame, 1);
-            lock (_pending) _pending.Enqueue((timeHns, System.Diagnostics.Stopwatch.GetTimestamp()));
-            try
+            using (MfTrace.Call("IMFSample.AddBuffer + SetSampleTime + SetSampleDuration", sample))
             {
-                if (TraceEvents) Log.Debug("encoder", $"t={System.Diagnostics.Stopwatch.GetTimestamp() / (System.Diagnostics.Stopwatch.Frequency / 1000)} ProcessInput time={timeHns}");
-                _mft.ProcessInput(0, sample, 0);
+                sample.AddBuffer(buffer);
+                sample.SampleTime = timeHns;
+                sample.SampleDuration = _frameDuration;
             }
-            catch (SharpGenException ex) when (ex.ResultCode.Code == MF_E_NOTACCEPTING && !IsAsync)
+            lock (_mftGate)
             {
-                DrainSync();
-                _mft.ProcessInput(0, sample, 0);
+                if (forceKeyFrame) _codec?.SetUInt32(CodecApi.AVEncVideoForceKeyFrame, 1);
+                lock (_pending) _pending.Enqueue((timeHns, System.Diagnostics.Stopwatch.GetTimestamp()));
+                try
+                {
+                    if (TraceEvents) Log.Debug("encoder", $"t={System.Diagnostics.Stopwatch.GetTimestamp() / (System.Diagnostics.Stopwatch.Frequency / 1000)} ProcessInput time={timeHns}");
+                    using (MfTrace.Call("IMFTransform.ProcessInput", sample)) _mft.ProcessInput(0, sample, 0);
+                }
+                catch (SharpGenException ex) when (ex.ResultCode.Code == MF_E_NOTACCEPTING && !IsAsync)
+                {
+                    DrainSync();
+                    using (MfTrace.Call("IMFTransform.ProcessInput (again)", sample)) _mft.ProcessInput(0, sample, 0);
+                }
+                Interlocked.Increment(ref _inFlight);
+                if (!IsAsync) DrainSync();
             }
-            Interlocked.Increment(ref _inFlight);
-            if (!IsAsync) DrainSync();
+            return true;
         }
-        return true;
+        finally
+        {
+            using (MfTrace.Call("IMFSample.Release(input)", sample)) sample.Dispose();
+        }
     }
 
     public void SetBitrate(int kbps)
@@ -385,16 +465,20 @@ public sealed unsafe class MfH264Encoder : IDisposable
             IMFMediaEvent ev;
             try
             {
-                ev = _events!.GetEvent(0);
+                using (MfTrace.Call("IMFMediaEventGenerator.GetEvent", _events)) ev = _events!.GetEvent(0);
             }
             catch (SharpGenException ex)
             {
                 if (ex.ResultCode.Code != MF_E_SHUTDOWN && !_disposed) Log.Warn("encoder", $"GetEvent failed: 0x{ex.ResultCode.Code:X8}");
+                if (MfTrace.Enabled) MfTrace.Note($"GetEvent: 0x{ex.ResultCode.Code:X8}, the event thread leaves");
                 break;
             }
-            using (ev)
+            try
             {
-                switch (ev.EventType)
+                MediaEventTypes type;
+                using (MfTrace.Call("IMFMediaEvent.GetType", ev)) type = ev.EventType;
+                if (MfTrace.Enabled) MfTrace.Note($"event {type}");
+                switch (type)
                 {
                     case MediaEventTypes.TransformNeedInput:
                         if (TraceEvents) Log.Debug("encoder", $"t={System.Diagnostics.Stopwatch.GetTimestamp() / (System.Diagnostics.Stopwatch.Frequency / 1000)} NeedInput");
@@ -402,18 +486,23 @@ public sealed unsafe class MfH264Encoder : IDisposable
                         break;
                     case MediaEventTypes.TransformHaveOutput:
                         if (TraceEvents) Log.Debug("encoder", $"t={System.Diagnostics.Stopwatch.GetTimestamp() / (System.Diagnostics.Stopwatch.Frequency / 1000)} HaveOutput");
-                        // Never once Dispose has begun: it shuts the MFT down under this same lock.
+                        // Never once Dispose has begun to shut it down: that's under this same lock.
                         lock (_mftGate)
                         {
                             if (!_disposed) PullOutput();
                         }
                         break;
                     case MediaEventTypes.TransformDrainComplete:
+                        _drained.Set();
                         break;
                     default:
-                        Log.Debug("encoder", $"MFT event {ev.EventType}");
+                        Log.Debug("encoder", $"MFT event {type}");
                         break;
                 }
+            }
+            finally
+            {
+                using (MfTrace.Call("IMFMediaEvent.Release", ev)) ev.Dispose();
             }
         }
     }
@@ -430,20 +519,27 @@ public sealed unsafe class MfH264Encoder : IDisposable
         IMFMediaBuffer? allocatedBuffer = null;
         if (!_providesSamples)
         {
-            allocated = MediaFactory.MFCreateSample();
-            allocatedBuffer = MediaFactory.MFCreateMemoryBuffer(_outputBufferSize);
-            allocated.AddBuffer(allocatedBuffer);
+            using (MfTrace.Call("MFCreateSample + MFCreateMemoryBuffer + IMFSample.AddBuffer (output)"))
+            {
+                allocated = MediaFactory.MFCreateSample();
+                allocatedBuffer = MediaFactory.MFCreateMemoryBuffer(_outputBufferSize);
+                allocated.AddBuffer(allocatedBuffer);
+            }
         }
         var odb = new OutputDataBuffer { StreamID = 0, Sample = allocated! };
         try
         {
-            var hr = _mft.ProcessOutput(0, 1, ref odb, out _);
+            SharpGen.Runtime.Result hr;
+            using (MfTrace.Call("IMFTransform.ProcessOutput", allocated)) hr = _mft.ProcessOutput(0, 1, ref odb, out _);
+            if (MfTrace.Enabled) MfTrace.Note($"ProcessOutput 0x{hr.Code:X8}, sample {odb.Sample?.NativePointer ?? 0:X}, events {odb.Events?.NativePointer ?? 0:X}");
             if (hr.Code == MF_E_TRANSFORM_NEED_MORE_INPUT) return false;
             if (hr.Code == MF_E_TRANSFORM_STREAM_CHANGE)
             {
                 // Output type renegotiation: accept what the encoder now proposes.
-                using var t = _mft.GetOutputAvailableType(0, 0);
-                _mft.SetOutputType(0, t, 0);
+                IMFMediaType t;
+                using (MfTrace.Call("IMFTransform.GetOutputAvailableType", _mft)) t = _mft.GetOutputAvailableType(0, 0);
+                try { using (MfTrace.Call("IMFTransform.SetOutputType (stream change)", _mft)) _mft.SetOutputType(0, t, 0); }
+                finally { using (MfTrace.Call("IMFMediaType.Release", t)) t.Dispose(); }
                 return true;
             }
             if (hr.Failure)
@@ -453,17 +549,31 @@ public sealed unsafe class MfH264Encoder : IDisposable
             }
             var sample = odb.Sample;
             if (sample == null) return true;
+            // The sample comes back in a new wrapper that holds no reference of its own when it's the one we passed in:
+            // only one the MFT made is released here. (Telling them apart by wrapper released ours twice, here and below.)
+            bool ours = allocated != null && sample.NativePointer == allocated.NativePointer;
             try
             {
                 bool key = false;
-                try { key = sample.GetUInt32(MFSampleExtension_CleanPoint) != 0; } catch { }
-                using var buf = sample.ConvertToContiguousBuffer();
-                buf.Lock(out var ptr, out _, out var len);
+                try { using (MfTrace.Call("IMFSample.GetUINT32(CleanPoint)", sample)) key = sample.GetUInt32(MFSampleExtension_CleanPoint) != 0; } catch { }
                 byte[] data;
-                try { data = new ReadOnlySpan<byte>((void*)ptr, len).ToArray(); }
-                finally { buf.Unlock(); }
+                long time;
+                IMFMediaBuffer buf;
+                using (MfTrace.Call("IMFSample.ConvertToContiguousBuffer", sample)) buf = sample.ConvertToContiguousBuffer();
+                try
+                {
+                    nint ptr;
+                    int len;
+                    using (MfTrace.Call("IMFMediaBuffer.Lock", buf)) buf.Lock(out ptr, out _, out len);
+                    try { data = new ReadOnlySpan<byte>((void*)ptr, len).ToArray(); }
+                    finally { using (MfTrace.Call("IMFMediaBuffer.Unlock", buf)) buf.Unlock(); }
+                    using (MfTrace.Call("IMFSample.GetSampleTime", sample)) time = sample.SampleTime;
+                }
+                finally
+                {
+                    using (MfTrace.Call("IMFMediaBuffer.Release(output)", buf)) buf.Dispose();
+                }
 
-                long time = sample.SampleTime;
                 if (TraceEvents) Log.Debug("encoder", $"output time={time} key={key} bytes={data.Length}");
                 double encMs = 0;
                 lock (_pending)
@@ -479,54 +589,96 @@ public sealed unsafe class MfH264Encoder : IDisposable
                     }
                 }
                 Interlocked.Decrement(ref _inFlight);
-                _onOutput(new EncodedPacket(data, key, time, encMs));
+                // What comes out while it's being stopped (drained) is dropped, as a flush dropped it before.
+                if (!_stopping) _onOutput(new EncodedPacket(data, key, time, encMs));
             }
             finally
             {
-                if (!ReferenceEquals(sample, allocated)) sample.Dispose();
+                if (!ours) using (MfTrace.Call("IMFSample.Release(output)", sample)) sample.Dispose();
             }
             return true;
         }
         finally
         {
-            odb.Events?.Dispose();
-            allocatedBuffer?.Dispose();
-            allocated?.Dispose();
+            if (odb.Events != null) using (MfTrace.Call("IMFCollection.Release(events)", odb.Events)) odb.Events.Dispose();
+            if (allocatedBuffer != null) using (MfTrace.Call("IMFMediaBuffer.Release(ours)", allocatedBuffer)) allocatedBuffer.Dispose();
+            if (allocated != null) using (MfTrace.Call("IMFSample.Release(ours)", allocated)) allocated.Dispose();
         }
     }
 
     /// <summary>
-    /// Stops the encoder, then lets go of it. An async MFT delivers output on its event thread (EventLoop), which pulls
-    /// it under _mftGate: the stream is ended and the MFT shut down under that lock, so the thread is never inside
-    /// ProcessOutput when the MFT goes; the native objects are released only after the thread has left (it leaves on
-    /// MF_E_SHUTDOWN). Shut down outside the lock, or released while the thread was still in GetEvent, the MFT could be
-    /// freed under it (the likely cause of an access violation in ntdll at about one session end in ten with NVIDIA's
-    /// async encoder). If the thread doesn't leave in time, the objects are kept (a leak) rather than freed under it.
+    /// Stops the encoder, then lets go of it, in this order:
+    /// 1. An async MFT first finishes the frames it was given: it's drained, and its event thread pulls out (and drops)
+    ///    what it still makes, until the MFT says it's done (or DrainTimeoutMs), so nothing is mid-encode when it's shut
+    ///    down and freed. (Stopping NVIDIA's with frames still in flight is when this process crashed in ntdll, at the
+    ///    end of a session and in the teardown test.)
+    /// 2. Under _mftGate, which the event thread holds while it pulls output: the stream is ended and the MFT shut down,
+    ///    so the thread is never inside ProcessOutput meanwhile; it leaves on MF_E_SHUTDOWN.
+    /// 3. The native objects are released only after that thread has left. If it doesn't leave in time, they're kept
+    ///    (a leak) rather than freed under it.
     /// </summary>
     public void Dispose()
     {
         lock (_mftGate)
         {
-            if (_disposed) return;
+            if (_stopping) return;
+            _stopping = true;
+        }
+        if (MfTrace.Enabled) MfTrace.Note($"stopping '{Name}' with {InFlight} frame(s) in flight{(SkipDrain ? ", not draining" : "")}");
+        bool endOfStream = false;
+        if (IsAsync && _eventThread != null && !SkipDrain)
+        {
+            bool draining = false;
+            lock (_mftGate)
+            {
+                try
+                {
+                    using (MfTrace.Call("IMFTransform.ProcessMessage(NotifyEndOfStream)", _mft)) _mft.ProcessMessage(TMessageType.MessageNotifyEndOfStream, 0);
+                    endOfStream = true;
+                    using (MfTrace.Call("IMFTransform.ProcessMessage(CommandDrain)", _mft)) _mft.ProcessMessage(TMessageType.MessageCommandDrain, 0);
+                    draining = true;
+                }
+                catch (Exception ex)
+                {
+                    Log.Debug("encoder", $"{Name}: couldn't drain ({ex.Message})");
+                }
+            }
+            if (draining)
+            {
+                bool drained;
+                using (MfTrace.Call("wait for TransformDrainComplete")) drained = _drained.Wait(DrainTimeoutMs);
+                if (!drained) Log.Debug("encoder", $"{Name}: still not drained after {DrainTimeoutMs} ms; stopping it anyway");
+            }
+        }
+        lock (_mftGate)
+        {
             _disposed = true;
             try
             {
-                _mft.ProcessMessage(TMessageType.MessageNotifyEndOfStream, 0);
-                _mft.ProcessMessage(TMessageType.MessageCommandFlush, 0);
+                if (!endOfStream) using (MfTrace.Call("IMFTransform.ProcessMessage(NotifyEndOfStream)", _mft)) _mft.ProcessMessage(TMessageType.MessageNotifyEndOfStream, 0);
+                using (MfTrace.Call("IMFTransform.ProcessMessage(CommandFlush)", _mft)) _mft.ProcessMessage(TMessageType.MessageCommandFlush, 0);
+                using (MfTrace.Call("IMFTransform.ProcessMessage(NotifyEndStreaming)", _mft)) _mft.ProcessMessage(TMessageType.MessageNotifyEndStreaming, 0);
             }
             catch { }
-            try { _activate?.ShutdownObject(); } catch { }
+            try { using (MfTrace.Call("IMFActivate.ShutdownObject", _activate)) _activate?.ShutdownObject(); } catch { }
         }
         _needInput.Release(64);
-        if (_eventThread != null && !_eventThread.Join(5000))
+        if (_eventThread != null)
         {
-            Log.Warn("encoder", $"{Name}: its event thread didn't stop; keeping the encoder's objects rather than freeing them under it");
-            return;
+            bool left;
+            using (MfTrace.Call("join mft-events")) left = _eventThread.Join(5000);
+            if (!left)
+            {
+                Log.Warn("encoder", $"{Name}: its event thread didn't stop; keeping the encoder's objects rather than freeing them under it");
+                return;
+            }
         }
-        _codec?.Dispose();
-        _events?.Dispose();
-        _mft.Dispose();
-        _activate?.Dispose();
+        using (MfTrace.Call("ICodecAPI.Release")) _codec?.Dispose();
+        using (MfTrace.Call("IMFMediaEventGenerator.Release", _events)) _events?.Dispose();
+        using (MfTrace.Call("IMFTransform.Release", _mft)) _mft.Dispose();
+        using (MfTrace.Call("IMFActivate.Release", _activate)) _activate?.Dispose();
         _needInput.Dispose();
+        _drained.Dispose();
+        if (MfTrace.Enabled) MfTrace.Note($"stopped '{Name}'");
     }
 }

@@ -3,13 +3,21 @@ using Headroom.Host.Video;
 using Vortice.DXGI;
 
 // A hardware encoder that works asynchronously (NVIDIA's, among others) hands over its output on its own event thread.
-// Stopping one with frames still in flight could free it under that thread (the likely cause of an access violation in
-// ntdll at about one session end in ten). This stops one again and again with frames in flight, so a regression is
-// likelier to crash here than now and then in use, and checks that nothing comes out of an encoder once it's stopped.
-// It needs an asynchronous hardware encoder; elsewhere (CI runners) it says so and skips.
+// Fed frames back to back and stopped with some still in flight, NVIDIA's crashed this process (an access violation in
+// ntdll, the same as at the end of a session) every few rounds. This does that again and again, and checks that nothing
+// comes out of an encoder once it's stopped. It needs an asynchronous hardware encoder; elsewhere (CI runners) it says
+// so and skips. It traces every Media Foundation and D3D11 call to stderr (MfTrace; HEADROOM_TRACE_MF=0 turns that
+// off), so the last lines before a crash name the call and the thread.
 internal static class EncoderTeardownTest
 {
     internal static void Run()
+    {
+        MfTrace.Enabled = Environment.GetEnvironmentVariable("HEADROOM_TRACE_MF") != "0";
+        try { RunAll(); }
+        finally { MfTrace.Enabled = false; }
+    }
+
+    private static void RunAll()
     {
         var gpus = new List<GpuDevice>();
         try
@@ -23,7 +31,10 @@ internal static class EncoderTeardownTest
                     adapter.Dispose();
                     continue;
                 }
-                try { gpus.Add(GpuDevice.Get(adapter)); }
+                try
+                {
+                    using (MfTrace.Call($"GpuDevice.Get(adapter {a})")) gpus.Add(GpuDevice.Get(adapter));
+                }
                 catch (Exception ex) { Console.WriteLine($"Encoder teardown: GPU {a} isn't usable ({ex.Message})"); }
             }
         }
@@ -46,6 +57,8 @@ internal static class EncoderTeardownTest
         string name = "";
         for (int round = 0; round < Rounds; round++)
         {
+            MfTrace.Round = round;
+            MfTrace.Note($"round {round}: start");
             bool stopped = false;
             MfH264Encoder encoder;
             try
@@ -75,13 +88,19 @@ internal static class EncoderTeardownTest
             {
                 // A few frames, the last ones still being encoded when it stops, as at the end of a session.
                 for (int frame = 0; frame < 4 + round % 6; frame++)
+                {
+                    MfTrace.Note($"round {round}: frame {frame}");
                     encoder.EncodeTexture(textures[frame % textures.Length], frame * 166_667L, frame == 0, 100);
+                }
             }
             finally
             {
+                MfTrace.Note($"round {round}: stop");
                 encoder.Dispose();
                 Volatile.Write(ref stopped, true);
-                foreach (var texture in textures) texture.Dispose();
+                foreach (var texture in textures)
+                    using (MfTrace.Call("ID3D11Texture2D.Release", texture)) texture.Dispose();
+                MfTrace.Note($"round {round}: converter released next");
             }
         }
         Thread.Sleep(100); // time for anything still to come out of the last one

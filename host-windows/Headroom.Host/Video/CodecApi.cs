@@ -68,37 +68,39 @@ public sealed unsafe class CodecApi : IDisposable
     public bool IsSupported(Guid api)
     {
         if (_ptr == 0) return false;
-        return IsSupportedFn(_ptr, &api) == 0;
+        using (MfTrace.Call(MfTrace.Enabled ? $"ICodecAPI.IsSupported {api}" : "")) return IsSupportedFn(_ptr, &api) == 0;
     }
 
     public int SetUInt32(Guid api, uint value)
     {
         var v = new Variant { vt = VT_UI4, ui4 = value };
-        return SetValueFn(_ptr, &api, &v);
+        using (MfTrace.Call(MfTrace.Enabled ? $"ICodecAPI.SetValue {api} = {value}" : "")) return SetValueFn(_ptr, &api, &v);
     }
 
     public int SetUInt64(Guid api, ulong value)
     {
         var v = new Variant { vt = VT_UI8, ui8 = value };
-        return SetValueFn(_ptr, &api, &v);
+        using (MfTrace.Call(MfTrace.Enabled ? $"ICodecAPI.SetValue {api} = {value}" : "")) return SetValueFn(_ptr, &api, &v);
     }
 
     public int SetBool(Guid api, bool value)
     {
         var v = new Variant { vt = VT_BOOL, boolVal = value ? (short)-1 : (short)0 };
-        return SetValueFn(_ptr, &api, &v);
+        using (MfTrace.Call(MfTrace.Enabled ? $"ICodecAPI.SetValue {api} = {value}" : "")) return SetValueFn(_ptr, &api, &v);
     }
 
     public uint? GetUInt32(Guid api)
     {
         var v = new Variant();
-        if (GetValueFn(_ptr, &api, &v) != 0) return null;
+        int hr;
+        using (MfTrace.Call(MfTrace.Enabled ? $"ICodecAPI.GetValue {api}" : "")) hr = GetValueFn(_ptr, &api, &v);
+        if (hr != 0) return null;
         return v.vt switch { VT_UI4 => v.ui4, VT_UI8 => (uint)v.ui8, VT_BOOL => v.boolVal != 0 ? 1u : 0u, _ => null };
     }
 
     public void Dispose()
     {
-        if (_ptr != 0) Marshal.Release(_ptr);
+        if (_ptr != 0) using (MfTrace.Call(MfTrace.Enabled ? $"ICodecAPI.Release {_ptr:X}" : "")) Marshal.Release(_ptr);
         _ptr = 0;
     }
 }

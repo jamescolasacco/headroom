@@ -43,30 +43,38 @@ public sealed class VideoConverter : IDisposable
             OutputHeight = (uint)outputHeight,
             Usage = VideoUsage.OptimalQuality,
         };
-        gpu.Lock();
+        using (MfTrace.Call("ID3D11Multithread.Enter")) gpu.Lock();
         try
         {
-            _enumerator = gpu.VideoDevice.CreateVideoProcessorEnumerator(content);
-            _processor = gpu.VideoDevice.CreateVideoProcessor(_enumerator, 0);
+            using (MfTrace.Call("ID3D11VideoDevice.CreateVideoProcessorEnumerator")) _enumerator = gpu.VideoDevice.CreateVideoProcessorEnumerator(content);
+            using (MfTrace.Call("ID3D11VideoDevice.CreateVideoProcessor")) _processor = gpu.VideoDevice.CreateVideoProcessor(_enumerator, 0);
 
             var vc = gpu.VideoContext;
-            using var vc1 = vc.QueryInterfaceOrNull<ID3D11VideoContext1>();
-            if (vc1 != null)
+            ID3D11VideoContext1? vc1;
+            using (MfTrace.Call("QueryInterface(ID3D11VideoContext1)")) vc1 = vc.QueryInterfaceOrNull<ID3D11VideoContext1>();
+            try
             {
-                vc1.VideoProcessorSetStreamColorSpace1(_processor, 0, ColorSpaceType.RgbFullG22NoneP709);
-                vc1.VideoProcessorSetOutputColorSpace1(_processor, fullRange ? ColorSpaceType.YcbcrFullG22LeftP709 : ColorSpaceType.YcbcrStudioG22LeftP709);
+                if (vc1 != null)
+                {
+                    using (MfTrace.Call("ID3D11VideoContext1.VideoProcessorSetStreamColorSpace1")) vc1.VideoProcessorSetStreamColorSpace1(_processor, 0, ColorSpaceType.RgbFullG22NoneP709);
+                    using (MfTrace.Call("ID3D11VideoContext1.VideoProcessorSetOutputColorSpace1")) vc1.VideoProcessorSetOutputColorSpace1(_processor, fullRange ? ColorSpaceType.YcbcrFullG22LeftP709 : ColorSpaceType.YcbcrStudioG22LeftP709);
+                }
+                else
+                {
+                    using (MfTrace.Call("ID3D11VideoContext.VideoProcessorSetStreamColorSpace")) vc.VideoProcessorSetStreamColorSpace(_processor, 0, new VideoProcessorColorSpace { Usage = 0, RGB_Range = 0, YCbCr_Matrix = 1, Nominal_Range = 2 });
+                    using (MfTrace.Call("ID3D11VideoContext.VideoProcessorSetOutputColorSpace")) vc.VideoProcessorSetOutputColorSpace(_processor, new VideoProcessorColorSpace { Usage = 0, RGB_Range = 0, YCbCr_Matrix = 1, Nominal_Range = fullRange ? 2u : 1u });
+                }
             }
-            else
+            finally
             {
-                vc.VideoProcessorSetStreamColorSpace(_processor, 0, new VideoProcessorColorSpace { Usage = 0, RGB_Range = 0, YCbCr_Matrix = 1, Nominal_Range = 2 });
-                vc.VideoProcessorSetOutputColorSpace(_processor, new VideoProcessorColorSpace { Usage = 0, RGB_Range = 0, YCbCr_Matrix = 1, Nominal_Range = fullRange ? 2u : 1u });
+                if (vc1 != null) using (MfTrace.Call("ID3D11VideoContext1.Release")) vc1.Dispose();
             }
-            vc.VideoProcessorSetStreamFrameFormat(_processor, 0, VideoFrameFormat.Progressive);
+            using (MfTrace.Call("ID3D11VideoContext.VideoProcessorSetStreamFrameFormat")) vc.VideoProcessorSetStreamFrameFormat(_processor, 0, VideoFrameFormat.Progressive);
             // No driver "enhancements" (denoise, edge enhancement, auto contrast) — they smear text.
-            vc.VideoProcessorSetStreamAutoProcessingMode(_processor, 0, false);
-            vc.VideoProcessorSetStreamSourceRect(_processor, 0, true, new RawRect(0, 0, inputWidth, inputHeight));
-            vc.VideoProcessorSetStreamDestRect(_processor, 0, true, new RawRect(0, 0, outputWidth, outputHeight));
-            vc.VideoProcessorSetOutputTargetRect(_processor, true, new RawRect(0, 0, outputWidth, outputHeight));
+            using (MfTrace.Call("ID3D11VideoContext.VideoProcessorSetStreamAutoProcessingMode")) vc.VideoProcessorSetStreamAutoProcessingMode(_processor, 0, false);
+            using (MfTrace.Call("ID3D11VideoContext.VideoProcessorSetStreamSourceRect")) vc.VideoProcessorSetStreamSourceRect(_processor, 0, true, new RawRect(0, 0, inputWidth, inputHeight));
+            using (MfTrace.Call("ID3D11VideoContext.VideoProcessorSetStreamDestRect")) vc.VideoProcessorSetStreamDestRect(_processor, 0, true, new RawRect(0, 0, outputWidth, outputHeight));
+            using (MfTrace.Call("ID3D11VideoContext.VideoProcessorSetOutputTargetRect")) vc.VideoProcessorSetOutputTargetRect(_processor, true, new RawRect(0, 0, outputWidth, outputHeight));
             if (rotation != 0)
             {
                 // Duplication hands us the surface in scan-out orientation; rotate it back to desktop orientation.
@@ -77,19 +85,19 @@ public sealed class VideoConverter : IDisposable
                     270 => VideoProcessorRotation.Rotation270,
                     _ => VideoProcessorRotation.Identity,
                 };
-                vc.VideoProcessorSetStreamRotation(_processor, 0, true, rot);
+                using (MfTrace.Call("ID3D11VideoContext.VideoProcessorSetStreamRotation")) vc.VideoProcessorSetStreamRotation(_processor, 0, true, rot);
             }
         }
-        finally { gpu.Unlock(); }
+        finally { using (MfTrace.Call("ID3D11Multithread.Leave")) gpu.Unlock(); }
         Log.Debug("convert", $"video processor {inputWidth}x{inputHeight} -> {outputWidth}x{outputHeight} NV12 rot={rotation} fullRange={fullRange}");
     }
 
     public ID3D11Texture2D CreateOutputTexture(bool forEncoder)
     {
-        _gpu.Lock();
+        using (MfTrace.Call("ID3D11Multithread.Enter")) _gpu.Lock();
         try
         {
-            return _gpu.Device.CreateTexture2D(new Texture2DDescription
+            using (MfTrace.Call("ID3D11Device.CreateTexture2D(NV12)")) return _gpu.Device.CreateTexture2D(new Texture2DDescription
             {
                 Width = (uint)OutputWidth,
                 Height = (uint)OutputHeight,
@@ -103,7 +111,7 @@ public sealed class VideoConverter : IDisposable
                 MiscFlags = ResourceOptionFlags.None,
             });
         }
-        finally { _gpu.Unlock(); }
+        finally { using (MfTrace.Call("ID3D11Multithread.Leave")) _gpu.Unlock(); }
     }
 
     public void Convert(ID3D11Texture2D input, ID3D11Texture2D output)
@@ -148,11 +156,11 @@ public sealed class VideoConverter : IDisposable
 
     public void Dispose()
     {
-        foreach (var v in _inputViews.Values) v.Dispose();
-        foreach (var v in _outputViews.Values) v.Dispose();
+        foreach (var v in _inputViews.Values) using (MfTrace.Call("ID3D11VideoProcessorInputView.Release", v)) v.Dispose();
+        foreach (var v in _outputViews.Values) using (MfTrace.Call("ID3D11VideoProcessorOutputView.Release", v)) v.Dispose();
         _inputViews.Clear();
         _outputViews.Clear();
-        _processor.Dispose();
-        _enumerator.Dispose();
+        using (MfTrace.Call("ID3D11VideoProcessor.Release", _processor)) _processor.Dispose();
+        using (MfTrace.Call("ID3D11VideoProcessorEnumerator.Release", _enumerator)) _enumerator.Dispose();
     }
 }
