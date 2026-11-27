@@ -1,5 +1,17 @@
 Remote desktop for your own computers, and quick help with a code: **Headroom Server** on the computer you want to reach; **Headroom Viewer**, any browser, or an iPhone/iPad on the device you use.
 
+## New in 0.4.13: audio priority for music
+
+- **Audio priority.** Settings → Audio priority sends the computer's sound ahead of the picture, so a busy screen or a slow connection doesn't break it up. Your device holds a steady reserve of sound and absorbs clock drift without skipping. The picture isn't delayed to match it.
+- **Lossless or compressed.** With audio priority on, Sound quality offers Compressed (510 kb/s, the default) or Lossless: 24-bit, exactly as the computer plays it, about 2.3 Mb/s. When the connection can't carry your choice, the sound steps down instead of breaking up, and compressed sound climbs back to full quality as the connection recovers. The line under these settings shows the quality, the delay and any dropouts. Measured with constant screen changes over simulated connections from a home network down to 2 Mb/s, cellular freezes included: no dropouts with Compressed, where 0.4.12 dropped out up to 43 times. Lossless arrives bit for bit, and on a connection too slow for it switches to Compressed within two seconds.
+- **Deeper bass from a Mac.** Headroom Server on a Mac used macOS's own sound encoder, which cuts the bass below about 60 Hz: a 20 Hz tone came out 19 dB quieter, in every session. It now uses libopus, flat down to 20 Hz.
+- **Windows: no crash when a session ends.** On PCs with NVIDIA graphics, Headroom Server could crash at the end of a session, when the video encoder was shut down with frames still in it. It now finishes them first.
+- **The phone keyboard after switching apps.** Typing follows the keyboard you can see: if it went away while you switched apps or locked the phone, the typing bar closes, and one tap on Keyboard brings it back. Sticky modifiers clear when you leave, and View only sends nothing you type.
+- **Keyboard and trackpad.** A trackpad tap clicks where the pointer is drawn, and a reconnect lets go of a drag left held. Fixed: a key stuck after ⌘C then C, a quick ⌘V, ⌘⇧Z with Win held, a stray Alt, Num Lock on PCs, JIS keyboards on Macs, typing after closing a panel, and input-method text sent twice.
+- **Files, clipboard and sessions.** Turning files off stops uploads in progress, and the page says which files failed. A clipboard over 4 MB isn't synced, instead of ending the session, and an empty remote clipboard no longer wipes yours. Stop server also turns away waiting guests, the Sound setting reaches sessions already running, and a failed update starts Headroom Server again.
+
+**Updating:** both apps update themselves (**Restart to update**). Audio priority needs 0.4.13 at both ends: Headroom Server on the computer the sound comes from, and Headroom Viewer or the website where you listen. On your own Headroom server, `git pull` and run `tools/install-account-server-linux.sh` again for the website's part.
+
 ## New in 0.4.12
 
 - **Pinch from a Mac or PC trackpad to zoom the Windows app under the pointer.** Settings → Pinch to zoom also offers Two-finger touch for Windows apps that use native touch gestures, and Viewer to magnify any remote screen. Touchscreens still magnify the viewer by default.
