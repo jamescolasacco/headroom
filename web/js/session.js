@@ -97,6 +97,7 @@ export class Session {
     this.cursor = new CursorRenderer(layer, $('remote-cursor'), this.viewport);
     this.presenter = new VideoPresenter({ video: $('video'), canvas: $('canvas'), preference: this.prefs.renderer });
     this.conn = new Connection(this.host);
+    this.audio.setSource(this.conn);
     this.clipboard = new ClipboardSync(this.conn, () => !this.disposed && this.conn.isOpen && this.permissions.clipboard);
     this.mods = new StickyModifiers(null);
 
@@ -187,6 +188,7 @@ export class Session {
 
     await this.presenter.start();
     if (this.disposed) return;
+    this.presenter.receiveFrom(this.conn); // (the socket's worker, if it has one, feeds the video worker itself)
     this.keyboard.attach();
     this.mouse.attach();
     this.touch.attach();

@@ -1,6 +1,7 @@
 // Packets -> the AudioWorklet, in the order they came: 24-bit PCM and silence go straight through (the worklet decodes
 // PCM itself), Opus through WebCodecs' AudioDecoder first. A packet still decoding holds the ones behind it, so a
-// silence or PCM packet never overtakes the Opus before it. Runs on the main thread, or in decode-worker.js.
+// silence or PCM packet never overtakes the Opus before it. Runs on the main thread, in decode-worker.js, or in the
+// connection's socket worker (socket-core.js).
 export const OPUS_CONFIG = { codec: 'opus', sampleRate: 48000, numberOfChannels: 2 };
 /** Both hosts' Opus lookahead (libopus restricted low delay on the Mac, Concentus on Windows), in frames. */
 export const OPUS_LOOKAHEAD = 120;

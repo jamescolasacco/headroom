@@ -1,10 +1,11 @@
 // Offline-capable app shell. Network-first so an update is picked up immediately; the cache lets the home-screen
 // app open when the network is flaky.
 const PREFIX = 'headroom-shell-';
-const CACHE = PREFIX + 'v15';
+const CACHE = PREFIX + 'v16';
 const SHELL = [
   '/', '/index.html', '/manifest.webmanifest', '/css/app.css',
   '/js/app.js', '/js/account.js', '/js/config.js', '/js/qr.js', '/js/api.js', '/js/store.js', '/js/platform.js', '/js/protocol.js', '/js/connection.js',
+  '/js/socket-worker.js', '/js/socket-core.js',
   '/js/session.js', '/js/viewport.js', '/js/cursor.js', '/js/clipboard.js',
   '/js/video/presenter.js', '/js/video/decoder-core.js', '/js/video/video-worker.js',
   '/js/audio/player.js', '/js/audio/worklet.js', '/js/audio/playout.js', '/js/audio/feed.js', '/js/audio/decode-worker.js',

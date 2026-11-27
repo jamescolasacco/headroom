@@ -136,20 +136,23 @@ async function mark() {
   await evaluate('window.__sent.length = 0');
 }
 
-// Packets the page sent (decoded in the page): ['at', nx, ny], ['button', b, down], ['wheel', dx, dy].
+// Packets the page sent (decoded in the page): ['at', nx, ny], ['button', b, down], ['wheel', dx, dy]. On its own
+// socket, or (Chromium: web/js/connection.js) handed to the socket's worker as {type: 'send', data}.
 const sent = [];
 const SEND_HOOK = `(() => {
   window.__sent = [];
-  const send = WebSocket.prototype.send;
-  WebSocket.prototype.send = function (data) {
+  const note = data => {
     if (data instanceof ArrayBuffer && data.byteLength) {
       const v = new DataView(data), k = v.getUint8(0), t = performance.now();
       if (k === 0x10) window.__sent.push([t, 'at', v.getFloat32(1, true), v.getFloat32(5, true)]);
       else if (k === 0x12) window.__sent.push([t, 'button', v.getUint8(1), v.getUint8(2)]);
       else if (k === 0x13) window.__sent.push([t, 'wheel', v.getInt16(1, true), v.getInt16(3, true)]);
     }
-    return send.call(this, data);
   };
+  const send = WebSocket.prototype.send;
+  WebSocket.prototype.send = function (data) { note(data); return send.call(this, data); };
+  const post = Worker.prototype.postMessage;
+  Worker.prototype.postMessage = function (m, ...rest) { if (m && m.type === 'send') note(m.data); return post.call(this, m, ...rest); };
 })();`;
 
 // ------------------------------------------------------------------------------------------- scenarios
@@ -390,6 +393,9 @@ try {
     await tap(p.x, p.y); await sleep(110); await tap(p.x + 4, p.y - 3);
     r = await settle(700);
     assert.deepEqual(r.presses, [['left', 1], ['left', 2]]);
+    // A drag within a second of that click would start a few points along (touch.js CLICK_APART_MS): settle() alone
+    // can take 700 or 1050 ms, by when the double tap's held click is let go.
+    await sleep(500);
     await mark();
     const to = { x: p.x + 70, y: p.y + 20 };
     await slide(p.x, p.y, to.x - p.x, to.y - p.y);

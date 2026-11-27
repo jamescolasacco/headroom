@@ -73,4 +73,38 @@ export function parseVideoHeader(view) {
   };
 }
 
+/** `0x03` audio: [0x03][u8 codec: 0 Opus, 1 PCM s24le, 2 silence][u16 0][u32 seq][i64 host µs][payload]. */
+export function parseAudio(data, view = new DataView(data)) {
+  return { codec: view.getUint8(1), seq: view.getUint32(4, true), timeUs: Number(view.getBigInt64(8, true)), data: new Uint8Array(data, 16) };
+}
+
+/** Puts `0x01` video fragments back together: push() returns the whole frame once its last fragment is in. */
+export class FrameAssembler {
+  constructor(now = () => performance.now()) {
+    this.now = now;
+    this.frame = null; // { frameId, epoch, buf, received, key, captureUs, encodeMs, firstAt }
+  }
+
+  reset() { this.frame = null; }
+
+  /** One fragment; the frame { frameId, epoch, key, data, captureUs, encodeMs, receiveMs } on its last, else null. */
+  push(data, view = new DataView(data)) {
+    const h = parseVideoHeader(view);
+    const payload = new Uint8Array(data, VIDEO_HEADER);
+    let a = this.frame;
+    if (h.flags & VF.FIRST) {
+      a = this.frame = {
+        frameId: h.frameId, epoch: h.epoch, buf: new Uint8Array(h.total), received: 0, key: (h.flags & VF.KEY) !== 0,
+        captureUs: h.captureUs, encodeMs: h.encodeMs, firstAt: this.now(),
+      };
+    }
+    if (!a || a.frameId !== h.frameId) return null; // missed the first fragment (shouldn't happen on TCP)
+    a.buf.set(payload, h.offset);
+    a.received += payload.length;
+    if (!(h.flags & VF.LAST)) return null;
+    this.frame = null;
+    return { frameId: a.frameId, epoch: a.epoch, key: a.key, data: a.buf, captureUs: a.captureUs, encodeMs: a.encodeMs, receiveMs: this.now() - a.firstAt };
+  }
+}
+
 function clamp16(v) { return Math.max(-32768, Math.min(32767, Math.round(v))); }

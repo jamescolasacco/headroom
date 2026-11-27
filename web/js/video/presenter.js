@@ -2,7 +2,9 @@
 //   Safari 18+:  worker VideoDecoder -> VideoTrackGenerator -> <video>   (drawImage(VideoFrame) is slow in WebKit)
 //   Chromium/FF: worker VideoDecoder -> OffscreenCanvas 2D               (off-main-thread, low latency)
 //   fallback:    main-thread VideoDecoder -> <canvas>
-import { DecoderCore } from './decoder-core.js';
+// With the connection's socket in a worker (connection.js), the frames and their configs go from there straight to
+// the video worker (receiveFrom): configure() and frame() then only keep the numbers.
+import { DecoderCore, configMessage } from './decoder-core.js';
 import { isWebKit } from '../platform.js';
 
 export class VideoPresenter extends EventTarget {
@@ -106,24 +108,30 @@ export class VideoPresenter extends EventTarget {
     }
   }
 
+  /**
+   * Frames from the connection's socket worker (connection.js routeVideo) go straight to the video worker, in order
+   * with the video-config that starts each epoch, whatever this thread is doing.
+   */
+  receiveFrom(conn) {
+    if (!this.worker || this.routed || this.closed || typeof MessageChannel === 'undefined' || !conn?.offMain) return;
+    const ch = new MessageChannel();
+    this.worker.postMessage({ type: 'port', port: ch.port1 }, [ch.port1]);
+    this.routed = conn.routeVideo(ch.port2, { optimizeForLatency: !isWebKit, onLost: () => { this.routed = false; } });
+  }
+
   configure(cfg) {
     // cfg from host: { epoch, codec, description (base64), width, height, ... }
-    const desc = Uint8Array.from(atob(cfg.description), c => c.charCodeAt(0));
     this.width = cfg.width;
     this.height = cfg.height;
     this.config = cfg;
-    const msg = {
-      type: 'config', epoch: cfg.epoch, codec: cfg.codec, description: desc.buffer,
-      width: cfg.width, height: cfg.height,
-      // optimizeForLatency is honoured by Chromium; on WebKit it caused smearing on iOS 27 (reported),
-      // and the host's SPS already declares zero reordering, which is what really removes buffering.
-      optimizeForLatency: !isWebKit,
-    };
+    if (this.routed) return; // the socket's worker gave it to the video worker
+    const msg = configMessage(cfg, !isWebKit);
     if (this.worker) this.worker.postMessage(msg, [msg.description]);
     else this.core?.configure(msg);
   }
 
   frame(f) {
+    if (!f.data) return; // routed: already with the video worker
     // Timestamps only need to be monotonic for the decoder: use the host capture clock (µs).
     const msg = { type: 'chunk', epoch: f.epoch, frameId: f.frameId, key: f.key, data: f.data.buffer, ts: f.captureUs };
     if (this.worker) this.worker.postMessage(msg, [msg.data]);

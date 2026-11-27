@@ -1,11 +1,132 @@
 // One viewer connection to a host over WSS, with automatic reconnect.
-import { H2C, VF, VIDEO_HEADER, parseVideoHeader, frameAck } from './protocol.js';
-import { deviceLabel, platformId } from './platform.js';
+//
+// Where it helps, the socket itself runs in a worker (socket-worker.js, socket-core.js) and this is its proxy: the same
+// events, sendJson/sendBinary, buffered and reconnects. Chromium delivers a worker's socket messages on the worker's
+// own thread, so sound and pictures go from there straight to the player's worklet and the video worker (routeAudio,
+// routeVideo), frames are acked there, and a busy page (sheets, layout, GC) can't hold any of it up. WebKit (Safari,
+// every iOS browser, the Mac Viewer) passes a worker's socket messages through the page's main thread all the same
+// (measured: a 500 ms main-thread stall silences a worker's socket for as long), so there the socket stays here, as it
+// always was. globalThis.__headroomSocketWorker = true / false overrides the choice (tests).
+import { H2C, FrameAssembler, frameAck, parseAudio } from './protocol.js';
+import { deviceLabel, platformId, isWebKit } from './platform.js';
 
 // An accepted guest can come back after a drop for 2 minutes from when the computer notices it
 // (SupportService.resumeGrace), which can be 20 s late (a connection that went silent). After that, trying again only
 // says "Can't reach" forever: the session has ended.
 export const GUEST_RESUME_MS = 150_000;
+
+const OPEN = 1, CLOSING = 2, CLOSED = 3;
+
+function socketWorkerWanted() {
+  const o = globalThis.__headroomSocketWorker;
+  if (typeof o === 'boolean') return o;
+  return !isWebKit && typeof Worker === 'function' && typeof MessageChannel === 'function';
+}
+
+/** The socket worker, one per Connection: its sockets by id and the messages that aren't any socket's. */
+class SocketHub {
+  constructor({ onFail, onNote }) {
+    this.worker = new Worker(new URL('./socket-worker.js', import.meta.url), { type: 'module' });
+    this.sockets = new Map();
+    this.nextId = 1;
+    this.ready = false;
+    this.failed = false;
+    this.onFail = onFail;
+    this.onNote = onNote;
+    this.worker.onmessage = e => this._receive(e.data);
+    this.worker.onerror = e => {
+      // Before it says it's ready, an error means it couldn't start (no module workers, or not served): no worker.
+      if (!this.ready) { e?.preventDefault?.(); this._fail(); } else console.warn('[conn] socket worker:', e?.message || e);
+    };
+    this.readyTimer = setTimeout(() => { if (!this.ready) this._fail(); }, 6000);
+  }
+
+  post(m, transfer = []) {
+    if (!this.failed) this.worker.postMessage(m, transfer);
+  }
+
+  _receive(m) {
+    if (this.failed || !m) return;
+    if (m.type === 'ready') { this.ready = true; clearTimeout(this.readyTimer); return; }
+    if (m.id != null) { this.sockets.get(m.id)?._event(m); return; }
+    this.onNote?.(m);
+  }
+
+  /** It never started: its sockets close (the connection tries again, with a socket of its own). */
+  _fail() {
+    if (this.failed) return;
+    this.failed = true;
+    clearTimeout(this.readyTimer);
+    try { this.worker.terminate(); } catch { }
+    for (const s of [...this.sockets.values()]) s._closed({ code: 1006, reason: 'socket worker unavailable', wasClean: false });
+    this.onFail?.();
+  }
+
+  dispose() {
+    clearTimeout(this.readyTimer);
+    if (this.failed) return;
+    this.post({ type: 'dispose' }); // it lets its sockets finish closing, then goes
+    this.failed = true;
+    const worker = this.worker;
+    setTimeout(() => { try { worker.terminate(); } catch { } }, 5000);
+  }
+}
+
+/** A socket in the hub's worker, with as much of the WebSocket interface as Connection uses. */
+class WorkerSocket {
+  constructor(hub, url) {
+    this.hub = hub;
+    this.id = hub.nextId++;
+    this.url = url;
+    this.readyState = 0;
+    this.bufferedAmount = 0;
+    this.binaryType = 'arraybuffer';
+    this.onopen = this.onmessage = this.onerror = this.onclose = null;
+    this.onframe = this.onaudio = this.ontick = null; // what the worker took care of
+    hub.sockets.set(this.id, this);
+    hub.post({ type: 'open', id: this.id, url });
+  }
+
+  send(data) {
+    if (this.readyState === OPEN) this.hub.post({ type: 'send', id: this.id, data });
+  }
+
+  close(code, reason) {
+    if (this.readyState >= CLOSING) return;
+    this.readyState = CLOSING;
+    this.hub.post({ type: 'close', id: this.id, code, reason });
+    // The worker says when it's closed; if it can't, closed anyway.
+    this._closeTimer = setTimeout(() => this._closed({ code: 1006, reason: '', wasClean: false }), 3000);
+  }
+
+  _closed(ev) {
+    if (this.readyState === CLOSED) return;
+    clearTimeout(this._closeTimer);
+    this.readyState = CLOSED;
+    this.hub.sockets.delete(this.id);
+    this.onclose?.(ev);
+  }
+
+  _event(m) {
+    switch (m.type) {
+      case 'open':
+        if (this.readyState !== 0) return; // closed before it opened
+        this.readyState = OPEN;
+        this.onopen?.({});
+        break;
+      case 'error': this.onerror?.({}); break;
+      case 'close': this._closed({ code: m.code, reason: m.reason || '', wasClean: !!m.wasClean }); break;
+      // A socket that's closing delivers nothing more (as a WebSocket).
+      case 'message': if (this.readyState === OPEN) this.onmessage?.({ data: m.data, counted: true }); break;
+      case 'frame': if (this.readyState === OPEN) this.onframe?.(m); break;
+      case 'audio': if (this.readyState === OPEN) this.onaudio?.(m); break;
+      case 'tick':
+        this.bufferedAmount = m.buffered || 0;
+        if (this.readyState === OPEN) this.ontick?.(m);
+        break;
+    }
+  }
+}
 
 export class Connection extends EventTarget {
   constructor(host) {
@@ -20,11 +141,13 @@ export class Connection extends EventTarget {
     this.lastMessageAt = 0;
     this.pingSeq = 0;
     this._pings = new Map();
-    this._assembly = null;        // { frameId, epoch, buf, received, flags, captureUs, encodeMs, firstAt }
+    this._frames = new FrameAssembler(); // video fragments, when the socket is on this thread
     this._timers = [];
     this.helloTimer = null;
     this.bytesIn = 0;
     this.lostAt = 0;              // when the last connection that was let in went away (0: none lost since)
+    this._hubState = null;        // the socket worker (SocketHub); false: none for this connection
+    this._routes = { audio: null, video: null }; // callbacks of what was routed to the worker
   }
 
   emit(type, detail) { this.dispatchEvent(new CustomEvent(type, { detail })); }
@@ -49,21 +172,22 @@ export class Connection extends EventTarget {
   _open() {
     this._clearTimers();
     this.welcome = null;
-    this._assembly = null;
+    this._frames.reset();
     this._pings.clear();
     this._rtts = [];
     this.rttMs = 0;
     this.setState(this.attempt === 0 ? 'connecting' : 'reconnecting', { attempt: this.attempt });
     let ws;
     try {
-      ws = new WebSocket(this._wsUrl());
+      const hub = this._hub();
+      ws = hub ? new WorkerSocket(hub, this._wsUrl()) : new WebSocket(this._wsUrl());
     } catch (e) {
       this._scheduleReconnect(e.message);
       return;
     }
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
-    const openTimeout = setTimeout(() => { if (ws.readyState !== WebSocket.OPEN) ws.close(); }, 8000);
+    const openTimeout = setTimeout(() => { if (ws.readyState !== OPEN) ws.close(); }, 8000);
 
     this._timers.push(openTimeout);
     ws.onopen = () => {
@@ -76,19 +200,88 @@ export class Connection extends EventTarget {
       ws.send(JSON.stringify({ t: 'hello', ...credentials, client }));
       this._waitForWelcome();
     };
-    ws.onmessage = ev => { if (this.ws === ws && !this._fatal) this._onMessage(ev.data); };
+    ws.onmessage = ev => { if (this.ws === ws && !this._fatal) this._onMessage(ev.data, ev.counted); };
     ws.onerror = () => { /* onclose follows */ };
     ws.onclose = ev => {
       clearTimeout(openTimeout);
       if (this.ws !== ws) return;
       this.ws = null;
       this._clearTimers();
-      this._assembly = null;
+      this._frames.reset();
       if (this.welcome) this.lostAt ||= Date.now();
       if (this.closedByUser) { this.setState('closed', { reason: 'user' }); return; }
       if (this._fatal) { this.setState('closed', { reason: this._fatal.code, message: this._fatal.message }); return; }
       this._scheduleReconnect(ev.reason || `code ${ev.code}`);
     };
+    if (ws instanceof WorkerSocket) {
+      // What the worker took care of: a frame (sent on to the video worker, or here with its data), a sound packet
+      // with nowhere else to go, and what arrived meanwhile.
+      ws.onframe = m => { if (this.ws === ws && !this._fatal) this._onFrame(m); };
+      ws.onaudio = m => { if (this.ws === ws && !this._fatal) this.emit('audio', { codec: m.codec, seq: m.seq, timeUs: m.timeUs, data: m.data }); };
+      ws.ontick = m => {
+        if (this.ws !== ws) return;
+        this.bytesIn += m.bytes || 0;
+        this.lastMessageAt = Math.max(this.lastMessageAt, performance.now() - (m.agoMs || 0));
+      };
+    }
+  }
+
+  /** The socket worker, started the first time it's wanted; null where the socket stays on this thread. */
+  _hub() {
+    if (this._hubState) return this._hubState;
+    if (this._hubState === false || !socketWorkerWanted()) { this._hubState = false; return null; }
+    try {
+      this._hubState = new SocketHub({
+        // It couldn't start: sockets on this thread from now on, and sound and pictures come here as events again.
+        onFail: () => {
+          this._hubState = false;
+          const { audio, video } = this._routes;
+          this._routes = { audio: null, video: null };
+          audio?.onLost?.();
+          video?.onLost?.();
+        },
+        onNote: m => { if (m.type === 'opus-unsupported') this._routes.audio?.onOpusUnsupported?.(); },
+      });
+    } catch (e) {
+      console.warn('[conn] no socket worker:', e);
+      this._hubState = false;
+      return null;
+    }
+    return this._hubState;
+  }
+
+  /** Whether the socket runs in a worker that can take sound and pictures elsewhere (routeAudio, routeVideo). */
+  get offMain() { return !!this._hub(); }
+
+  /**
+   * Sound packets from now on go from the socket's worker to `port`, decoded there (feed.js), instead of coming here
+   * as 'audio' events; null: here again. opus: Opus can be decoded; trim: the frames a fresh Opus decoder drops
+   * (OPUS_LOOKAHEAD in priority mode). onLost: the worker is gone, packets come here; onOpusUnsupported: Opus came that
+   * can't be decoded. Returns whether they go to the port.
+   */
+  routeAudio(port, { opus = true, trim = 0, onLost, onOpusUnsupported } = {}) {
+    const hub = port ? this._hub() : this._hubState;
+    this._routes.audio = hub && port ? { onLost, onOpusUnsupported } : null;
+    if (!hub) { try { port?.close(); } catch { } return false; }
+    hub.post({ type: 'audio', port, opus, trim }, port ? [port] : []);
+    return !!port;
+  }
+
+  /** The routed sound's Opus trim changed (audio priority on or off). */
+  audioTrim(trim) {
+    if (this._routes.audio) this._hubState?.post({ type: 'audio-config', trim });
+  }
+
+  /**
+   * Video frames (with each epoch's video-config) from now on go from the socket's worker to `port`: the video worker's
+   * 'config' and 'chunk' messages. 'video-frame' events still come, without the data. Returns whether they go there.
+   */
+  routeVideo(port, { optimizeForLatency = true, onLost } = {}) {
+    const hub = port ? this._hub() : this._hubState;
+    this._routes.video = hub && port ? { onLost } : null;
+    if (!hub) { try { port?.close(); } catch { } return false; }
+    hub.post({ type: 'video', port, optimizeForLatency }, port ? [port] : []);
+    return !!port;
   }
 
   _waitForWelcome() {
@@ -100,7 +293,7 @@ export class Connection extends EventTarget {
   resume() {
     if (this.closedByUser || this._fatal || this.state === 'idle') return;
     if (this.isOpen) this.sendJson({ t: 'keyframe' });
-    else if (!this.ws || this.ws.readyState >= WebSocket.CLOSING) this.reconnectNow();
+    else if (!this.ws || this.ws.readyState >= CLOSING) this.reconnectNow();
   }
 
   /** An accepted guest away for longer than its resume key lasts: the session has ended (says so, and returns true). */
@@ -141,6 +334,10 @@ export class Connection extends EventTarget {
     this._clearTimers();
     if (this.ws) { try { this.ws.close(1000, 'bye'); } catch { } }
     this.ws = null;
+    // (The worker sends that close before it goes.)
+    if (this._hubState) this._hubState.dispose();
+    this._hubState = null;
+    this._routes = { audio: null, video: null };
     this.setState('closed', { reason: 'user' });
   }
 
@@ -150,7 +347,7 @@ export class Connection extends EventTarget {
     this._timers = [];
   }
 
-  get isOpen() { return this.ws?.readyState === WebSocket.OPEN && !!this.welcome && !this._fatal; }
+  get isOpen() { return this.ws?.readyState === OPEN && !!this.welcome && !this._fatal; }
 
   sendJson(obj) {
     if (this.isOpen) this.ws.send(JSON.stringify(obj));
@@ -163,7 +360,8 @@ export class Connection extends EventTarget {
   /** Bytes queued in the browser's socket buffer: used to drop redundant mouse moves on slow links. */
   get buffered() { return this.ws ? this.ws.bufferedAmount : 0; }
 
-  _onMessage(data) {
+  /** A message from the socket (`counted`: its bytes are in the worker's ticks). */
+  _onMessage(data, counted = false) {
     this.lastMessageAt = performance.now();
     if (typeof data === 'string') {
       let msg;
@@ -171,7 +369,7 @@ export class Connection extends EventTarget {
       this._onJson(msg);
       return;
     }
-    this.bytesIn += data.byteLength;
+    if (!counted) this.bytesIn += data.byteLength;
     const view = new DataView(data);
     switch (view.getUint8(0)) {
       case H2C.VIDEO: this._onVideoFragment(data, view); break;
@@ -186,8 +384,8 @@ export class Connection extends EventTarget {
         });
         break;
       }
-      case H2C.AUDIO: // [0x03][u8 codec: 0 Opus, 1 PCM s24le, 2 silence][u16 0][u32 seq][i64 host µs][payload]
-        this.emit('audio', { codec: view.getUint8(1), seq: view.getUint32(4, true), timeUs: Number(view.getBigInt64(8, true)), data: new Uint8Array(data, 16) });
+      case H2C.AUDIO:
+        this.emit('audio', parseAudio(data, view));
         break;
     }
   }
@@ -236,7 +434,7 @@ export class Connection extends EventTarget {
 
   _startPings() {
     const iv = setInterval(() => {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      if (!this.ws || this.ws.readyState !== OPEN) return;
       const id = ++this.pingSeq;
       this._pings.set(id, performance.now());
       if (this._pings.size > 20) this._pings.delete(this._pings.keys().next().value);
@@ -251,26 +449,18 @@ export class Connection extends EventTarget {
   }
 
   _onVideoFragment(data, view) {
-    const h = parseVideoHeader(view);
-    const payload = new Uint8Array(data, VIDEO_HEADER);
-    let a = this._assembly;
-    if (h.flags & VF.FIRST) {
-      a = this._assembly = {
-        frameId: h.frameId, epoch: h.epoch, buf: new Uint8Array(h.total), received: 0, key: (h.flags & VF.KEY) !== 0,
-        captureUs: h.captureUs, encodeMs: h.encodeMs, firstAt: performance.now(),
-      };
-    }
-    if (!a || a.frameId !== h.frameId) return; // missed the first fragment (shouldn't happen on TCP)
-    a.buf.set(payload, h.offset);
-    a.received += payload.length;
-    if (h.flags & VF.LAST) {
-      this._assembly = null;
-      // Ack on arrival: the host uses this for flow control + delivery-rate/RTT estimates.
-      this.sendBinary(frameAck(a.frameId));
-      this.emit('video-frame', {
-        frameId: a.frameId, epoch: a.epoch, key: a.key, data: a.buf, captureUs: a.captureUs,
-        encodeMs: a.encodeMs, receiveMs: performance.now() - a.firstAt, arrivedAt: performance.now(),
-      });
-    }
+    const f = this._frames.push(data, view);
+    if (!f) return;
+    // Ack on arrival: the host uses this for flow control + delivery-rate/RTT estimates.
+    this.sendBinary(frameAck(f.frameId));
+    this.emit('video-frame', { ...f, arrivedAt: performance.now() });
+  }
+
+  /** A frame the socket worker put together and acked: with its data, or (routed to the video worker) without. */
+  _onFrame(m) {
+    this.emit('video-frame', {
+      frameId: m.frameId, epoch: m.epoch, key: m.key, data: m.data || null, captureUs: m.captureUs,
+      encodeMs: m.encodeMs, receiveMs: m.receiveMs, arrivedAt: performance.now(),
+    });
   }
 }

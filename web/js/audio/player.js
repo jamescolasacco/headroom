@@ -6,10 +6,13 @@
 // Unmute tap, and close() (Mute) lets go of the device's audio. navigator.audioSession 'playback' makes iOS
 // ignore the silent switch.
 //
-// With audio priority on, Opus is decoded in a worker (decode-worker.js) that hands the sound straight to the
-// worklet, so a busy main thread can delay a packet but not its decoding; where workers can't decode Opus, on the
-// main thread as before. Once a session's packets go to the worker they stay there until Mute (switching back and
-// forth could reorder them); priority off from the start decodes on the main thread exactly as before.
+// Where the connection's socket runs in a worker (connection.js: Chromium), its packets never come to this thread:
+// that worker decodes them (feed.js) and hands the sound to the worklet through a MessagePort of its own, in every
+// mode, so a busy page (sheets, layout, GC) delays nothing. Otherwise, with audio priority on, Opus is decoded in a
+// worker (decode-worker.js) that hands the sound straight to the worklet, so a busy main thread can delay a packet but
+// not its decoding; where workers can't decode Opus, on the main thread as before. Once a session's packets go to the
+// worker they stay there until Mute (switching back and forth could reorder them); priority off from the start
+// decodes on the main thread exactly as before.
 //
 // Test hook, inert unless enabled: set globalThis.__headroomAudioTest = true (or { bundle: true } to load the
 // one-file worklet) before unlock(). The worklet then keeps running hashes of what arrived and what played, published
@@ -50,7 +53,12 @@ export class AudioPlayer extends EventTarget {
     this.feed = null;    // the main thread's
     this.worker = null;  // decodes Opus in priority mode, when it can
     this.routed = false; // packets go to the worker
+    this.source = null;  // the connection (setSource): its socket's worker can take the packets to the worklet itself
+    this.socketRouted = false; // they do
   }
+
+  /** The session's connection: where its socket runs in a worker, the packets go from there to the worklet. */
+  setSource(conn) { this.source = conn; }
 
   /**
    * What to play: { priority, quality: 'lossless' | 'compressed', mode: 'pcm24' | 'opus' }. Quality and mode are
@@ -62,6 +70,7 @@ export class AudioPlayer extends EventTarget {
     if (priority === undefined || !!priority === this.priority) return;
     this.priority = !!priority;
     if (this.feed) this.feed.trim = this.priority ? OPUS_LOOKAHEAD : 0; // (fresh decoders from now on)
+    if (this.socketRouted) this.source.audioTrim(this.priority ? OPUS_LOOKAHEAD : 0);
     if (!this.node) return;
     this.node.port.postMessage({ type: 'config', priority: this.priority });
     if (this.priority) this._startWorker();
@@ -98,7 +107,49 @@ export class AudioPlayer extends EventTarget {
     node.connect(this.gain).connect(ctx.destination);
     // Priority: a fresh Opus decoder's lookahead is dropped, so a switch from lossless joins seamlessly (off: as before).
     this.feed = new AudioFeed((msg, transfer) => this.node?.port.postMessage(msg, transfer), { opus, trim: this.priority ? OPUS_LOOKAHEAD : 0 });
+    if (this.source?.offMain) this._routeSocket(ctx, node, opus);
     if (this.priority) this._startWorker();
+  }
+
+  /**
+   * The socket's worker decodes and hands the sound to the worklet from now on (connection.js routeAudio). Nothing has
+   * played yet (packets before the worklet was ready went nowhere), so the worklet takes the channel's at once.
+   */
+  _routeSocket(ctx, node, opus) {
+    const ch = new MessageChannel();
+    node.port.postMessage({ type: 'port', port: ch.port1 }, [ch.port1]);
+    node.port.postMessage({ type: 'route' });
+    this.socketRouted = this.source.routeAudio(ch.port2, {
+      opus, trim: this.priority ? OPUS_LOOKAHEAD : 0,
+      onLost: () => this._unrouteSocket(node), // the worker never started: packets come here again
+      onOpusUnsupported: () => this._opusUnsupported(),
+    });
+    if (!this.socketRouted) return;
+    this._socketHello = false;
+    // The worker says hello through the channel (the worklet passes it on); without one the channel doesn't work.
+    // (A second look a moment later: after a long stall here the hello may be waiting behind this timer.)
+    this._socketTimer = setTimeout(() => {
+      if (!this._socketHello) this._socketTimer = setTimeout(() => { if (!this._socketHello) this._unrouteSocket(node, true); }, 1000);
+    }, 3000);
+    // This thread sees no packets, so it can't resume a context the browser suspended when the next one comes.
+    ctx.addEventListener?.('statechange', () => {
+      if (ctx === this.ctx && this.enabled && ctx.state === 'suspended') ctx.resume().catch(() => { });
+    });
+  }
+
+  /** Packets come to this thread again (decoded here, as without a socket worker). */
+  _unrouteSocket(node, tell = false) {
+    if (!this.socketRouted || this.node !== node) return;
+    this.socketRouted = false;
+    clearTimeout(this._socketTimer);
+    if (tell) this.source?.routeAudio(null);
+    this._noDecodeWorker = true; // (the worklet already takes channels at once: the two could reorder)
+  }
+
+  _opusUnsupported() {
+    if (this._toldOpus) return;
+    this._toldOpus = true; // Opus arrives but can't be decoded here (an older computer that only sends Opus)
+    this.dispatchEvent(new Event('opus-unsupported'));
   }
 
   async _createNode(ctx) {
@@ -122,19 +173,21 @@ export class AudioPlayer extends EventTarget {
     if (m.type === 'stats') {
       this.stats = m.stats;
       if (this.test) {
-        this.testState = { ...m.stats, decoding: this.routed ? 'worker' : 'main', worklet: this.bundled ? 'bundle' : 'module', at: Date.now() };
+        const decoding = this.socketRouted ? 'socket-worker' : this.routed ? 'worker' : 'main';
+        this.testState = { ...m.stats, decoding, worklet: this.bundled ? 'bundle' : 'module', at: Date.now() };
         globalThis.__headroomAudioState = this.testState;
       }
       this.dispatchEvent(new CustomEvent('stats', { detail: m.stats }));
     } else if (m.type === 'hello') {
+      if (this.socketRouted) { this._socketHello = true; clearTimeout(this._socketTimer); }
       this._workerHello?.();
     }
   }
 
   /** Opus decoding in a worker that talks to the worklet directly; used once both ends say it works. */
   _startWorker() {
-    if (this.worker || this._workerStarting || typeof Worker === 'undefined' || typeof MessageChannel === 'undefined' ||
-        !hasAudioDecoder || this.opusSupported === false || !this.node) return;
+    if (this.worker || this._workerStarting || this.socketRouted || this._noDecodeWorker || typeof Worker === 'undefined' ||
+        typeof MessageChannel === 'undefined' || !hasAudioDecoder || this.opusSupported === false || !this.node) return;
     let worker;
     try {
       worker = new Worker(new URL('./decode-worker.js', import.meta.url), { type: 'module' });
@@ -184,12 +237,10 @@ export class AudioPlayer extends EventTarget {
 
   /** One audio packet from connection.js: { codec, seq, timeUs, data }. */
   packet(p) {
-    if (!this.enabled || !this.node || !this.feed) return;
+    // (Routed through the socket's worker: one that was already on its way here is older than what the worklet has.)
+    if (!this.enabled || !this.node || !this.feed || this.socketRouted) return;
     if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => { });
-    if (!p.codec && this.opusSupported === false && !this._toldOpus) {
-      this._toldOpus = true; // Opus arrives but can't be decoded here (an older computer that only sends Opus)
-      this.dispatchEvent(new Event('opus-unsupported'));
-    }
+    if (!p.codec && this.opusSupported === false) this._opusUnsupported();
     // Priority: over to the worker once the main thread's feed has nothing in flight; 'route' tells the worklet
     // where the main thread's packets end.
     if (!this.routed && this.worker && this.priority && this.feed.idle) {
@@ -214,6 +265,10 @@ export class AudioPlayer extends EventTarget {
     this._workerHello = null;
     this._workerStarting = false;
     this._toldOpus = false;
+    if (this.socketRouted) this.source?.routeAudio(null);
+    this.socketRouted = false;
+    this._noDecodeWorker = false;
+    clearTimeout(this._socketTimer);
     this.node?.disconnect();
     this.ctx?.close().catch(() => { });
     this.ctx = null;

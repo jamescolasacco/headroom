@@ -285,3 +285,80 @@ test('the player plays lossless without an Opus decoder, falls back to the one-f
   assert.equal(p.ctx, null);
   assert.equal(p.stats, null);
 });
+
+test('with the socket in a worker, the packets go from there to the worklet; without its hello, back to this thread', async t => {
+  delete globalThis.AudioDecoder;
+  delete globalThis.EncodedAudioChunk;
+  globalThis.window = globalThis.window || {};
+  globalThis.matchMedia = globalThis.matchMedia || (() => ({ matches: false }));
+  const nodes = [];
+  class AudioWorkletNode {
+    constructor(ctx, name, options) { this.options = options; this.port = new Port(); nodes.push(this); }
+    connect(x) { return x; }
+    disconnect() { }
+  }
+  class AudioContext {
+    constructor() { this.state = 'running'; this.destination = {}; this.listeners = {}; }
+    get audioWorklet() { return { addModule: async () => { } }; }
+    addEventListener(type, fn) { this.listeners[type] = fn; }
+    createGain() { return { gain: { value: 0 }, connect: x => x }; }
+    resume() { this.resumed = (this.resumed || 0) + 1; return Promise.resolve(); }
+    close() { this.state = 'closed'; return Promise.resolve(); }
+  }
+  Object.assign(globalThis, { AudioContext, AudioWorkletNode });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { AudioPlayer } = await import(`../web/js/audio/player.js?socket`);
+  const routes = [], trims = [];
+  const source = {
+    offMain: true,
+    routeAudio(port, o) { routes.push(port ? { port, ...o } : null); if (!port) return false; return true; },
+    audioTrim(trim) { trims.push(trim); },
+  };
+  const p = new AudioPlayer();
+  p.setSource(source);
+  p.configure({ priority: true, quality: 'lossless', mode: 'pcm24' });
+  await p.unlock();
+  p.setEnabled(true);
+  const node = nodes[0];
+  assert.deepEqual(node.port.sent.map(m => m.type), ['config', 'port', 'route'], 'the worklet takes the channel at once');
+  assert.equal(routes.length, 1);
+  // The worker and the worklet get the two ends of one channel.
+  const heard = new Promise(resolve => { node.port.sent[1].port.onmessage = e => resolve(e.data); });
+  routes[0].port.postMessage('through');
+  assert.equal(await heard, 'through');
+  node.port.sent[1].port.close();
+  assert.deepEqual([routes[0].opus, routes[0].trim], [false, 120]);
+  assert.equal(p.socketRouted, true);
+  p.packet({ codec: 1, seq: 1, timeUs: 0, data: new Uint8Array(2880) }); // one already on its way here: older
+  assert.equal(node.port.sent.length, 3);
+  node.port.deliver({ type: 'hello' }); // the worker's, passed on by the worklet
+  t.mock.timers.tick(3000);
+  assert.equal(p.socketRouted, true, 'the channel works: it stays');
+  p.configure({ priority: false });
+  assert.deepEqual(trims, [0]);
+  node.port.deliver({ type: 'stats', stats: { bufferedMs: 10 } });
+  p.ctx.state = 'suspended';
+  p.ctx.listeners.statechange();
+  assert.equal(p.ctx.resumed, 2, 'resumed when the browser suspends it (no packets come here to do it)');
+  let told = 0;
+  p.addEventListener('opus-unsupported', () => told++);
+  routes[0].onOpusUnsupported();
+  routes[0].onOpusUnsupported();
+  assert.equal(told, 1);
+  p.close();
+  assert.deepEqual(routes.at(-1), null, 'Mute takes the route away');
+  assert.equal(p.socketRouted, false);
+
+  // The channel doesn't work (no hello): packets come here again and play from here.
+  await p.unlock();
+  p.setEnabled(true);
+  const again = nodes[1];
+  t.mock.timers.tick(3000);
+  assert.equal(p.socketRouted, true, 'a second look first');
+  t.mock.timers.tick(1000);
+  assert.equal(p.socketRouted, false);
+  assert.equal(routes.at(-1), null, 'the worker is told to send them here');
+  p.packet({ codec: 1, seq: 5, timeUs: 0, data: new Uint8Array(2880) });
+  assert.deepEqual(again.port.sent.slice(3).map(m => [m.type, m.seq]), [['pcm24', 5]]);
+  p.close();
+});

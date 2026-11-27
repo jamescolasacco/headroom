@@ -7,6 +7,19 @@
 //  * Chrome reclaims idle decoders in background tabs (QuotaExceededError): recreate + ask for an IDR;
 //  * if decode falls behind, reset and resync on a fresh keyframe instead of building latency.
 
+/**
+ * The decoder's 'config' message from the host's `video-config` (its `description` is base64). optimizeForLatency is
+ * honoured by Chromium; on WebKit it caused smearing on iOS 27 (reported), and the host's SPS already declares zero
+ * reordering, which is what really removes buffering.
+ */
+export function configMessage(cfg, optimizeForLatency) {
+  const desc = Uint8Array.from(atob(cfg.description), c => c.charCodeAt(0));
+  return {
+    type: 'config', epoch: cfg.epoch, codec: cfg.codec, description: desc.buffer,
+    width: cfg.width, height: cfg.height, optimizeForLatency,
+  };
+}
+
 export class DecoderCore {
   /**
    * @param {object} sink   { kind: 'canvas', canvas } | { kind: 'vtg', writer }
