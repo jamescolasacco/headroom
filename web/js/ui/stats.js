@@ -33,9 +33,18 @@ export class StatsOverlay {
       `≈ ${est.toFixed(0)} ms + display`,
       cfg ? `${cfg.codec}  ${cfg.encoder}${cfg.hardware ? '' : ' (software)'}` : '',
       `${s.presenter?.mode || ''}  dropped ${ds.dropped || 0}  queue ${ds.queue || 0}${ds.hw && ds.hw !== 'no-preference' ? '  ' + ds.hw : ''}`,
+      s.audioOn ? `sound  ${s.soundStatus()}${s.prefs.audioPriority ? '  (priority)' : ''}` : '',
+      s.audioOn ? soundDetail(s.audio.stats || {}) : '',
     ];
     this.el.textContent = lines.filter(Boolean).join('\n');
   }
 
   dispose() { clearInterval(this.timer); }
+}
+
+/** The player's numbers behind the sound line: its target reserve, clock drift and anything it had to smooth over. */
+function soundDetail(st) {
+  const n = (v, unit, label) => (Number.isFinite(v) ? `${label} ${Math.round(v)}${unit}` : '');
+  return [n(st.targetMs, ' ms', 'target'), n(st.driftPpm, ' ppm', 'drift'), n(st.concealedMs, ' ms', 'concealed'),
+    n(st.resampledMs, ' ms', 'resampled')].filter(Boolean).join('  ');
 }

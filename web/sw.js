@@ -1,13 +1,14 @@
 // Offline-capable app shell. Network-first so an update is picked up immediately; the cache lets the home-screen
 // app open when the network is flaky.
 const PREFIX = 'headroom-shell-';
-const CACHE = PREFIX + 'v14';
+const CACHE = PREFIX + 'v15';
 const SHELL = [
   '/', '/index.html', '/manifest.webmanifest', '/css/app.css',
   '/js/app.js', '/js/account.js', '/js/config.js', '/js/qr.js', '/js/api.js', '/js/store.js', '/js/platform.js', '/js/protocol.js', '/js/connection.js',
   '/js/session.js', '/js/viewport.js', '/js/cursor.js', '/js/clipboard.js',
   '/js/video/presenter.js', '/js/video/decoder-core.js', '/js/video/video-worker.js',
-  '/js/audio/player.js', '/js/audio/worklet.js',
+  '/js/audio/player.js', '/js/audio/worklet.js', '/js/audio/playout.js', '/js/audio/feed.js', '/js/audio/decode-worker.js',
+  '/js/audio/worklet-bundle.js',
   '/js/input/keyboard.js', '/js/input/keymap.js', '/js/input/mouse.js', '/js/input/touch.js', '/js/input/softkbd.js',
   '/js/ui/dom.js', '/js/ui/icons.js', '/js/ui/light.js', '/js/ui/toolbar.js', '/js/ui/stats.js', '/js/ui/extrakeys.js', '/js/ui/typing.js', '/js/ui/updates.js',
   '/icons/icon-512.png', '/icons/icon-maskable-512.png', '/icons/icon.svg', '/icons/icon-192.png', '/icons/apple-touch-icon.png',

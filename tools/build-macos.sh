@@ -123,6 +123,8 @@ if [ "$ONLY" != "viewer" ]; then
   mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
   cp "$BIN/HeadroomServer" "$BIN/headroom" "$APP/Contents/MacOS/"
   cp "$ICON" "$APP/Contents/Resources/AppIcon.icns"
+  # Licenses of the third-party code in the engine (libopus: BSD-3-Clause, which asks for its notice with binaries).
+  cp "$ROOT/host-macos/THIRD-PARTY-NOTICES.txt" "$APP/Contents/Resources/"
   # The web client the engine serves to viewers (and the settings page).
   rsync -a --delete --exclude '.DS_Store' "$ROOT/web/" "$APP/Contents/Resources/web/"
   plist "$APP/Contents/Info.plist" \

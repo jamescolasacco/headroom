@@ -44,8 +44,17 @@ export class Session {
     this.disposed = false;
     this.life = new AbortController();
     this.audio = new AudioPlayer();
+    // Whether this browser decodes Opus is known a moment after start: if it can't, the computer sends lossless.
+    this.audio.addEventListener('support', () => {
+      if (this.audioOn && this.audio.opusSupported === false) this._audioSettingsChanged();
+    }, { signal: this.life.signal });
+    // A computer with an older Headroom sends only Opus, which this browser can't decode.
+    this.audio.addEventListener('opus-unsupported', () => {
+      if (this.audioOn) toast('This browser can\'t play this computer\'s sound until Headroom there is updated.', 6000);
+    }, { signal: this.life.signal });
     // Every session starts muted: nothing plays, or stops this device's own music, until Unmute (setAudio).
     this.audioOn = false;
+    this.audioMode = null; // the computer's last `audio-mode`: what it sends (old hosts never say: Opus)
   }
 
   /**
@@ -216,8 +225,48 @@ export class Session {
       case 'scaling': this.viewport.setMode(value); break;
       case 'stats': this.stats.setVisible(value); break;
       case 'maxFps': case 'maxBitrateKbps': case 'resolution': this.sendStart(); break;
+      case 'audioPriority': case 'audioQuality': this._audioSettingsChanged(); break;
     }
     this.toolbar?.refresh();
+  }
+
+  /**
+   * The sound to ask the computer for. With audio priority on: lossless (24-bit PCM) or the best Opus, as chosen in
+   * Settings. PCM needs no decoder, so it's also what a browser without WebCodecs' Opus decoder asks for.
+   */
+  _audioRequest() {
+    const priority = !!this.prefs.audioPriority;
+    const opus = this.audio.opusSupported !== false;
+    const lossless = !opus || (priority && this.prefs.audioQuality === 'lossless');
+    return { mode: lossless ? 'pcm24' : 'opus', priority };
+  }
+
+  /** Audio priority or its quality changed: the player and, while sound is on, the computer follow at once. */
+  _audioSettingsChanged() {
+    const req = this._audioRequest();
+    this.audio.configure?.(req);
+    if (this.audioOn) this.conn?.sendJson({ t: 'audio', enabled: true, ...req });
+  }
+
+  /** The computer says which sound it sends this session, and when the connection made it change. */
+  _onAudioMode(m) {
+    const was = this.audioMode;
+    this.audioMode = m;
+    if (m.reason !== 'bandwidth' || !this.audioOn) return;
+    if (m.mode === 'opus' && was?.mode !== 'opus') toast('This connection is too slow for lossless sound. Switched to compressed.', 6000);
+    else if (m.kbps) toast(`This connection is too slow for full-quality sound. Now at ${m.kbps} kb/s.`, 6000);
+  }
+
+  /** One line about the sound, for Settings and the stats: what arrives, how much is held in reserve, any dropouts. */
+  soundStatus() {
+    if (!this.audioOn) return 'Muted';
+    const st = this.audio.stats || {};
+    const pcm = st.codec ? st.codec === 'pcm' : this.audioMode?.mode === 'pcm24';
+    const parts = [pcm ? 'Lossless' : `Compressed${this.audioMode?.kbps && this.audioMode.mode === 'opus' ? `, ${this.audioMode.kbps} kb/s` : ''}`];
+    if (Number.isFinite(st.bufferedMs)) parts.push(`${Math.round(st.bufferedMs)} ms`);
+    const drops = st.underruns || 0;
+    parts.push(drops ? `${drops} dropout${drops === 1 ? '' : 's'}` : 'no dropouts');
+    return parts.join(' · ');
   }
 
   /**
@@ -229,6 +278,7 @@ export class Session {
     if (on === this.audioOn) return;
     this.audioOn = on;
     if (on) {
+      this.audio.configure?.(this._audioRequest());
       const start = this.audio.unlock();
       this.audioStart = start;
       this.audio.setEnabled(true);
@@ -240,7 +290,7 @@ export class Session {
     } else {
       this.audio.close();
     }
-    this.conn?.sendJson({ t: 'audio', enabled: on });
+    this.conn?.sendJson({ t: 'audio', enabled: on, ...(on ? this._audioRequest() : {}) });
     this.toolbar?.refresh();
   }
 
@@ -250,6 +300,7 @@ export class Session {
     const c = this.conn;
     c.addEventListener('welcome', e => {
       const w = e.detail;
+      this.audioMode = null; // a new session on the computer: it says again what it sends
       this.monitors = w.monitors || [];
       // Back after a reconnect: what changed meanwhile (control turned off while it was away) applies as it would live.
       if (this._welcomed && w.permissions) this._applyPermissions(w.permissions);
@@ -314,6 +365,7 @@ export class Session {
       if (v.srcW) this.touch.remoteCursor(p.x / v.srcW, p.y / v.srcH);
     });
     c.addEventListener('audio', e => this.audio.packet(e.detail));
+    c.addEventListener('audio-mode', e => this._onAudioMode(e.detail));
     c.addEventListener('clip', e => this.clipboard.onRemote(e.detail.text || ''));
     c.addEventListener('stats', e => { this.hostStats = e.detail; });
     c.addEventListener('pinchUnavailable', () => {
@@ -435,6 +487,7 @@ export class Session {
     else if (res === '1440') { maxWidth = 2560; maxHeight = 1440; }
     else if (res !== 'native') ({ maxWidth, maxHeight } = this._autoSize()); // Auto (and "This screen", which it replaced)
     this._sentSize = `${maxWidth}x${maxHeight}`;
+    const sound = this._audioRequest();
     this.conn.sendJson({
       t: 'start',
       monitor: this.monitorId,
@@ -442,6 +495,8 @@ export class Session {
       maxBitrateKbps: this.prefs.maxBitrateKbps || undefined,
       maxWidth, maxHeight,
       audio: this.audioOn,
+      audioMode: sound.mode,
+      audioPriority: sound.priority,
     });
   }
 

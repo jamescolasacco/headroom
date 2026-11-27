@@ -25,6 +25,24 @@ public static class Wire
 
     public const int VideoHeaderSize = 28;
     public const int MaxFragmentPayload = 64 * 1024;
+    /// <summary>Video fragments of a session with audio priority: a sound packet never waits behind more than this much picture.</summary>
+    public const int PriorityFragmentPayload = 16 * 1024;
+
+    public const int AudioHeaderSize = 16;
+
+    /// <summary>Byte [1] of an audio packet. Viewers that never asked for anything else only ever get <see cref="AudioCodec.Opus"/>.</summary>
+    public enum AudioCodec : byte
+    {
+        /// <summary>One Opus packet (10 ms).</summary>
+        Opus = 0,
+        /// <summary>PCM signed 24-bit little-endian, interleaved stereo, 48 kHz, 480 frames (10 ms) = 2880 bytes.</summary>
+        Pcm24 = 1,
+        /// <summary>Digital silence: the payload is the frame count (u16, 480). Only for sessions with audio priority.</summary>
+        Silence = 2,
+    }
+
+    public const int PcmFrames = 480;
+    public const int PcmPayloadSize = PcmFrames * 2 * 3;
 
     [Flags]
     public enum VideoFlags : byte { Key = 1, First = 2, Last = 4, /** the still screen encoded again to sharpen it */ Refine = 8 }
@@ -74,14 +92,61 @@ public static class Wire
         return b;
     }
 
-    /// <summary>[0] type, [1..3] reserved, [4..7] seq, [8..15] host µs, [16..] opus packet</summary>
-    public static byte[] Audio(uint seq, long timeUs, ReadOnlySpan<byte> opus)
+    /// <summary>
+    /// [0] type, [1] codec (<see cref="AudioCodec"/>), [2..3] reserved, [4..7] seq (+1 per 10 ms), [8..15] host µs of the
+    /// first sample at capture, [16..] payload
+    /// </summary>
+    public static byte[] Audio(AudioCodec codec, uint seq, long timeUs, ReadOnlySpan<byte> payload)
     {
-        var b = new byte[16 + opus.Length];
+        var b = new byte[AudioHeaderSize + payload.Length];
         b[0] = AudioPacket;
+        b[1] = (byte)codec;
         BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(4), seq);
         BinaryPrimitives.WriteInt64LittleEndian(b.AsSpan(8), timeUs);
-        opus.CopyTo(b.AsSpan(16));
+        payload.CopyTo(b.AsSpan(AudioHeaderSize));
         return b;
+    }
+
+    /// <summary>Codec 0: the same bytes as before codecs existed (byte 1 was reserved, always 0).</summary>
+    public static byte[] Audio(uint seq, long timeUs, ReadOnlySpan<byte> opus) => Audio(AudioCodec.Opus, seq, timeUs, opus);
+
+    /// <summary>Codec 2's payload: <paramref name="frames"/> samples per channel of digital silence (u16).</summary>
+    public static byte[] SilencePayload(int frames = PcmFrames)
+    {
+        var b = new byte[2];
+        BinaryPrimitives.WriteUInt16LittleEndian(b, (ushort)Math.Clamp(frames, 0, ushort.MaxValue));
+        return b;
+    }
+
+    /// <summary>
+    /// Codec 1's payload: interleaved float samples (L R L R …) as signed 24-bit little-endian, 3 bytes each, into
+    /// <paramref name="dest"/>. True if every sample came out 0 (digital silence).
+    /// </summary>
+    public static bool WritePcm24(ReadOnlySpan<float> samples, Span<byte> dest)
+    {
+        bool zero = true;
+        for (int i = 0, o = 0; i < samples.Length; i++, o += 3)
+        {
+            int q = Pcm24(samples[i]);
+            zero &= q == 0;
+            dest[o] = (byte)q;
+            dest[o + 1] = (byte)(q >> 8);
+            dest[o + 2] = (byte)(q >> 16);
+        }
+        return zero;
+    }
+
+    /// <summary>
+    /// One float sample (full scale ±1.0) as a signed 24-bit value: x · 2^23 rounded to nearest (halves away from zero),
+    /// clipped to [-2^23, 2^23 - 1]; NaN is 0. Exact for every k / 2^23 in range, so a 24-bit source survives bit for
+    /// bit. The same as the Mac host's Wire.pcm24.
+    /// </summary>
+    public static int Pcm24(float x)
+    {
+        float v = x * 8388608f; // a power of two: exact (or ±infinity, clipped below)
+        if (v >= 8388607f) return 8388607;
+        if (v <= -8388608f) return -8388608;
+        if (float.IsNaN(v)) return 0;
+        return (int)MathF.Round(v, MidpointRounding.AwayFromZero);
     }
 }

@@ -1,0 +1,23 @@
+libopus 1.6.1, the current stable release, vendored unmodified (a subset).
+
+Source:   https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz (10472813 bytes)
+SHA-256:  6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1
+          (as published in https://downloads.xiph.org/releases/opus/SHA256SUMS.txt and on
+          https://opus-codec.org/downloads/; checked 2026-11-26)
+License:  BSD-3-Clause, see COPYING (also in host-macos/THIRD-PARTY-NOTICES.txt, shipped in the app)
+
+What is here: what a portable floating-point build needs, from the release's own lists:
+  celt_sources.mk  CELT_SOURCES
+  silk_sources.mk  SILK_SOURCES, SILK_SOURCES_FLOAT
+  opus_sources.mk  OPUS_SOURCES (only opus.c, opus_decoder.c, opus_encoder.c, extensions.c, repacketizer.c:
+                   no multistream / projection), OPUS_SOURCES_FLOAT
+plus the headers of celt/, silk/, silk/float/, src/ (less static_modes_fixed.h, static_modes_fixed_arm_ne10.h,
+static_modes_float_arm_ne10.h, fixed_debug.h, fixed_generic.h: fixed-point or NE10 only) and include/opus.h,
+opus_defines.h, opus_types.h, opus_custom.h.
+
+Not here: dnn/ (deep PLC, DRED, OSCE), CPU-specific code (x86/arm/mips, no run-time CPU detection), fixed point,
+tests, demos, build systems. Build settings: host-macos/Package.swift (target COpus): OPUS_BUILD, VAR_ARRAYS,
+HAVE_LRINT, HAVE_LRINTF, PACKAGE_VERSION="1.6.1"; plain C, so it builds for arm64 and x86_64 alike.
+
+To update: download the new release, check its SHA-256 against SHA256SUMS.txt, copy the same lists over, and
+update this file and PACKAGE_VERSION.

@@ -56,6 +56,8 @@ export const DEFAULT_PREFS = {
   pointerSpeed: 1.0,
   naturalScroll: true,
   typingHidden: false,      // what you type on a phone's keyboard shows as dots above the keys (saved for every computer)
+  audioPriority: false,     // sound first: a steady buffer that rides out the network, and video gives way to it
+  audioQuality: 'compressed', // with audio priority: compressed (Opus at its best) | lossless (24-bit PCM)
 };
 
 // 15 frames a second became the default (version 2). Frame rates saved before then are let go once, so everyone

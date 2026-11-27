@@ -32,8 +32,11 @@ public sealed class RelayService
     /// <summary>A guest code's first 4 digits, from the relay, and until when they route here.</summary>
     public sealed record Slot(string Digits, DateTime Expires);
 
-    /// <summary>Who a tunnel is for, as the relay's "open" message described them.</summary>
-    public sealed record TunnelInfo(string? Ip, string? Country, bool Guest);
+    /// <summary>
+    /// Who a tunnel is for, as the relay's "open" message described them. Loopback: the tunnel's end of the loopback hop
+    /// (a session with audio priority keeps its receive buffer small).
+    /// </summary>
+    public sealed record TunnelInfo(string? Ip, string? Country, bool Guest, Socket? Loopback = null);
 
     /// <summary>Open tunnels by the local port of their loopback connection (= the relay listener's remote port).</summary>
     private static readonly ConcurrentDictionary<int, TunnelInfo> Tunnels = new();
@@ -385,7 +388,7 @@ public sealed class RelayService
             }
             // Registered before any of the viewer's bytes are passed on, so the web host always finds it.
             localPort = (tcp.Client.LocalEndPoint as IPEndPoint)?.Port ?? 0;
-            if (localPort != 0) Tunnels[localPort] = who;
+            if (localPort != 0) Tunnels[localPort] = who with { Loopback = tcp.Client };
             var stream = tcp.GetStream();
             var fromRelay = Task.Run(async () =>
             {

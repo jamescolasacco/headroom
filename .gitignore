@@ -12,3 +12,6 @@ dist/
 .devdata-mac/
 *.xcodeproj/
 .DS_Store
+# tools/audio-check.mjs reports and captures (its default --out)
+/audio-check*.json
+/audio-check*.bin
