@@ -636,8 +636,6 @@ public sealed class AudioPacketizer
     private uint _seq;
     private readonly byte[] _opusOut = new byte[1500];
     private readonly byte[] _scratch = new byte[Wire.PcmPayloadSize];
-    private readonly float[] _last = new float[Wire.PcmFrames * 2]; // the frame before, to start an encoder mid-stream
-    private bool _hasLast;
 
     public int Count => _viewers.Length;
 
@@ -681,7 +679,6 @@ public sealed class AudioPacketizer
     {
         foreach (var v in _viewers) ReleaseEncoder(v);
         Release(ref _shared);
-        _hasLast = false;
     }
 
     /// <summary>One frame (<see cref="AudioFramer.FrameHandler"/>): a packet for every viewer that gets one.</summary>
@@ -755,8 +752,6 @@ public sealed class AudioPacketizer
             try { v.Handler(new AudioService.Packet(seq, startTicks, codec, data)); }
             catch (Exception ex) { Log.Debug("audio", $"audio subscriber failed: {ex.Message}"); }
         }
-        samples.CopyTo(_last);
-        _hasLast = true;
     }
 
     private byte[]? EncodeShared(ReadOnlySpan<float> samples)
@@ -781,11 +776,11 @@ public sealed class AudioPacketizer
             int kbps = Math.Clamp(v.Format.Kbps, 6, 510);
             if (v.Encoder == null)
             {
+                // A new one (a viewer that starts on Opus mid-stream, a switch from lossless) starts fresh, as the viewer's
+                // decoder does: on the Mac host a primed encoder against a fresh decoder made the switch's first second
+                // 5 dB worse (15.4 dB against 20.3).
                 v.Encoder = NewEncoder(kbps);
                 v.EncoderKbps = kbps;
-                // Starting mid-stream (from lossless, or a new viewer): the frame before goes in first, so the encoder's
-                // look-ahead holds what really came before and its first packet carries on from it (as the Mac host).
-                if (_hasLast) v.Encoder.Encode(_last, Wire.PcmFrames, _opusOut, _opusOut.Length);
             }
             else if (v.EncoderKbps != kbps)
             {

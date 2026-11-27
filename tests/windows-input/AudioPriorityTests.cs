@@ -108,55 +108,74 @@ internal static class AudioPriorityTests
         Check(spread.FragmentPayload == 10_000, "fragments of ~20 ms of the pace");
         spread.SetRate(800, clock);
         Check(spread.FragmentPayload == 4096 && new VideoPacer().FragmentPayload == 16 * 1024, "4 KiB at the least, 16 KiB unpaced");
-        Check(ClientSession.VideoPaceKbps(2000, 800, null) == 3000 && ClientSession.VideoPaceKbps(100, 800, null) == 1200
-              && ClientSession.VideoPaceKbps(3000, 800, 1400) == 1400 && ClientSession.VideoPaceKbps(1000, 800, 10000) == 1500
-              && ClientSession.VideoPaceKbps(1000, 800, 20) == 100, "the pace: 1.5x the target, or the path's, never under 100 kbps");
+        Check(ClientSession.PaceCeilingKbps(2000, 800) == 3000 && ClientSession.PaceCeilingKbps(100, 800) == 1200, "the pace's ceiling: 1.5x the target");
+
+        var pace = new VideoPaceControl();
+        Check(pace.Kbps == 1500, "the pace starts at 1.5 Mb/s, until paced frames have measured the path");
+        pace.Frame(1470, false, 40, 3750);
+        Check(pace.Kbps == 1425, $"a big frame the path held back (1.47 Mb/s): just under it ({pace.Kbps})");
+        pace.Tick(45, 3, 3750);
+        Check(pace.Kbps == 1211, $"the path queued: back off 15% a tick ({pace.Kbps})");
+        pace.Tick(5, 2, 3750);
+        Check(pace.Kbps == 1307, $"clear path, video waiting on the pace: climb 8% a tick ({pace.Kbps})");
+        pace.Tick(5, 0, 3750);
+        pace.Tick(20, 4, 3750);
+        Check(pace.Kbps == 1307, $"a clear path without waiting, or a path in between: hold ({pace.Kbps})");
+        pace.Frame(1320, true, 8, 3750);
+        Check(pace.Kbps == 1650, $"a big frame the pace held back on a clear path: 1.25x what it measured ({pace.Kbps})");
+        pace.Frame(1320, true, 25, 3750);
+        Check(pace.Kbps == 1650, "not while the path is queued");
+        pace.Frame(9000, false, 0, 3750);
+        Check(pace.Kbps == 3750, "never above 1.5x the target");
+        for (int i = 0; i < 60; i++) pace.Tick(500, 0, 3750);
+        Check(pace.Kbps == 100 && new VideoPaceControl(20000).Kbps == 20000, "never under 100 kbps; a stream already running keeps its pace");
 
         var path = new VideoPathEstimate();
         Check(path.Add(90_000, 16_000, 1_000_000, 1_540_000, 40, 3750), "a big frame counts");
-        Check(Near(path.Kbps(1_600_000), 1184) && Near(path.PathKbps(1_600_000), 1184) && Near(path.PaceKbps(1_600_000), 1184 * 0.97),
-            "74 kB in 500 ms: the path's 1184 kbps, paced just under it");
+        Check(Near(path.Kbps(1_600_000), 1184) && Near(path.PathKbps(1_600_000), 1184), "74 kB in 500 ms, well under the pace: the path's 1184 kbps");
         Check(!path.Add(20_000, 0, 2_000_000, 2_400_000, 40, 3750) && !path.Add(60_000, 0, 2_000_000, 2_070_000, 40, 3750),
             "small or quick frames don't count");
         Check(path.Add(100_000, 4096, 3_000_000, 3_540_000, 40, 1500), "a frame the pace held back");
         var held = path.Samples[path.Samples.Count - 1];
-        Check(held.LimitedByPace && Math.Abs(held.Kbps - (100_000 - 4096) * 8 / 500.0) <= 0.1 && Near(path.PaceKbps(3_600_000), held.Kbps * 1.1)
-              && Near(path.PathKbps(3_600_000), 1184) && Near(path.Kbps(3_600_000), 1184), "the pace climbs 10%; the path's figure stays");
+        Check(held.LimitedByPace && Math.Abs(held.Kbps - (100_000 - 4096) * 8 / 500.0) <= 0.1
+              && Near(path.PathKbps(3_600_000), 1184) && Near(path.Kbps(3_600_000), 1184), "it measures the pace; the path's figure stays (the lower of two)");
         Check(path.Add(100_000, 0, 4_000_000, 4_540_000, 40, 1760) && !path.Samples[path.Samples.Count - 1].LimitedByPace
-              && Near(path.PathKbps(4_600_000), 1184) && Near(path.PaceKbps(4_600_000), 1184 * 0.97), "paced 10% over the path, it measures the path");
-        Check(path.Kbps(4_540_000 + VideoPathEstimate.MaxAgeUs + 1) == null && path.PaceKbps(4_540_000 + VideoPathEstimate.MaxAgeUs + 1) == null,
-            "old samples are forgotten");
+              && Near(path.PathKbps(4_600_000), 1184), "paced 10% over the path, it measures the path (the lower of 1184 and 1600)");
+        Check(path.Kbps(4_540_000 + VideoPathEstimate.MaxAgeUs + 1) == null, "old samples are forgotten");
 
-        // The way to the viewer: 512 kbps of sound into a ~200 kb/s path, the queue growing 1.56 ms per ms, answers coming.
-        var backlog = new PathBacklogWatch();
-        int firstTick = -1;
-        double carriedPath = 0;
-        for (int tick = 0; tick < 20; tick++)
+        // The way to the viewer (AudioFitWatch), every 250 ms tick. Lossless (needs ~2500 kbps) into a 2 Mb/s path, sending
+        // ~2.6 Mb/s: the queue grows ~300 ms a second.
+        var fit = new AudioFitWatch();
+        (int Tick, double Carried, bool Peak)? fired = null;
+        for (int tick = 0; tick < 12 && fired == null; tick++)
         {
-            var verdict = backlog.Update(tick * 250_000L, 350 + tick * 390.0, true, tick, tick * 16_000L);
-            if (verdict != null && firstTick < 0)
-            {
-                firstTick = tick;
-                carriedPath = verdict.Value;
-            }
+            double q = Math.Max(0, tick * 75.0 - 30);
+            if (fit.Update(tick * 250_000L, q, tick * 81_250L, tick, 2500, false) is { } f) fired = (tick, f.CarriedKbps, f.Peak);
         }
-        Check(firstTick == 9 && Math.Abs(carriedPath - 512 / (1 + 1.56)) <= 2, $"the path carried ~200 kbps ({firstTick}, {carriedPath:0.0})");
-        backlog.Reset();
-        for (int tick = 0; tick < 20; tick++)
-            Check(backlog.Update(tick * 250_000L, 600, false, tick, tick * 16_000L) == null, "the picture yields first");
-        backlog.Reset();
-        for (int tick = 0; tick < 40; tick++)
-            Check(backlog.Update(tick * 250_000L, 2000 - tick * 25.0, true, tick, tick * 8000L) == null, "a draining queue: the sound fits now");
-        backlog.Reset();
-        for (int tick = 0; tick < 40; tick++)
-            Check(backlog.Update(tick * 250_000L, 400 + tick * 250.0, true, 0, 0) == null, "a stall: no answers, nothing learnt");
-        backlog.Reset();
-        for (int tick = 0; tick < 20; tick++)
-            Check(backlog.Update(tick * 250_000L, 290, true, tick, tick * 16_000L) == null, "under 300 ms: nothing to judge");
+        Check(fired is { Tick: 4, Peak: false } && Math.Abs(fired.Value.Carried - 2600 / 1.27) <= 1,
+            $"after 1 s (the queue ~270 ms) it doesn't fit: the path carried sent / (1 + 0.27), ~2 Mb/s ({fired})");
+        fit.Reset();
+        for (int tick = 0; tick < 12; tick++)
+            Check(fit.Update(tick * 250_000L, tick * 75.0, tick * 81_250L, tick, 615, false) == null, "the same growth from a picture flood on a path that carries the sound: nothing");
+        fit.Reset();
+        int? peakTick = null;
+        double[] standing = { 460, 462, 458, 461, 463, 460, 466, 470 };
+        for (int tick = 0; tick < standing.Length && peakTick == null; tick++)
+            if (fit.Update(tick * 250_000L, standing[tick], tick * 62_500L, tick, 2500, true) is { Peak: true }) peakTick = tick;
+        Check(peakTick == 4, $"a backlog standing past 450 ms, the picture at its floor: the peak ({peakTick})");
+        fit.Reset();
+        for (int tick = 0; tick < 12; tick++)
+            Check(fit.Update(tick * 250_000L, 900 - tick * 40.0, tick * 62_500L, tick, 2500, true) == null, "a draining queue: nothing");
+        fit.Reset();
+        for (int tick = 0; tick < 12; tick++)
+            Check(fit.Update(tick * 250_000L, tick * 100.0, 0, 0, 2500, true) == null, "a stall (no answers): nothing learnt");
 
-        Check(ClientSession.PriorityVideoBudget(5000, 40) == 64 * 1024 && ClientSession.PriorityVideoBudget(100_000, 50) == 687_500
-              && ClientSession.PriorityVideoBudget(1_000_000, 500) == 6 * 1024 * 1024 && ClientSession.PriorityVideoBudget(0, 50) == 64 * 1024,
-            "about 1.1x the BDP in flight, 64 KiB to 6 MiB");
+        // The floor is ~60 ms of the pace within 16-64 KiB: 1.5 Mb/s -> 16 KiB, 4 Mb/s -> 30 kB, 20 Mb/s -> 64 KiB. Above
+        // it, 1.1x the BDP (5 Mb/s at 40 ms: 27.5 kB; 100 Mb/s at 50 ms: 687.5 kB), at most 6 MiB.
+        Check(ClientSession.PriorityVideoBudget(1000, 20, 1500) == 16 * 1024 && ClientSession.PriorityVideoBudget(1000, 20, 4000) == 30_000
+              && ClientSession.PriorityVideoBudget(1000, 20, 20000) == 64 * 1024, "in flight at least ~60 ms of the pace, 16-64 KiB");
+        Check(ClientSession.PriorityVideoBudget(5000, 40, 1500) == 27_500 && ClientSession.PriorityVideoBudget(100_000, 50, 20000) == 687_500
+              && ClientSession.PriorityVideoBudget(1_000_000, 500, 20000) == 6 * 1024 * 1024, "about 1.1x the BDP in flight, at most 6 MiB");
         Check(ClientSession.CongestionDelayMs(true) == 25 && ClientSession.CongestionDelayMs(false) == 60, "congestion at 25 ms of queueing with priority");
         Check(ClientSession.VideoCeiling(40000, 800, 2550) == 37450 && ClientSession.VideoCeiling(2000, 800, 2550) == 800
               && ClientSession.VideoCeiling(40000, 800, 0) == 40000, "the video ceiling leaves room for the sound");
@@ -584,7 +603,7 @@ internal static class AudioPriorityTests
         Check(stepped.Count == 200 && stepped.All(p => p.Codec == Wire.AudioCodec.Opus) && lower < top * 0.75 && steppedSnr > 12,
             $"a step to 256 kbps in place: {top:0} -> {lower:0} bytes a packet, the same decoder carries on at {steppedSnr:0.0} dB");
         Check(switched.Count == 200 && switched.All(p => p.Codec == Wire.AudioCodec.Opus) && switchedSnr > 12,
-            $"lossless to Opus: a fresh decoder starts on it at {switchedSnr:0.0} dB");
+            $"lossless to Opus: a fresh encoder and a fresh decoder start on it at {switchedSnr:0.0} dB");
 
         foreach (var viewer in new[] { pcmPriority, opusPriority, opus, pcm }) packets.Remove(viewer);
         Check(packets.Count == 0 && !packets.AnyPriority, "viewers removed");

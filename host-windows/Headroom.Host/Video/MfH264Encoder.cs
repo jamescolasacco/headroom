@@ -62,8 +62,6 @@ public sealed unsafe class MfH264Encoder : IDisposable
     private volatile bool _stopping;            // Dispose has begun: what still comes out is dropped
     private readonly ManualResetEventSlim _drained = new(false);
     private const int DrainTimeoutMs = 500;
-    // HEADROOM_MF_NODRAIN=1 stops an async MFT without draining it first (as before), to tell what the drain changes.
-    private static readonly bool SkipDrain = Environment.GetEnvironmentVariable("HEADROOM_MF_NODRAIN") == "1";
     private int _inFlight;
     private int _bitrateKbps;
     private readonly int _fps;
@@ -610,8 +608,8 @@ public sealed unsafe class MfH264Encoder : IDisposable
     /// Stops the encoder, then lets go of it, in this order:
     /// 1. An async MFT first finishes the frames it was given: it's drained, and its event thread pulls out (and drops)
     ///    what it still makes, until the MFT says it's done (or DrainTimeoutMs), so nothing is mid-encode when it's shut
-    ///    down and freed. (Stopping NVIDIA's with frames still in flight is when this process crashed in ntdll, at the
-    ///    end of a session and in the teardown test.)
+    ///    down and freed. Stopped with frames still in flight, NVIDIA's crashed this process (an access violation in
+    ///    ntdll) at the end of a session and every few rounds of the teardown test; drained, it ran 120 teardowns clean.
     /// 2. Under _mftGate, which the event thread holds while it pulls output: the stream is ended and the MFT shut down,
     ///    so the thread is never inside ProcessOutput meanwhile; it leaves on MF_E_SHUTDOWN.
     /// 3. The native objects are released only after that thread has left. If it doesn't leave in time, they're kept
@@ -624,9 +622,9 @@ public sealed unsafe class MfH264Encoder : IDisposable
             if (_stopping) return;
             _stopping = true;
         }
-        if (MfTrace.Enabled) MfTrace.Note($"stopping '{Name}' with {InFlight} frame(s) in flight{(SkipDrain ? ", not draining" : "")}");
+        if (MfTrace.Enabled) MfTrace.Note($"stopping '{Name}' with {InFlight} frame(s) in flight");
         bool endOfStream = false;
-        if (IsAsync && _eventThread != null && !SkipDrain)
+        if (IsAsync && _eventThread != null)
         {
             bool draining = false;
             lock (_mftGate)
