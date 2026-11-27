@@ -85,7 +85,6 @@ public final class AudioService: NSObject, SCStreamOutput, SCStreamDelegate {
     private var seq: UInt32 = 0
     private var silentFrames = 0         // quiet frames in a row (the 200 ms rule of viewers without priority)
     private var previousAllZero = true   // the frame before was digital silence (nothing for an Opus encoder to flush)
-    private var lastFrame = [Float]()    // the frame before, to prime an Opus encoder that starts mid-stream
     /// Viewers without priority share one encoder at this computer's bitrate (fixed when it's made, as before); each
     /// viewer with priority has its own, fed every frame, whose bitrate changes in place when its path steps it down.
     private var sharedEncoder: OpusEncoder?
@@ -368,7 +367,9 @@ public final class AudioService: NSObject, SCStreamOutput, SCStreamDelegate {
         lock.lock(); let subs = Array(subscribers); lock.unlock()
         let legacy = subs.contains { !$0.value.format.priority && $0.value.format.mode == .opus } ? sharedEncoder?.kbps ?? Self.configuredOpusKbps : 0
         // Viewers with priority, Opus: their own encoder sees every frame (silence too), so each stays one continuous
-        // stream; a step down changes its bitrate in place. A new one starts primed with the frame before.
+        // stream; a step down changes its bitrate in place. A new one (a viewer that starts on Opus mid-stream, a switch
+        // from lossless) starts fresh, as the viewer's decoder does: a primed encoder against a fresh decoder made the
+        // switch's second 5 dB worse (15.4 dB against 20.3).
         var priorityPackets: [ObjectIdentifier: Packet] = [:]
         var live = Set<ObjectIdentifier>()
         for (id, s) in subs where s.format.priority && s.format.mode == .opus {
@@ -379,9 +380,6 @@ public final class AudioService: NSObject, SCStreamOutput, SCStreamDelegate {
                 if e.kbps != s.format.kbps { e.setBitrate(kbps: s.format.kbps) }
             } else {
                 guard let made = OpusEncoder(kbps: s.format.kbps) else { continue }
-                if lastFrame.count == Self.frameSamples * Self.channels {
-                    _ = lastFrame.withUnsafeBufferPointer { made.encode($0.baseAddress!) }
-                }
                 priorityEncoders[id] = made
                 e = made
             }
@@ -421,12 +419,6 @@ public final class AudioService: NSObject, SCStreamOutput, SCStreamDelegate {
             if let p { s.fn(p) }
         }
         previousAllZero = allZero
-        if lastFrame.count != need { lastFrame = [Float](repeating: 0, count: need) }
-        pcm.withUnsafeBufferPointer { src in
-            lastFrame.withUnsafeMutableBufferPointer { dst in
-                for i in 0..<need { dst[i] = src[start + i] }
-            }
-        }
     }
 
     private func encodePacket(_ e: OpusEncoder, start: Int, timeUs: Int64) -> Packet? {
@@ -444,7 +436,6 @@ public final class AudioService: NSObject, SCStreamOutput, SCStreamDelegate {
         clock = SampleClock()
         silentFrames = 0
         previousAllZero = true
-        lastFrame.removeAll()
         timestampsLogged = false
     }
 

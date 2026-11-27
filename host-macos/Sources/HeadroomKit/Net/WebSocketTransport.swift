@@ -180,6 +180,7 @@ public final class WebSocketTransport: ChannelInboundHandler {
     /// With audio priority, video fragments leave at most at this pace (VideoPacer), so a big frame doesn't land in the
     /// path's bottleneck all at once ahead of the sound (under `lock`).
     private var pacer = VideoPacer()
+    private var pacedWaits = 0            // times a fragment had to wait for the pacer (under `lock`)
     private var paceWakeScheduled = false // event loop
     private var video: [EncodedVideoFrame] = []
     private var current: EncodedVideoFrame?
@@ -428,6 +429,14 @@ public final class WebSocketTransport: ChannelInboundHandler {
         lock.unlock()
     }
 
+    /// How many times video had to wait for the pacer since the last call: the pace, not the path, held it back.
+    public func takePacedWaits() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        let n = pacedWaits
+        pacedWaits = 0
+        return n
+    }
+
     /// Event loop: pump again once the pacer has room.
     private func schedulePacedPump(_ context: ChannelHandlerContext, inUs: Int64) {
         guard !paceWakeScheduled else { return }
@@ -550,7 +559,7 @@ public final class WebSocketTransport: ChannelInboundHandler {
                 lock.lock()
                 len = min(pacer.fragmentPayload, data.count - fragOffset)
                 let wait = pacer.take(Wire.videoHeaderSize + len + 4, nowUs: Clock.nowUs)
-                if wait == nil { videoBytesOut += Int64(Wire.videoHeaderSize + len) }
+                if wait == nil { videoBytesOut += Int64(Wire.videoHeaderSize + len) } else { pacedWaits += 1 }
                 lock.unlock()
                 if let wait {
                     // Not yet: the fragment stays current; sound and control still go out as they come.

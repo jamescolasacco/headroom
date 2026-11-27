@@ -12,7 +12,10 @@
 //     10 s). Until the network has proven itself the reserve is 110 ms, fading out over 30 s. And never less than
 //     120 ms ahead of an on-time packet (the floor): the WebSocket lives on the main thread, which a phone stalls for
 //     ~100 ms on sheets, scrolling and GC; jitter already buffered counts toward the floor, so it doesn't stack.
-//     Lateness over 750 ms stops counting once it is a couple of seconds old (one dropout beats seconds of delay).
+//     Lateness over 750 ms stops counting once it is a couple of seconds old (one dropout beats seconds of delay);
+//     lateness in the start-up seconds after a start, reset or codec switch (a keyframe flooding the link: at least
+//     3 s, until 2 s after the last packet 50 ms late, within 10 s) stops counting 1 s later, with the underruns'
+//     extra reserve; lateness that keeps coming past 10 s is how this network is, and is remembered.
 //   - The buffer moves only by dropping or adding samples inside digital silence (silence packets, which are 480
 //     zeros, or frames of exact zeros), never inside sound. Silences shorter than 20 ms are left alone; corrections
 //     are proportional to the error (1/16 to 16 extra frames per silent frame dropped, up to 4 added).
@@ -27,8 +30,9 @@
 //     the reserve is back and the fade is done, then fades in; the late packet raises the target for 3 minutes.
 //   - Missing packets (a seq gap) keep their place on the timeline: faded out, silence, faded in. A big backlog is
 //     dropped in silence; only one over 1 s with no silence queued is skipped (crossfaded). A step down from lossless
-//     to Opus (the link couldn't carry it) sheds what the overload taught and re-bases as the backlog drains. Opus's
-//     decoder delay (312 frames on the Mac, 120 on Windows) is a constant offset in what plays: left alone.
+//     to Opus (the link couldn't carry it) sheds what the overload taught and re-bases as the backlog drains. A fresh
+//     Opus decoder's first 120 frames (the hosts' lookahead) are dropped before they get here (feed.js, priority only),
+//     so a switch from lossless joins seamlessly; after that the lookahead is a constant offset in what plays.
 
 export const RATE = 48000;            // the stream's sample rate
 export const FRAMES_PER_PACKET = 480; // seq advances by one per 10 ms frame
@@ -42,7 +46,13 @@ export const PLAYOUT_DEFAULTS = Object.freeze({
   jitterMargin: 0.25,     // + this share of the jitter span seen ...
   jitterMarginMaxMs: 40,  // ... at most this much
   maxJitterMs: 750,       // lateness beyond this isn't buffered for once it's more than a couple of seconds old
-  memoryMs: 180000,       // how long a late packet keeps the buffer up
+  memoryMs: 180000,       // how long a late packet keeps the buffer up, except in the start-up seconds after a start,
+                          // reset or codec switch (a keyframe flooding the link), which last ...
+  startupMs: 3000,        // ... at least this long, ...
+  startupSteadyMs: 2000,  // ... and until this long after the last packet ...
+  startupLateMs: 50,      // ... this late (over the earliest), ...
+  startupMaxMs: 10000,    // ... within this long (lateness that keeps coming after that is the network's: remembered);
+  startupMemoryMs: 1000,  // their lateness (and their underruns' extra reserve) stops counting this long after them
   penaltyMs: 10,          // extra reserve per underrun ...
   penaltyMaxMs: 60,       // ... at most, ...
   penaltyDecayMs: 10000,  // ... falling 1 ms per this long
@@ -150,6 +160,12 @@ class Arrivals {
   constructor(o) {
     this.binFrames = Math.round(o.driftBinMs * RATE / 1000);
     this.memoryBins = Math.max(1, Math.round(o.memoryMs / o.driftBinMs));
+    const f = ms => Math.round(ms * RATE / 1000);
+    this.startupFrames = f(o.startupMs);
+    this.startupSteadyFrames = f(o.startupSteadyMs);
+    this.startupLate = f(o.startupLateMs);
+    this.startupMaxFrames = f(o.startupMaxMs);
+    this.startupMemoryFrames = f(o.startupMemoryMs);
     this.driftBins = o.driftBins;
     this.keepBins = Math.max(this.memoryBins, o.driftBins);
     this.driftMinBins = o.driftMinBins;
@@ -162,6 +178,9 @@ class Arrivals {
   reset() {
     this.bins = [];
     this.cur = null;
+    this.startupStart = null; // host positions where the start-up seconds begin (the first packet) ...
+    this.startupUntil = null; // ... and end (-Infinity: none, the lateness persisted)
+    this.startupDone = false; // their lateness no longer counts (or never will be forgotten)
     this.maxT = -Infinity;
     this.minT = Infinity;
     this.avgT = 0;
@@ -170,6 +189,20 @@ class Arrivals {
 
   /** One packet: host position x (frames), lateness d = arrival - x (frames). */
   add(x, d) {
+    if (this.startupStart === null) { this.startupStart = x; this.startupUntil = x + this.startupFrames; }
+    if (!this.startupDone) {
+      if (this.count && d + this.eps * x - this.minT > this.startupLate) { // a late packet ...
+        if (x < this.startupStart + this.startupMaxFrames) { // ... keeps the start-up going a little longer
+          this.startupUntil = Math.min(Math.max(this.startupUntil, x + this.startupSteadyFrames), this.startupStart + this.startupMaxFrames);
+        } else { // ... or, coming on and on, is just how this network is: nothing is forgotten
+          this.startupUntil = -Infinity;
+          this.startupDone = true;
+        }
+      } else if (x >= this.startupUntil + this.startupMemoryFrames) {
+        this.startupDone = true; // steady for a while: the start-up's lateness goes
+        this._extremes();
+      }
+    }
     const k = Math.floor(x / this.binFrames);
     let c = this.cur;
     if (!c || k > c.k) {
@@ -184,6 +217,12 @@ class Arrivals {
     this.avgT = this.count ? this.avgT + (t - this.avgT) / Math.min(this.count + 1, 200) : t;
     this.count++;
   }
+
+  /** The bin is in the start-up seconds. */
+  _startup(bin) { return this.startupUntil !== null && bin.k * this.binFrames < this.startupUntil; }
+
+  /** Host position x is in the start-up seconds (still counting). */
+  inStartup(x) { return !this.startupDone && this.startupUntil !== null && x < this.startupUntil; }
 
   /** Lateness without the drift: comparable across the whole memory. */
   detrend(x, d) { return d + this.eps * x; }
@@ -206,8 +245,10 @@ class Arrivals {
   _extremes() {
     let maxT = -Infinity, minT = Infinity;
     const e = this.eps, b = this.bins;
+    // Start-up lateness counts until the stream has been steady for a while after it.
+    const forget = this.startupDone && this.startupUntil !== null;
     for (let i = Math.max(0, b.length - this.memoryBins); i < b.length; i++) {
-      maxT = Math.max(maxT, b[i].maxD + e * b[i].maxX);
+      if (!forget || !this._startup(b[i])) maxT = Math.max(maxT, b[i].maxD + e * b[i].maxX);
       minT = Math.min(minT, b[i].minD + e * b[i].minX);
     }
     const c = this.cur;
@@ -239,14 +280,15 @@ class Arrivals {
       }
       return sxx > 0 ? { slope: sxy / sxx, mx, my } : null;
     };
-    const first = fit(() => true);
+    const first = fit(i => !this._startup(b[i]));
     if (!first) return;
     const res = i => b[i].minD - first.my - first.slope * (b[i].minX - first.mx);
     const abs = this.scratch.subarray(0, n);
-    for (let i = from; i < b.length; i++) abs[i - from] = Math.abs(res(i));
-    abs.sort();
-    const limit = 3 * abs[n >> 1] + 24; // + half a millisecond
-    const best = fit(i => Math.abs(res(i)) <= limit) || first;
+    let m = 0;
+    for (let i = from; i < b.length; i++) if (!this._startup(b[i])) abs[m++] = Math.abs(res(i));
+    const sorted = abs.subarray(0, m).sort();
+    const limit = 3 * sorted[m >> 1] + 24; // + half a millisecond
+    const best = fit(i => !this._startup(b[i]) && Math.abs(res(i)) <= limit) || first;
     this.eps = Math.max(-this.maxDrift, Math.min(this.maxDrift, -best.slope));
   }
 }
@@ -290,8 +332,8 @@ export class Playout {
 
   /**
    * One packet, already decoded: { seq, timeUs, kind: 'pcm' | 'silence' (or codec: 0 Opus | 1 PCM | 2 silence),
-   * left, right (Float32Array; or `bytes` of 24-bit PCM), frames (silence), arrival (the output frame it arrived
-   * at; default: now) }.
+   * left, right (Float32Array; or `bytes` of 24-bit PCM), arrival (the output frame it arrived at; default: now),
+   * trim (frames dropped from the start of its 10 ms: a fresh Opus decoder's lookahead) }.
    */
   push(p) {
     this.packets++;
@@ -301,7 +343,7 @@ export class Playout {
     if (!silence && !left) return;
     if (!silence && !right) right = left;
     const frames = silence ? FRAMES_PER_PACKET : Math.min(left.length, right.length); // a silence packet is 480 zeros
-    if (!frames) return;
+    if (!frames && !(p.trim > 0)) return;
     if (!silence) {
       if (p.codec === 1 || p.codec === 'pcm') this.codec = 'pcm';
       else if (p.codec === 0 || p.codec === 'opus') this.codec = 'opus';
@@ -313,7 +355,7 @@ export class Playout {
       this.h.rxFrames += c;
     }
     if (this.priority) this._pushPriority(p, silence, frames, left, right);
-    else this._pushStandard(p, silence, frames, left, right);
+    else if (frames) this._pushStandard(p, silence, frames, left, right);
   }
 
   /** Fills one render quantum (outR may be missing: mono). */
@@ -435,6 +477,7 @@ export class Playout {
     this.arrivals = new Arrivals(o);
     this.anchorT = null;
     this.penalty = 0;
+    this.startupPenalty = 0;
     this.lastUnderrun = -Infinity;
     this.c = { // in frames
       floor: f(o.floorMs), start: f(o.startMs), guard: f(o.guardMs), marginMax: f(o.jitterMarginMaxMs), maxJitter: f(o.maxJitterMs), prove: f(o.proveMs),
@@ -519,6 +562,7 @@ export class Playout {
         a0.reset();
         this.anchorT = now;
         this.penalty = 0;
+        this.startupPenalty = 0;
         this.resets++;
         this.rebaseUntil = now + 3 * RATE; // re-base on every new earliest arrival while the backlog drains
         this.dmaxRun = Math.max(this.dmaxRun, this.dmax); this.geffRun = Math.max(this.geffRun, this.geff);
@@ -545,6 +589,7 @@ export class Playout {
     if (this.anchorT === null) this.anchorT = now;
     if (!frozen) a.add(hp, d);
     if (hp > this.newestHp) this.newestHp = hp;
+    if (!frames) return; // all of it was a decoder's lookahead
     let kind = SILENCE, quiet = true;
     if (!silence) {
       let peak = 0;
@@ -555,7 +600,10 @@ export class Playout {
       }
       if (peak > 0) { kind = SOUND; quiet = peak < this.opts.quietLevel; }
     }
-    this._append(kind, hp, frames, kind === SOUND ? left : null, kind === SOUND ? right : null, quiet, seq, jump);
+    // What a fresh Opus decoder dropped (its lookahead) was the start of this 10 ms: the rest sits after it. The
+    // sound joins what played before seamlessly; the timeline is that much shorter (re-centred in silence).
+    const trim = !silence && p.trim > 0 ? Math.min(p.trim, FRAMES_PER_PACKET) : 0;
+    this._append(kind, hp + trim, frames, kind === SOUND ? left : null, kind === SOUND ? right : null, quiet, seq, jump);
   }
 
   _endIdx() {
@@ -636,6 +684,10 @@ export class Playout {
   _control(n) {
     const c = this.c, a = this.arrivals;
     this.penalty = Math.max(0, this.penalty - n * this.rr * c.penaltyDecay);
+    if (this.startupPenalty && a.startupDone) { // the start-up is over: forgotten (with its underruns) or kept
+      if (a.startupUntil !== -Infinity) this.penalty = Math.max(0, this.penalty - this.startupPenalty);
+      this.startupPenalty = 0;
+    }
     this._seek();
     if (a.count) {
       const span = Math.min(c.maxJitter, Math.max(0, a.maxT - a.minT));
@@ -721,7 +773,9 @@ export class Playout {
     if (this.lastKind === SOUND && !this.lastQuiet) {
       this.underruns++;
       this.lastUnderrun = this.t;
-      this.penalty = Math.min(this.c.penaltyMax, this.penalty + this.c.penalty);
+      const add = Math.min(this.c.penaltyMax, this.penalty + this.c.penalty) - this.penalty;
+      this.penalty += add;
+      if (this.arrivals.inStartup(this.newestHp)) this.startupPenalty += add; // given back if the start-up is forgotten
       this._cut();
       this.concealing = true;
       this.episode = 0;

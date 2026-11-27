@@ -277,6 +277,37 @@ test('the network getting worse mid-sound waits for silence: no resampling (drif
   assert.ok(res.st.insertedMs >= 20, `the reserve was rebuilt in the next silence (${res.st.insertedMs} ms added)`);
 });
 
+test('a switch from lossless to Opus joins seamlessly once the fresh decoder\'s lookahead is dropped', () => {
+  // Opus's sound lags its packet by the 120-frame lookahead. The first Opus packet after lossless comes without it
+  // (trim: 120, 360 frames): the sound must go on exactly where the lossless stopped, nothing repeated or missing.
+  const run1 = trimmed => {
+    const p = new Playout({ mode: 'priority' });
+    const L = new Float32Array(128), R = new Float32Array(128);
+    const out = [];
+    let k = 0;
+    for (let q = 0; q < 1080; q++) { // (stops before the last packet plays: the stream doesn't run dry)
+      while (k < 300 && k * 480 <= q * 128 + 4800) { // arrives on time, ~100 ms ahead
+        const lag = k >= 150 ? 120 : 0; // packets 150 on: Opus
+        const cut = trimmed && k === 150 ? 120 : 0;
+        const n = 480 - cut, left = new Float32Array(n), right = new Float32Array(n);
+        for (let i = 0; i < n; i++) { const src = k * 480 - lag + cut + i; [left[i], right[i]] = [0.25 + (src % W) * S, 0.25]; }
+        p.push({ seq: k + 1, codec: k >= 150 ? 0 : 1, left, right, trim: cut || undefined, arrival: Math.max(0, k * 480 - 4800) });
+        k++;
+      }
+      p.render(L, R);
+      for (let i = 0; i < 128; i++) if (L[i] !== 0) out.push(Math.round((L[i] - 0.25) * 8388608));
+    }
+    let repeats = 0, gaps = 0;
+    for (let i = 1; i < out.length; i++) { const d = out[i] - out[i - 1]; if (d < 1) repeats += 1 - d; else if (d > 1) gaps += d - 1; }
+    return { repeats, gaps, st: p.stats() };
+  };
+  const t = run1(true);
+  assert.deepEqual([t.repeats, t.gaps], [0, 0], 'continuous across the switch');
+  assert.equal(t.st.underruns, 0);
+  const u = run1(false);
+  assert.equal(u.repeats, 120, 'without dropping it, 2.5 ms would play twice');
+});
+
 // ------------------------------------------------------------------------------------------- backlogs
 
 test('a backlog under 1 s in sound waits for silence and goes there; over 1 s it is skipped with a crossfade', () => {
@@ -320,6 +351,34 @@ test('an underrun is concealed with a fade (no NaN, no click) and raises the tar
   assert.ok(res.st.targetMs > 300 && res.st.targetMs > before.targetMs + 200, `the target now covers a 300 ms stall: ${before.targetMs} -> ${res.st.targetMs} ms`);
   const e = res.events.find(x => x.type === 'conceal');
   assert.ok(e && e.frames > 0, 'the concealment is reported with its length');
+});
+
+test('start-up lateness (a keyframe flooding the link, then another big frame) is forgotten once the stream is steady', () => {
+  const r = rng(31);
+  // Packets of the first half second arrive ~300 ms late; at 4 s another 200 ms; then a quiet path.
+  const delay = (k, sent) => 3 + 2 * r() + (sent < 500 ? 300 - sent * 0.4 : 0) + (sent > 4000 && sent < 4150 ? 200 : 0);
+  const arr = arrivals(6000, { delay });
+  const res = run({ arr, kind: k => (music(k) ? 'sound' : 'silence'), warmMs: 12000 });
+  none(res);
+  assert.deepEqual(res.events.filter(e => e.type === 'underrun' && e.out > 48000), [], 'no dropout after the first second');
+  assert.ok(res.buf.p95 <= 150, `back near the floor once steady: p95 ${res.buf.p95} ms from 12 s (the start-up was ~300 ms late)`);
+  assert.equal(res.c.altered + res.c.resampled, 0, 'bit-exact');
+});
+
+test('lateness that keeps coming is relearned at most once after the start-up seconds, then remembered: no dropouts after', () => {
+  const r = rng(32);
+  // 250 ms of lateness every 2.5 s, from the start and on.
+  const stall = at => { const x = at % 2500; return x < 250 ? at - x + 250 : 0; };
+  const arr = arrivals(4000, { delay: () => 3 + 2 * r(), stall });
+  let at20 = null;
+  const res = run({ arr, kind: k => (music(k) ? 'sound' : 'silence'), warmMs: 0, onQuantum: (p, f) => { if (f === 20000 * 48) at20 = p.stats(); } });
+  none(res);
+  // From the start it looks like start-up turbulence and may be forgotten once between two stalls (one concealed
+  // dropout relearns it); after that it is remembered.
+  const unders = res.events.filter(e => e.type === 'underrun' && e.out > 48000);
+  assert.ok(unders.length <= 2, `${unders.length} dropouts after the first second`);
+  assert.deepEqual(unders.filter(e => e.out > 48 * 15000), [], 'none after 15 s');
+  assert.ok(at20.targetMs > 250, `the target covers it at 20 s: ${at20.targetMs} ms`);
 });
 
 test('the 120 ms floor bridges a 100 ms main-thread stall on a quiet path, mid-sound, long after the start reserve', () => {

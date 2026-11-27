@@ -1,6 +1,6 @@
 // The AudioWorklet: plays what playout.js decides. Packets arrive as messages, from the main thread (node.port) or
 // straight from the decode worker (a MessagePort handed over with 'port'):
-//   {type: 'pcm', seq, timeUs, codec, left, right}   decoded floats (Opus)
+//   {type: 'pcm', seq, timeUs, codec, left, right, trim}   decoded floats (Opus; trim: frames a fresh decoder dropped)
 //   {type: 'pcm24', seq, timeUs, bytes}               24-bit PCM, decoded here
 //   {type: 'silence', seq, timeUs}                    480 zeros
 //   {type: 'config', priority}, {type: 'flush'} (and the old 'gap')
@@ -40,7 +40,7 @@ class HeadroomPcm extends AudioWorkletProcessor {
     if (!m) return;
     switch (m.type) {
       case 'pcm':
-        this.playout.push({ seq: m.seq, timeUs: m.timeUs, codec: m.codec === undefined ? 0 : m.codec, left: m.left, right: m.right });
+        this.playout.push({ seq: m.seq, timeUs: m.timeUs, codec: m.codec === undefined ? 0 : m.codec, left: m.left, right: m.right, trim: m.trim });
         break;
       case 'pcm24': {
         const bytes = new Uint8Array(m.bytes);

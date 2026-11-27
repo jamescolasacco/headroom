@@ -2,17 +2,22 @@
 // PCM itself), Opus through WebCodecs' AudioDecoder first. A packet still decoding holds the ones behind it, so a
 // silence or PCM packet never overtakes the Opus before it. Runs on the main thread, or in decode-worker.js.
 export const OPUS_CONFIG = { codec: 'opus', sampleRate: 48000, numberOfChannels: 2 };
+/** Both hosts' Opus lookahead (libopus restricted low delay on the Mac, Concentus on Windows), in frames. */
+export const OPUS_LOOKAHEAD = 120;
 
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
 export class AudioFeed {
   /**
    * @param {(message: object, transfer: Transferable[]) => void} post delivers to the worklet
-   * @param {{opus?: boolean}} [o] opus: false drops Opus packets (no decoder here)
+   * @param {{opus?: boolean, trim?: number}} [o] opus: false drops Opus packets (no decoder here); trim: frames a fresh
+   *   decoder's first output loses (its lookahead: OPUS_LOOKAHEAD), so a stream joins seamlessly what played before
    */
-  constructor(post, { opus = true } = {}) {
+  constructor(post, { opus = true, trim = 0 } = {}) {
     this.post = post;
     this.opus = opus && typeof AudioDecoder !== 'undefined';
+    this.trim = trim;
+    this.lastSound = null; // codec of the last sound packet (silence packets don't count)
     this.queue = [];      // in arrival (= seq) order: { seq, timeUs, msg, transfer, dec, waiting }
     this.decoder = null;
     this.retryAt = 0;
@@ -28,12 +33,16 @@ export class AudioFeed {
   packet(p) {
     const codec = p.codec || 0, seq = p.seq >>> 0, timeUs = p.timeUs, data = p.data;
     if (codec === 1) {
+      this.lastSound = 1;
       // The worklet decodes it: hand over the bytes (a copy unless they're the whole of their own buffer).
       const bytes = data.byteOffset === 0 && data.byteLength === data.buffer.byteLength ? data.buffer : data.slice().buffer;
       this.queue.push({ msg: { type: 'pcm24', seq, timeUs, bytes }, transfer: [bytes] });
     } else if (codec === 2) { // 480 zeros (its payload says 480); never fed to the Opus decoder
       this.queue.push({ msg: { type: 'silence', seq, timeUs } });
     } else if (codec === 0) {
+      // Opus after lossless is a new stream from a fresh encoder: a fresh decoder for it (the old one finishes first).
+      if (this.lastSound === 1 && this.decoder) this._retire();
+      this.lastSound = 0;
       const dec = this.opus ? this._decoder() : null;
       if (!dec) { this.lost++; return; } // the worklet sees the gap
       const e = { seq, timeUs, dec, waiting: true, msg: null };
@@ -61,6 +70,7 @@ export class AudioFeed {
       });
       // No description: each chunk is a raw Opus packet (Chrome rejects an empty description).
       dec.configure(OPUS_CONFIG);
+      dec.trim = this.trim; // its first frames are the encoder's lookahead: dropped
     } catch (e) {
       this._error(dec, e);
       return null;
@@ -84,11 +94,16 @@ export class AudioFeed {
       for (let i = 0; i < at; i++) if (q[i].waiting && q[i].dec === dec) { q[i].waiting = false; this.lost++; } // never came out
       const e = q[at];
       const frames = data.numberOfFrames, ch = Math.min(2, data.numberOfChannels);
-      const left = new Float32Array(frames), right = new Float32Array(frames);
-      // Safari outputs interleaved, Chrome planar: f32-planar copyTo is mandatory for every UA.
-      data.copyTo(left, { planeIndex: 0, format: 'f32-planar' });
-      if (ch > 1) data.copyTo(right, { planeIndex: 1, format: 'f32-planar' }); else right.set(left);
+      const trim = Math.min(dec.trim || 0, frames), n = frames - trim;
+      dec.trim = (dec.trim || 0) - trim;
+      const left = new Float32Array(n), right = new Float32Array(n);
+      if (n) {
+        // Safari outputs interleaved, Chrome planar: f32-planar copyTo is mandatory for every UA.
+        data.copyTo(left, { planeIndex: 0, frameOffset: trim, frameCount: n, format: 'f32-planar' });
+        if (ch > 1) data.copyTo(right, { planeIndex: 1, frameOffset: trim, frameCount: n, format: 'f32-planar' }); else right.set(left);
+      }
       e.msg = { type: 'pcm', seq: e.seq, timeUs: e.timeUs, codec: 0, left, right };
+      if (trim) e.msg.trim = trim; // the first frames of its 10 ms are gone (the playout places the rest)
       e.transfer = [left.buffer, right.buffer];
       e.waiting = false;
       this.decoded++;
@@ -121,6 +136,15 @@ export class AudioFeed {
     // A decode that never comes back mustn't hold everything behind it for long (64 packets: 0.64 s).
     if (n === 0 && q.length > 64) { q[0].waiting = false; this.lost++; this._drain(); return; }
     if (n) q.splice(0, n);
+  }
+
+  /** Lets the current decoder finish what it owes, then closes it; the next Opus packet gets a fresh one. */
+  _retire() {
+    const old = this.decoder;
+    this.decoder = null;
+    const close = () => { try { if (old.state !== 'closed') old.close(); } catch { } };
+    if (this.queue.some(e => e.waiting && e.dec === old)) old.flush().then(close, close);
+    else close();
   }
 
   close() {

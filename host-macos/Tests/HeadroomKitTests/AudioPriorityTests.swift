@@ -422,12 +422,37 @@ final class AudioPriorityTests: XCTestCase {
         p2.setRate(kbps: 800, nowUs: now)
         XCTAssertEqual(p2.fragmentPayload, 4096)
         XCTAssertEqual(VideoPacer().fragmentPayload, 16 * 1024)
-        XCTAssertEqual(ClientSession.videoPaceKbps(targetKbps: 2000, minKbps: 800, pathKbps: nil), 3000)
-        XCTAssertEqual(ClientSession.videoPaceKbps(targetKbps: 100, minKbps: 800, pathKbps: nil), 1200)
-        // Measured (VideoPathEstimate.paceKbps), but never above 1.5x the target nor under 100 kbps.
-        XCTAssertEqual(ClientSession.videoPaceKbps(targetKbps: 3000, minKbps: 800, pathKbps: 1400), 1400)
-        XCTAssertEqual(ClientSession.videoPaceKbps(targetKbps: 1000, minKbps: 800, pathKbps: 10000), 1500)
-        XCTAssertEqual(ClientSession.videoPaceKbps(targetKbps: 1000, minKbps: 800, pathKbps: 20), 100)
+        XCTAssertEqual(ClientSession.paceCeilingKbps(targetKbps: 2000, minKbps: 800), 3000)
+        XCTAssertEqual(ClientSession.paceCeilingKbps(targetKbps: 100, minKbps: 800), 1200)
+    }
+
+    func testVideoPaceControl() {
+        var c = VideoPaceControl()
+        XCTAssertEqual(c.kbps, 1500) // until paced frames have measured the path
+        // A big frame the path held back (1.47 Mb/s: a 2 Mb/s path with the sound on it): just under it.
+        c.frame(measuredKbps: 1470, limitedByPace: false, pathQueueMs: 40, ceilingKbps: 3750)
+        XCTAssertEqual(c.kbps, 1425)
+        // The path queued (pings): back off 15% a tick.
+        c.tick(pathQueueMs: 45, pacedWaits: 3, ceilingKbps: 3750)
+        XCTAssertEqual(c.kbps, 1211)
+        // Clear path, video waiting on the pace: climb 8% a tick; a clear path without waiting: stay.
+        c.tick(pathQueueMs: 5, pacedWaits: 2, ceilingKbps: 3750)
+        XCTAssertEqual(c.kbps, 1307)
+        c.tick(pathQueueMs: 5, pacedWaits: 0, ceilingKbps: 3750)
+        XCTAssertEqual(c.kbps, 1307)
+        c.tick(pathQueueMs: 20, pacedWaits: 4, ceilingKbps: 3750) // in between: hold
+        XCTAssertEqual(c.kbps, 1307)
+        // A big frame the pace held back while the path stayed clear: 1.25x what it measured.
+        c.frame(measuredKbps: 1320, limitedByPace: true, pathQueueMs: 8, ceilingKbps: 3750)
+        XCTAssertEqual(c.kbps, 1650)
+        c.frame(measuredKbps: 1320, limitedByPace: true, pathQueueMs: 25, ceilingKbps: 3750) // not while queued
+        XCTAssertEqual(c.kbps, 1650)
+        // Bounds: 1.5x the target, 100 kbps.
+        c.frame(measuredKbps: 9000, limitedByPace: false, pathQueueMs: 0, ceilingKbps: 3750)
+        XCTAssertEqual(c.kbps, 3750)
+        for _ in 0..<60 { c.tick(pathQueueMs: 500, pacedWaits: 0, ceilingKbps: 3750) }
+        XCTAssertEqual(c.kbps, 100)
+        XCTAssertEqual(VideoPaceControl(startKbps: 20000).kbps, 20000) // a stream already running keeps its pace
     }
 
     func testVideoPathEstimateFromBigFrames() {
@@ -436,7 +461,6 @@ final class AudioPriorityTests: XCTestCase {
         XCTAssertTrue(e.add(bytes: 90_000, firstFragment: 16_000, firstWriteUs: 1_000_000, ackUs: 1_540_000, minRttMs: 40, paceKbps: 3750))
         XCTAssertEqual(e.kbps(nowUs: 1_600_000)!, 1184, accuracy: 0.1)
         XCTAssertEqual(e.pathKbps(nowUs: 1_600_000)!, 1184, accuracy: 0.1) // well under the pace: the path's
-        XCTAssertEqual(e.paceKbps(nowUs: 1_600_000)!, 1184 * 0.97, accuracy: 0.1) // pace just under it
         // Small or quick frames don't count.
         XCTAssertFalse(e.add(bytes: 20_000, firstWriteUs: 2_000_000, ackUs: 2_400_000, minRttMs: 40, paceKbps: 3750))
         XCTAssertFalse(e.add(bytes: 60_000, firstWriteUs: 2_000_000, ackUs: 2_070_000, minRttMs: 40, paceKbps: 3750))
@@ -444,60 +468,64 @@ final class AudioPriorityTests: XCTestCase {
         XCTAssertTrue(e.add(bytes: 100_000, firstFragment: 4096, firstWriteUs: 3_000_000, ackUs: 3_540_000, minRttMs: 40, paceKbps: 1500))
         XCTAssertEqual(e.samples.last?.limitedByPace, true)
         XCTAssertEqual(e.samples.last!.kbps, (100_000 - 4096) * 8 / 500.0, accuracy: 0.1)
-        XCTAssertEqual(e.paceKbps(nowUs: 3_600_000)!, e.samples.last!.kbps * 1.1, accuracy: 0.1)
         XCTAssertEqual(e.pathKbps(nowUs: 3_600_000)!, 1184, accuracy: 0.1)
         XCTAssertEqual(e.kbps(nowUs: 3_600_000)!, 1184, accuracy: 0.1) // the lower of two
         // A frame paced 10% over the path measures the path (0.91x the pace: not held back by it).
         XCTAssertTrue(e.add(bytes: 100_000, firstWriteUs: 4_000_000, ackUs: 4_540_000, minRttMs: 40, paceKbps: 1760))
         XCTAssertEqual(e.samples.last?.limitedByPace, false)
         XCTAssertEqual(e.pathKbps(nowUs: 4_600_000)!, 1184, accuracy: 0.1) // the lower of 1184 and 1600
-        XCTAssertEqual(e.paceKbps(nowUs: 4_600_000)!, 1184 * 0.97, accuracy: 0.1)
         // Old samples are forgotten.
         XCTAssertNil(e.kbps(nowUs: 4_540_000 + VideoPathEstimate.maxAgeUs + 1))
-        XCTAssertNil(e.paceKbps(nowUs: 4_540_000 + VideoPathEstimate.maxAgeUs + 1))
     }
 
-    func testPathBacklogWatchStepsOnlyWhenTheQueueDoesNotDrain() {
-        // 512 kbps of sound (64 kB/s) into a ~200 kb/s path: the queue grows 1.56 ms per ms; answers keep coming.
-        var w = PathBacklogWatch()
-        var carried: [(Int, Double)] = []
-        for tick in 0..<20 { // 250 ms ticks
-            let t = Int64(tick) * 250_000
-            if let c = w.update(nowUs: t, queueDelayMs: 350 + Double(tick) * 390, videoAtFloor: true, pongs: tick, bytesOut: Int64(tick) * 16_000) {
-                carried.append((tick, c))
+    func testAudioFitWatch() {
+        // Lossless (needs ~2500 kbps) into a 2 Mb/s path, sending ~2.6 Mb/s: the queue grows ~300 ms a second.
+        var w = AudioFitWatch()
+        var fired: (Int, Double, Bool)?
+        for tick in 0..<12 where fired == nil { // 250 ms ticks
+            let q = max(0, Double(tick) * 75 - 30)
+            if let f = w.update(nowUs: Int64(tick) * 250_000, queueMs: q, bytesOut: Int64(tick) * 81_250, pongs: tick, needKbps: 2500, videoAtFloor: false) {
+                fired = (tick, f.carriedKbps, f.peak)
             }
         }
-        XCTAssertEqual(carried.first?.0, 9)
-        XCTAssertEqual(carried.first?.1 ?? 0, 512 / (1 + 1.56), accuracy: 2) // ~200 kbps
-        // The picture isn't at its floor yet: it yields first.
+        XCTAssertEqual(fired?.0, 4)                         // after 1 s, the queue ~270 ms
+        XCTAssertEqual(fired?.1 ?? 0, 2600 / 1.27, accuracy: 1) // what the path carried: sent / (1 + 0.27), ~2 Mb/s
+        XCTAssertEqual(fired?.2, false)
+        // The same growth from a picture flood on a path that carries the sound (Opus needs ~615): nothing.
         w.reset()
-        for tick in 0..<20 {
-            XCTAssertNil(w.update(nowUs: Int64(tick) * 250_000, queueDelayMs: 600, videoAtFloor: false, pongs: tick, bytesOut: Int64(tick) * 16_000))
+        for tick in 0..<12 {
+            XCTAssertNil(w.update(nowUs: Int64(tick) * 250_000, queueMs: Double(tick) * 75, bytesOut: Int64(tick) * 81_250, pongs: tick, needKbps: 615, videoAtFloor: false))
         }
-        // Draining (what built up before a step down, falling ~100 ms a second): never.
+        // A backlog standing past 450 ms (not growing 50 ms a second, not draining), the picture at its floor: the peak.
         w.reset()
-        for tick in 0..<40 {
-            XCTAssertNil(w.update(nowUs: Int64(tick) * 250_000, queueDelayMs: 2000 - Double(tick) * 25, videoAtFloor: true, pongs: tick, bytesOut: Int64(tick) * 8000))
+        var peak: Int?
+        let qs: [Double] = [460, 462, 458, 461, 463, 460, 466, 470]
+        for (tick, q) in qs.enumerated() where peak == nil {
+            if let f = w.update(nowUs: Int64(tick) * 250_000, queueMs: q, bytesOut: Int64(tick) * 62_500, pongs: tick, needKbps: 2500, videoAtFloor: true), f.peak {
+                peak = tick
+            }
         }
-        // A stall: no answers come, so nothing is learnt about the rate.
+        XCTAssertEqual(peak, 4)
+        // Draining, or a stall (no answers): nothing.
         w.reset()
-        for tick in 0..<40 {
-            XCTAssertNil(w.update(nowUs: Int64(tick) * 250_000, queueDelayMs: 400 + Double(tick) * 250, videoAtFloor: true, pongs: 0, bytesOut: 0))
+        for tick in 0..<12 {
+            XCTAssertNil(w.update(nowUs: Int64(tick) * 250_000, queueMs: 900 - Double(tick) * 40, bytesOut: Int64(tick) * 62_500, pongs: tick, needKbps: 2500, videoAtFloor: true))
         }
-        // Under 300 ms: nothing to judge.
         w.reset()
-        for tick in 0..<20 {
-            XCTAssertNil(w.update(nowUs: Int64(tick) * 250_000, queueDelayMs: 290, videoAtFloor: true, pongs: tick, bytesOut: Int64(tick) * 16_000))
+        for tick in 0..<12 {
+            XCTAssertNil(w.update(nowUs: Int64(tick) * 250_000, queueMs: Double(tick) * 100, bytesOut: 0, pongs: 0, needKbps: 2500, videoAtFloor: true))
         }
     }
 
     func testPriorityVideoBudgetAndCeiling() {
-        // 5 Mb/s at 40 ms: the BDP (25 KB) is under the floor.
-        XCTAssertEqual(ClientSession.priorityVideoBudget(deliveryKbps: 5000, minRttMs: 40), 64 * 1024)
-        // 100 Mb/s at 50 ms: 1.1 x 625 KB.
-        XCTAssertEqual(ClientSession.priorityVideoBudget(deliveryKbps: 100_000, minRttMs: 50), 687_500)
-        XCTAssertEqual(ClientSession.priorityVideoBudget(deliveryKbps: 1_000_000, minRttMs: 500), 6 * 1024 * 1024)
-        XCTAssertEqual(ClientSession.priorityVideoBudget(deliveryKbps: 0, minRttMs: 50), 64 * 1024)
+        // The floor is ~60 ms of the pace within 16–64 KiB: 1.5 Mb/s -> 16 KiB, 4 Mb/s -> 30 kB, 20 Mb/s -> 64 KiB.
+        XCTAssertEqual(ClientSession.priorityVideoBudget(deliveryKbps: 1000, minRttMs: 20, paceKbps: 1500), 16 * 1024)
+        XCTAssertEqual(ClientSession.priorityVideoBudget(deliveryKbps: 1000, minRttMs: 20, paceKbps: 4000), 30_000)
+        XCTAssertEqual(ClientSession.priorityVideoBudget(deliveryKbps: 1000, minRttMs: 20, paceKbps: 20000), 64 * 1024)
+        // Above the floor: 1.1x the BDP (5 Mb/s at 40 ms: 27.5 kB; 100 Mb/s at 50 ms: 687.5 kB), at most 6 MiB.
+        XCTAssertEqual(ClientSession.priorityVideoBudget(deliveryKbps: 5000, minRttMs: 40, paceKbps: 1500), 27_500)
+        XCTAssertEqual(ClientSession.priorityVideoBudget(deliveryKbps: 100_000, minRttMs: 50, paceKbps: 20000), 687_500)
+        XCTAssertEqual(ClientSession.priorityVideoBudget(deliveryKbps: 1_000_000, minRttMs: 500, paceKbps: 20000), 6 * 1024 * 1024)
         XCTAssertEqual(ClientSession.congestionDelayMs(priority: true), 25)
         XCTAssertEqual(ClientSession.congestionDelayMs(priority: false), 60)
         XCTAssertEqual(ClientSession.videoCeiling(capKbps: 40000, minKbps: 800, audioKbps: 2550), 37450)

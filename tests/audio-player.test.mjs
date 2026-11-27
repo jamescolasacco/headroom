@@ -143,7 +143,11 @@ function fakeCodecs({ fail = () => false } = {}) {
         const v = c.data[0] / 100;
         this.cb.output({
           timestamp: c.timestamp, numberOfFrames: 480, numberOfChannels: 2,
-          copyTo(dst) { dst.fill(v); }, close() { },
+          copyTo(dst, o = {}) { // frame i of this packet is v + i / 1e6
+            const off = o.frameOffset || 0, n = o.frameCount ?? 480 - off;
+            for (let j = 0; j < n; j++) dst[j] = v + (off + j) / 1e6;
+          },
+          close() { },
         });
       }
     }
@@ -171,15 +175,48 @@ test('the feed keeps Opus, PCM and silence in seq order around the decoder, and 
   fake.decoders[0].finish();
   assert.deepEqual(posted.map(([m]) => [m.type, m.seq]), [['pcm', 1], ['pcm', 2], ['silence', 3], ['pcm24', 4]]);
   assert.equal(posted[0][0].left[0], Math.fround(0.1));
+  assert.equal(posted[0][0].left.length, 480, 'no trim unless asked (priority off: as before)');
   assert.equal(posted[3][0].bytes.byteLength, 16);
   assert.deepEqual(posted[3][1], [posted[3][0].bytes], 'PCM bytes are transferred to the worklet');
   assert.ok(feed.idle);
   // A decode that fails: that packet is lost (the worklet sees the gap), the ones behind it still go, in order.
+  // (After the lossless packet, Opus is a new stream: a fresh decoder.)
   opus(5, 66);
   feed.packet({ codec: 2, seq: 6, timeUs: 60000, data: new Uint8Array([224, 1]) });
-  fake.decoders[0].finish();
+  assert.equal(fake.decoders.length, 2);
+  fake.decoders[1].finish();
   assert.deepEqual(posted.slice(4).map(([m]) => [m.type, m.seq]), [['silence', 6]]);
   assert.equal(feed.lost, 1);
+  feed.close();
+});
+
+test('priority: a fresh Opus decoder loses its 120-frame lookahead, also after lossless; silence never resets it', async () => {
+  const fake = fakeCodecs();
+  Object.assign(globalThis, { AudioDecoder: fake.AudioDecoder, EncodedAudioChunk: fake.EncodedAudioChunk });
+  const { AudioFeed, OPUS_LOOKAHEAD } = await import('../web/js/audio/feed.js');
+  assert.equal(OPUS_LOOKAHEAD, 120);
+  const posted = [];
+  const feed = new AudioFeed(m => posted.push(m), { trim: OPUS_LOOKAHEAD });
+  const opus = (seq, v) => feed.packet({ codec: 0, seq, timeUs: seq * 10000, data: new Uint8Array([v]) });
+  const silence = seq => feed.packet({ codec: 2, seq, timeUs: seq * 10000, data: new Uint8Array([224, 1]) });
+  opus(1, 10); opus(2, 20); silence(3); silence(4); opus(5, 50);
+  fake.decoders[0].finish();
+  assert.equal(fake.decoders.length, 1, 'one decoder across silence packets');
+  const first = posted[0];
+  assert.equal(first.left.length, 360);
+  assert.equal(first.trim, 120);
+  assert.equal(first.left[0], Math.fround(0.1 + 120 / 1e6), 'frames 120.. of the first output');
+  assert.equal(posted[1].left.length, 480);
+  assert.equal(posted[1].trim, undefined);
+  assert.equal(posted.at(-1).left.length, 480, 'after silence: the same decoder, nothing dropped');
+  // Lossless, then Opus again (a step down): a fresh decoder, its lookahead dropped too.
+  feed.packet({ codec: 1, seq: 6, timeUs: 60000, data: new Uint8Array(2880) });
+  opus(7, 70);
+  assert.equal(fake.decoders.length, 2, 'a fresh decoder for the new Opus stream');
+  assert.equal(fake.decoders[0].state, 'closed', 'the old one is closed');
+  fake.decoders[1].finish();
+  const after = posted.at(-1);
+  assert.deepEqual([after.seq, after.left.length, after.trim], [7, 360, 120]);
   feed.close();
 });
 

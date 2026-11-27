@@ -432,3 +432,21 @@ test('drift verdict: continuous sound may resample under 10% of the time, with n
   assert.equal(driftVerdict(r('continuous', [s({ underruns: 1, underrunMs: 30 })])).length, 1);
   assert.deepEqual(driftVerdict(r('music-priority', [s({ resampledMs: 2413000 })])), [], 'the 10% rule is for continuous sound');
 });
+
+test('simulation: lossless then Opus from a fresh decoder joins without a gap when its lookahead is trimmed', () => {
+  // A playout that plays what it is given, back to back (a trimmed packet is just shorter).
+  class Straight {
+    constructor() { this.q = []; }
+    packet({ left, right }) { for (let i = 0; i < left.length; i++) this.q.push([left[i], right[i]]); }
+    render(L, R) { for (let i = 0; i < L.length; i++) { const v = this.q.shift() || [0, 0]; L[i] = v[0]; R[i] = v[1]; } }
+    stats() { return {}; }
+  }
+  // PCM up to packet 200, then Opus (decoder delay 120) from a fresh decoder, all sound (a 3 s stretch of the music).
+  const packets = packetsEvery10ms(290, { at: k => (k < 8 ? 0 : 5 + (k - 8) * 10), codec: k => (k < 200 ? 1 : 0) });
+  packets.find(p => p.codec === 0).decoderStart = true;
+  const trimmed = simulatePlayout({ packets, ppm: 0, make: () => new Straight(), isSound: musicIsSound, silentCount: musicSilentCount, shift: 120, drop: 120 });
+  assert.deepEqual([trimmed.steady.droppedSound, trimmed.steady.insertedSound, trimmed.steady.underruns], [0, 0, 0]);
+  // Without the trim the decoder's lookahead plays first: the last 120 frames before the switch, again.
+  const untrimmed = simulatePlayout({ packets, ppm: 0, make: () => new Straight(), isSound: musicIsSound, silentCount: musicSilentCount, shift: 120, drop: 0 });
+  assert.equal(untrimmed.steady.insertedSound, 120);
+});

@@ -15,7 +15,7 @@
 // one-file worklet) before unlock(). The worklet then keeps running hashes of what arrived and what played, published
 // with its stats every 0.5 s as globalThis.__headroomAudioState (and this.testState).
 import { hasAudioDecoder } from '../platform.js';
-import { AudioFeed, OPUS_CONFIG } from './feed.js';
+import { AudioFeed, OPUS_CONFIG, OPUS_LOOKAHEAD } from './feed.js';
 
 const AC = globalThis.AudioContext || globalThis.webkitAudioContext;
 
@@ -61,6 +61,7 @@ export class AudioPlayer extends EventTarget {
     if (mode) this.mode = mode;
     if (priority === undefined || !!priority === this.priority) return;
     this.priority = !!priority;
+    if (this.feed) this.feed.trim = this.priority ? OPUS_LOOKAHEAD : 0; // (fresh decoders from now on)
     if (!this.node) return;
     this.node.port.postMessage({ type: 'config', priority: this.priority });
     if (this.priority) this._startWorker();
@@ -95,7 +96,8 @@ export class AudioPlayer extends EventTarget {
     this.gain = ctx.createGain();
     this.gain.gain.value = this.enabled ? 1 : 0;
     node.connect(this.gain).connect(ctx.destination);
-    this.feed = new AudioFeed((msg, transfer) => this.node?.port.postMessage(msg, transfer), { opus });
+    // Priority: a fresh Opus decoder's lookahead is dropped, so a switch from lossless joins seamlessly (off: as before).
+    this.feed = new AudioFeed((msg, transfer) => this.node?.port.postMessage(msg, transfer), { opus, trim: this.priority ? OPUS_LOOKAHEAD : 0 });
     if (this.priority) this._startWorker();
   }
 

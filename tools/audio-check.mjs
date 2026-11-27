@@ -13,7 +13,7 @@
 //        [--seconds=150] [--mode=pcm24|opus] [--priority=on|off] [--audio-in-start] [--max-fps=15]
 //        [--signal=music|tone] [--playout=auto|today|module] [--ppm=80,-80] [--out=audio-check.json] [--label=...]
 //        [--save=<prefix>] [--expect=pass] [--max-delay-p95=ms] [--playout-mode=priority|standard] [--opus-delay=frames]
-//        [--opus-encoder=libopus|audiotoolbox]
+//        [--opus-encoder=libopus|audiotoolbox] [--opus-drop=frames]
 //   node tools/audio-check.mjs --replay=<prefix> [--profile= --playout= --ppm= --out= --expect=]   (a saved capture again)
 //   node tools/audio-check.mjs --drift [--minutes=60] [--ppm=80,-80] [--signals=continuous,music-priority] [--playout=module]
 //        [--expect=pass]                                                           (clock drift alone, no host)
@@ -222,14 +222,14 @@ class ModulePlayout {
     return out >= this.rsFrom;
   }
 
-  packet({ seq, codec, timeUs, left, right, bytes, index }) {
+  packet({ seq, codec, timeUs, left, right, bytes, index, trim }) {
     if (codec === 2) this.p.push({ seq, timeUs, codec: 2, frames: FRAMES });
     else if (codec === 1 && bytes && !index) {
       // As web/js/audio/worklet.js does with a 'pcm24' message: the module's decodePcm24, then floats.
       const d = this.mod.decodePcm24(bytes);
       this.p.push({ seq, timeUs, codec: 1, left: d.left.subarray(0, d.frames), right: d.right.subarray(0, d.frames) });
     }
-    else this.p.push({ seq, timeUs, codec, left, right, frames: left.length });
+    else this.p.push({ seq, timeUs, codec, left, right, frames: left.length, ...(trim ? { trim } : {}) }); // ('pcm': Opus, with its trim)
   }
 
   render(outL, outR) { this.p.render(outL, outR); }
@@ -297,21 +297,33 @@ const r2 = x => (x == null || !Number.isFinite(x) ? x ?? null : Math.round(x * 1
  * Plays `packets` ({at ms, seq, codec, k}: k = which 10 ms of the source, ascending) through playouts from `make`,
  * with an output clock `ppm` off, and follows the output sample by sample (see the header). `real(p)` gives a
  * packet's real samples ({left, right} floats, or null for a silence packet); `expected` (interleaved integers from
- * frame 0) scores them: samples from PCM packets exactly, from Opus packets as SNR against the source `shift` frames
- * earlier (the decoder's delay).
+ * frame 0) scores them: samples from PCM packets exactly, from Opus packets as SNR.
+ * Opus: a packet's samples are the source `shift` frames earlier (the decoder's delay), so its index frames carry
+ * those frame numbers (what the sound is, not the slot it came in); a packet marked `decoderStart` (a fresh decoder:
+ * the stream's start, or Opus after lossless) loses its first `drop` frames, as the viewer trims a fresh decoder's
+ * lookahead (priority mode), so lossless and the Opus after it join without a gap or a repeat.
  */
 export function simulatePlayout({ packets, ppm = 0, make, isSound = () => true, silentCount = () => 0, real = null, expected = null, shift = 0,
-  quantum = 128, tailMs = 600, settleMs = 1000, maxEvents = 200, fromMs = null, learnMs = 45000 }) {
+  drop = 0, quantum = 128, tailMs = 600, settleMs = 1000, maxEvents = 200, fromMs = null, learnMs = 45000 }) {
   const ratio = 1 + ppm * 1e-6;
   const qMs = quantum / 48 / ratio;
   const sMs = qMs / quantum;
   const first = packets[0];
   const t0 = first.at - qMs / 2;
   const tEnd = packets.at(-1).at + tailMs;
-  const kMin = packets[0].k;
-  const arrival = new Float64Array(packets.at(-1).k - kMin + 1).fill(NaN);
-  const codecOf = new Uint8Array(arrival.length).fill(255);
-  for (const p of packets) { arrival[p.k - kMin] = p.at; codecOf[p.k - kMin] = p.codec; }
+  // Which source frames each packet's samples are (ascending), to find the packet behind an output sample.
+  const N = packets.length, c0 = new Float64Array(N), cN = new Int32Array(N);
+  packets.forEach((p, j) => {
+    const cut = p.codec === 0 && p.decoderStart ? Math.min(drop, FRAMES) : 0;
+    c0[j] = p.codec === 0 ? p.k * FRAMES - shift + cut : p.k * FRAMES;
+    cN[j] = FRAMES - cut;
+  });
+  let pp = 0;
+  const packetOf = n => {
+    while (pp + 1 < N && c0[pp + 1] <= n) pp++;
+    while (pp > 0 && c0[pp] > n) pp--;
+    return n >= c0[pp] && n < c0[pp] + cN[pp] ? pp : -1;
+  };
   const idx = make(), act = real ? make() : null;
   const oL = new Float32Array(quantum), oR = new Float32Array(quantum), aL = new Float32Array(quantum), aR = new Float32Array(quantum);
 
@@ -375,20 +387,24 @@ export function simulatePlayout({ packets, ppm = 0, make, isSound = () => true, 
   };
 
   let pi = 0;
-  const feed = p => {
-    const k = p.k, n0 = k * FRAMES;
-    const ix = p.codec === 2 ? { left: new Float32Array(FRAMES), right: new Float32Array(FRAMES) } : indexFrames(n0, FRAMES, isSound);
-    idx.packet({ seq: p.seq, codec: p.codec, timeUs: p.hostUs, left: ix.left, right: ix.right, index: true });
+  const sounding = n => n >= 0 && isSound(n);
+  const feed = (p, j) => {
+    const cut = FRAMES - cN[j];
+    const ix = p.codec === 2 ? { left: new Float32Array(FRAMES), right: new Float32Array(FRAMES) } : indexFrames(c0[j], cN[j], sounding);
+    // (a trimmed packet says so, as web/js/audio/feed.js's message does: the playout places the rest after the trim)
+    const trim = cut && p.codec === 0 ? cut : undefined;
+    idx.packet({ seq: p.seq, codec: p.codec, timeUs: p.hostUs, left: ix.left, right: ix.right, index: true, trim });
     if (act) {
-      const x = real(p) || { left: new Float32Array(FRAMES), right: new Float32Array(FRAMES) };
-      act.packet({ seq: p.seq, codec: p.codec, timeUs: p.hostUs, left: x.left, right: x.right, bytes: p.payload });
+      let x = real(p) || { left: new Float32Array(FRAMES), right: new Float32Array(FRAMES) };
+      if (trim) x = { left: x.left.subarray(cut), right: x.right.subarray(cut) }; // the trimmed lookahead
+      act.packet({ seq: p.seq, codec: p.codec, timeUs: p.hostUs, left: x.left, right: x.right, bytes: p.payload, trim });
     }
   };
 
   for (let q = 0; ; q++) {
     const t = t0 + q * qMs;
     if (t > tEnd) break;
-    while (pi < packets.length && packets[pi].at <= t) feed(packets[pi++]);
+    while (pi < packets.length && packets[pi].at <= t) { feed(packets[pi], pi); pi++; }
     // The playout's own counters as the last packet goes in (the tail after it only drains the buffer).
     if (pi === packets.length && !S.snap) S.snap = idx.stats();
     idx.render(oL, oR);
@@ -420,14 +436,15 @@ export function simulatePlayout({ packets, ppm = 0, make, isSound = () => true, 
       S.altered = 0;
       S.tailAltered = 0;
       const n = Math.round(nx);
+      const pj = packetOf(n);
       if (!delayDone) {
-        const a = arrival[Math.floor(n / FRAMES) - kMin];
+        const a = pj < 0 ? NaN : packets[pj].at;
         if (Number.isFinite(a)) { S.delayAll.add(ts - a); if (ts >= S.firstPlayAt + settleMs) S.delay.add(ts - a); }
         delayDone = true;
       }
       if (act && expected) {
-        const codec = codecOf[Math.floor(n / FRAMES) - kMin];
-        const m = codec === 0 ? n - shift : n;
+        const codec = pj < 0 ? 255 : packets[pj].codec;
+        const m = n; // (an Opus sample's index already is the source frame it plays)
         if ((codec === 0 || codec === 1) && m >= 0 && 2 * m + 1 < expected.length && isSound(m)) {
           const eL = expected[2 * m], eR = expected[2 * m + 1];
           if (codec === 1 && fractional) {
@@ -936,18 +953,34 @@ export async function analyze(cap, opts = {}) {
   }
 
   // Opus: decode as the browser would (one decoder, only the Opus packets, in order) and score it.
-  let opusChunks = null, shift = 0;
+  let opusChunks = null, shift = 0, drop = 0;
+  // The client plays in priority mode once the host confirms it (audio-mode with priority); old hosts never do.
+  const priority = opts.playoutMode ? opts.playoutMode === 'priority' : (cap.audioModes || []).some(m => m.priority === true);
   const opusPackets = audio.filter(p => p.codec === 0 && p.payload);
   if (opusPackets.length) {
     const modes = {};
     for (const p of opusPackets) { const m = opusMode(p.payload); modes[m] = (modes[m] || 0) + 1; }
-    const dec = decodeOpus(opusPackets.map(p => p.payload), tmp);
+    // A fresh decoder where the viewer starts one: the stream's first Opus packet, and Opus after lossless (a fresh
+    // encoder on the host). Each run of packets is decoded on its own, as one stream (silence packets don't break it).
+    let fresh = true;
+    for (const p of audio) { if (p.codec === 1) fresh = true; else if (p.codec === 0) { p.decoderStart = fresh; fresh = false; } }
+    const runs = [];
+    for (const p of opusPackets) { if (p.decoderStart || !runs.length) runs.push([]); runs.at(-1).push(p); }
+    const parts = runs.map(r => decodeOpus(r.map(p => p.payload), tmp));
+    const bad = parts.find(x => x.error);
+    const dec = bad ? { error: bad.error } : { pcm: new Float32Array(opusPackets.length * FRAMES * 2) };
+    if (!bad) {
+      let o = 0;
+      parts.forEach((x, i) => { const want = runs[i].length * FRAMES * 2; dec.pcm.set(x.pcm.subarray(0, want), o); if (x.pcm.length !== want) dec.short = (dec.short || 0) + want - x.pcm.length; o += want; });
+      if (dec.short) dec.pcm.lengthMismatch = true;
+    }
     const fid = { packets: opusPackets.length, modes, decoder: 'ffmpeg libopus' };
     if (dec.error) fid.error = dec.error;
     else {
       const want = opusPackets.length * FRAMES * 2;
-      fid.decodedFrames = dec.pcm.length / 2;
-      if (dec.pcm.length !== want) fid.lengthMismatch = { got: dec.pcm.length / 2, want: want / 2 };
+      fid.decodedFrames = (want - (dec.short || 0)) / 2;
+      fid.decoderRuns = runs.length;
+      if (dec.short) fid.lengthMismatch = { got: fid.decodedFrames, want: want / 2 };
       opusChunks = new Map();
       opusPackets.forEach((p, j) => opusChunks.set(p, j));
       if (music && expected) {
@@ -1018,6 +1051,10 @@ export async function analyze(cap, opts = {}) {
         for (let l = coarse - 4; l <= coarse + 4; l++) { const c = corrAt(l, 1); if (c > best.corr) best = { lag: l, corr: c }; }
         const used = known;
         shift = used;
+        // The viewer in priority mode trims a fresh decoder's lookahead (web/js/audio/feed.js: OPUS_LOOKAHEAD), so what it
+        // plays from a fresh decoder starts with the sound itself; in standard mode it doesn't trim.
+        drop = opts.opusDrop ?? (priority ? used : 0);
+        fid.trimmedPerFreshDecoder = drop;
         atUsed = snrAt(used);
         const atBest = snrAt(best.lag);
         fid.decoderDelay = {
@@ -1032,7 +1069,7 @@ export async function analyze(cap, opts = {}) {
         opusPackets.forEach((p, j) => {
           const prev = opusPackets[j - 1];
           const edge = !prev || prev.k !== p.k - 1; // the first packet after silence/a hole
-          for (let i = 0; i < FRAMES; i++) {
+          for (let i = p.decoderStart ? drop : 0; i < FRAMES; i++) { // (a fresh decoder's trimmed lookahead never plays)
             const m = p.k * FRAMES + i - shift;
             if (m < 0 || !isSound(m)) continue;
             const s = Math.floor(m / RATE);
@@ -1070,7 +1107,7 @@ export async function analyze(cap, opts = {}) {
         const jOf = new Int32Array(audio.at(-1).k + 2).fill(-1);
         opusPackets.forEach((p, j) => { jOf[p.k] = j; });
         const yAt = (c, m) => { const q = m + shift, k = Math.floor(q / FRAMES), j = jOf[k]; return j < 0 ? 0 : dec.pcm[2 * (j * FRAMES + q - k * FRAMES) + c]; };
-        const okSpan = (a, b) => { for (let k = Math.floor((a + shift) / FRAMES); k <= Math.floor((b + shift) / FRAMES); k++) if (k >= jOf.length || jOf[k] < 0) return false; return true; };
+        const okSpan = (a, b) => { for (let k = Math.floor((a + shift) / FRAMES); k <= Math.floor((b + shift) / FRAMES); k++) if (k >= jOf.length || jOf[k] < 0 || (drop && opusPackets[jOf[k]].decoderStart)) return false; return true; };
         const N = 16384;
         const sp = spectralFidelity((c, m) => expected[2 * m + c] / 8388608, yAt, soundSegments(Math.max(0, base - shift), (audio.at(-1).k + 1) * FRAMES - shift, N, N, okSpan), N);
         if (sp) { fid.codingSnrDb = sp.codingSnrDb; fid.bassDb = sp.bassDb; fid.spectralSegments = sp.segments; }
@@ -1096,8 +1133,6 @@ export async function analyze(cap, opts = {}) {
   }
 
   // ------------------------------------------------------------------ playout
-  // The client plays in priority mode once the host confirms it (audio-mode with priority); old hosts never do.
-  const priority = opts.playoutMode ? opts.playoutMode === 'priority' : (cap.audioModes || []).some(m => m.priority === true);
   const factory = await playoutFactory(playout, { priority });
   report.playoutKind = factory.kind;
   const real = p => {
@@ -1122,7 +1157,7 @@ export async function analyze(cap, opts = {}) {
   if (sw) report.switchToOpus = { atMs: r1(sw.at - audio[0].at), kbps: sw.kbps, reason: sw.reason ?? null };
   report.playout = [];
   for (const ppm of ppms) {
-    const res = simulatePlayout({ packets: audio, ppm, make: factory.make, isSound, silentCount, real: haveReal ? real : null, expected: haveReal ? expected : null, shift, fromMs: sw ? sw.at - audio[0].at : null });
+    const res = simulatePlayout({ packets: audio, ppm, make: factory.make, isSound, silentCount, real: haveReal ? real : null, expected: haveReal ? expected : null, shift, drop, fromMs: sw ? sw.at - audio[0].at : null });
     report.playout.push(res);
   }
   // The network's share alone: each packet re-timed as if the source had produced it exactly every 10 ms (its host
@@ -1547,7 +1582,7 @@ async function main() {
       const save = arg('save', out.replace(/\.json$/, '') + '.capture');
       if (save !== 'none') saveCapture(cap, save);
     }
-    const rep = await analyze(cap, { signal: arg('signal', 'music'), ppms, playout, playoutMode: arg('playout-mode'), profile: profile ?? cap.meta?.network?.profile, maxDelayP95: num('max-delay-p95'), opusDelay: num('opus-delay'), opusEncoder: arg('opus-encoder'), label: arg('label'), tmp });
+    const rep = await analyze(cap, { signal: arg('signal', 'music'), ppms, playout, playoutMode: arg('playout-mode'), profile: profile ?? cap.meta?.network?.profile, maxDelayP95: num('max-delay-p95'), opusDelay: num('opus-delay'), opusDrop: num('opus-drop'), opusEncoder: arg('opus-encoder'), label: arg('label'), tmp });
     writeFileSync(out, JSON.stringify(rep, null, 1));
     console.log(summary(rep));
     console.log(`  (report: ${out})`);
