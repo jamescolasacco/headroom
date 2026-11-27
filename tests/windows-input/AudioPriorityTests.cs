@@ -84,6 +84,65 @@ internal static class AudioPriorityTests
               && ClientSession.StepDown(lossless, 1, 2000) == 2 && ClientSession.StepDown(compressed, 3, 10) == 3,
             "steps down to the highest rate that fits 80% of what was carried, at least one step");
 
+        // Stalls are bursts, not slow paths (StallDetector).
+        var stalls = new StallDetector();
+        bool noStall = true;
+        for (int i = 0; i < 20; i++) noStall &= stalls.Pong(i * 100_000L, 140) == null;
+        Check(noStall, "answers every 100 ms: no stall");
+        Check(stalls.Pong(2_350_000, 540) == null && stalls.Pong(2_352_000, 440) == 2_350_000 && stalls.Pong(2_353_000, 340) == null,
+            "a 400 ms stall, then the held pings come back together, each 100 ms faster: a stall, ended at the first of them");
+        var slowing = new StallDetector();
+        long atUs = 0;
+        bool neverStalled = true;
+        for (int i = 0; i < 10; i++)
+        {
+            neverStalled &= slowing.Pong(atUs, 140) == null;
+            atUs += 100_000;
+        }
+        double rttMs = 140;
+        for (int i = 0; i < 20; i++)
+        {
+            atUs += 300_000;
+            rttMs += 200;
+            neverStalled &= slowing.Pong(atUs, rttMs) == null;
+        }
+        Check(neverStalled, "a path slowing down (300 kb/s: answers 300 ms apart, each later than the last): never a stall");
+        var acked = new StallDetector();
+        bool noGap = acked.Pong(0, 140) == null;
+        acked.Evidence(200_000);
+        noGap &= acked.Pong(400_000, 600) == null && acked.Pong(401_000, 140) == null;
+        Check(noGap, "acks fill the gaps between answers: no gap, no stall");
+
+        // The path's rate from the pings' spacing (PathRateMeter): 480 kb/s sent (6000 B between pings 100 ms apart) into a
+        // backed-up 240 kb/s path, so answers 200 ms apart.
+        var meter = new PathRateMeter();
+        for (int i = 0; i < 12; i++) meter.Sent(i * 100_000L, i * 6000L);
+        Check(meter.Kbps(0) == null, "no answers: no rate");
+        meter.Answered(0, 1_000_000);
+        meter.Answered(100_000, 1_200_000);
+        meter.Answered(200_000, 1_400_000);
+        Check(meter.Kbps(1_400_000) == null, "two samples: not yet");
+        for (int i = 3; i < 6; i++) meter.Answered(i * 100_000L, 1_000_000 + i * 200_000L);
+        Check(Near(meter.Kbps(2_000_000), 240), $"the bottleneck's 240 kb/s ({meter.Kbps(2_000_000)})");
+        Check(meter.Kbps(3_000_000) == null, "nothing recent: no rate");
+        var burst = new PathRateMeter();
+        for (int i = 0; i < 8; i++) burst.Sent(i * 100_000L, i * 6000L);
+        for (int i = 0; i < 8; i++) burst.Answered(i * 100_000L, 900_000 + i * 1_000L);
+        Check(burst.Kbps(910_000) > 10_000, "a burst after a stall (answers 1 ms apart) reads high: never a reason to step down");
+
+        // The step leaves room to drain what's queued: 300 kb/s carried, 80% is 240, so 128 (143 on the wire) fits, and still
+        // does with 1.4 s queued (room 300 - 16 - 140 = 144), but not with 1.8 s (104): 64. Lossless on 2 Mb/s with 300 ms
+        // queued: top-rate Opus, as before.
+        Check(ClientSession.StepDown(compressed, 0, 300) == 2 && ClientSession.StepDown(compressed, 0, 300, 1400) == 2
+              && ClientSession.StepDown(compressed, 0, 300, 1800) == 3 && ClientSession.StepDown(lossless, 0, 2000, 300) == 1,
+            "the step drains what's queued within 3 s");
+
+        // Recovery: back up only on a clear path with room for twice what the next rung needs.
+        var r256 = new AudioService.Format(false, true, 256);
+        Check(Math.Abs(ClientSession.NeedKbps(r256) - (256 + 15) * 1.05 - 64) <= 0.001, $"Opus 256 needs 348.55 kbps ({ClientSession.NeedKbps(r256)})");
+        Check(ClientSession.CanStepUp(5, 700, r256) && !ClientSession.CanStepUp(5, 690, r256) && !ClientSession.CanStepUp(20, 5000, r256),
+            "twice 348.55 = 697.1: 700 does, 690 doesn't; nor a queued path");
+
         var pacer = new VideoPacer();
         Check(pacer.Take(1_000_000, 0) == null, "no pace: never held back");
         pacer.SetRate(1600, 0); // 200 kB/s
@@ -129,6 +188,13 @@ internal static class AudioPriorityTests
         Check(pace.Kbps == 3750, "never above 1.5x the target");
         for (int i = 0; i < 60; i++) pace.Tick(500, 0, 3750);
         Check(pace.Kbps == 100 && new VideoPaceControl(20000).Kbps == 20000, "never under 100 kbps; a stream already running keeps its pace");
+        Check(pace.Held && pace.PaceKbps == 16, "the sound over 300 ms behind: the picture all but stops");
+        pace.Tick(20, 0, 3750);
+        Check(!pace.Held && pace.PaceKbps == 100, "caught up: the pace again");
+        var capped = new VideoPaceControl(570);
+        capped.Limit(ClientSession.VideoShareKbps(300, 143));
+        Check(capped.Kbps == 117 && ClientSession.VideoShareKbps(100, 143) == 16,
+            $"a measured path caps it: 300 kb/s with Opus 128 (143 on the wire) leaves the picture 0.75 x 157 ({capped.Kbps}), at least 16");
 
         var path = new VideoPathEstimate();
         Check(path.Add(90_000, 16_000, 1_000_000, 1_540_000, 40, 3750), "a big frame counts");
@@ -163,6 +229,11 @@ internal static class AudioPriorityTests
         for (int tick = 0; tick < standing.Length && peakTick == null; tick++)
             if (fit.Update(tick * 250_000L, standing[tick], tick * 62_500L, tick, 2500, true) is { Peak: true }) peakTick = tick;
         Check(peakTick == 4, $"a backlog standing past 450 ms, the picture at its floor: the peak ({peakTick})");
+        fit.Reset();
+        double[] stallShape = { 20, 20, 25, 20, 420, 380, 200, 60, 25, 20, 20, 20 };
+        for (int tick = 0; tick < stallShape.Length; tick++)
+            Check(fit.Update(tick * 250_000L, stallShape[tick], tick * 20_000L, tick * 2, 615, false) == null,
+                "a stall's shape (the queue jumps, nothing delivered for 400 ms, and drains right after): nothing");
         fit.Reset();
         for (int tick = 0; tick < 12; tick++)
             Check(fit.Update(tick * 250_000L, 900 - tick * 40.0, tick * 62_500L, tick, 2500, true) == null, "a draining queue: nothing");

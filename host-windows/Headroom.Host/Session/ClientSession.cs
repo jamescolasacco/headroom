@@ -28,8 +28,10 @@ namespace Headroom.Host.Session;
 /// 4-16 KiB and paced (VideoPacer at VideoPaceControl's pace: what big frames show the path carries, and the queue the
 /// WebSocket pings measure on the way to the viewer); video gets ~1.1x the bandwidth-delay product in flight (at least
 /// ~60 ms of the pace, 16-64 KiB), starts at 2.5 Mb/s, backs off at 25 ms of queueing or when sound waits 25 ms, and its
-/// ceiling leaves room for the sound. A sound the connection can't carry (AudioRateWatch here, AudioFitWatch on the way)
-/// steps down (lossless, then Opus from 510 kbps) to what fits, never dropped.
+/// ceiling leaves room for the sound. Pings every 100 ms measure the queue (answered ones only) and the path's rate
+/// (PathRateMeter); a stall (StallDetector) is never read as missing bandwidth. A sound the connection can't carry
+/// (AudioRateWatch here; the measured rate, or AudioFitWatch, on the way) steps down (lossless, then Opus from 510 kbps)
+/// to what fits and drains, never dropped, and steps back up one Opus rung once the path has had room for 15 s.
 ///
 /// Latency control on TCP: frames are never queued. The pipeline asks <see cref="CanSendVideo"/> before
 /// encoding; it's false while a frame is waiting for the socket or while unacknowledged bytes exceed
@@ -106,6 +108,23 @@ public sealed class ClientSession : IVideoSink
     /// <summary>The step-down watch on the way to the viewer (the pings' queue), every tick (locked on itself).</summary>
     private readonly AudioFitWatch _fitWatch = new();
     private long _audioStepHoldUntilUs;
+    /// <summary>When the sound last stepped (down or up): recovery waits 15 s after it (tick loop, _audioGate).</summary>
+    private long _lastStepUs;
+    // Stalls (_pingGate): over 250 ms without a pong or an ack, ended by a burst of answers whose round trips fall (the held
+    // pings released together). A stall says nothing about the path's rate: the fit watch starts over after one, and steps
+    // at most one rung within 5 s of it. A gap after which answers keep coming later and later is the path slowing down,
+    // not a stall (a drop to 300 kb/s spaces the answers over 250 ms apart).
+    private StallDetector _stalls = new();
+    private long _lastStallEndUs = long.MinValue / 2;
+    /// <summary>What the path carries, from the pings as markers in what was sent (PathRateMeter, _pingGate).</summary>
+    private PathRateMeter _rateMeter = new();
+    /// <summary>
+    /// Audio priority: pings the ping loop asks for (their send times), written by the send loop between this session's own
+    /// frames, so each marks a point in what was sent.
+    /// </summary>
+    private readonly ConcurrentQueue<long> _pingRequests = new();
+    /// <summary>Audio priority: a ping every 100 ms, so answers come at most ~180 ms apart even with ±40 ms of jitter, and a 250 ms gap is a stall.</summary>
+    public const int PingIntervalMs = 100;
     // Pings (audio priority): WebSocket pings carrying their send time, which the viewer's WebSocket answers by itself
     // (through the relay too); the round trips show what's queued on the way (_pingGate).
     private readonly PingStream? _pings;
@@ -158,6 +177,11 @@ public sealed class ClientSession : IVideoSink
     private VideoPaceControl _paceControl = new();
     private int _paceKbps;
     private double? _lastPathQueueMs;
+    /// <summary>
+    /// The picture's share of the last reading of the path taken while it was backed up (or at a step down), kept for 20 s
+    /// (with 10 s the pace climbed back over it on a link still slow); it limits the pace.
+    /// </summary>
+    private (int Kbps, long UntilUs)? _videoShareCap;
     private long _inflightBytes;
     private double _minRttMs = double.MaxValue;
     private long _minRttResetUs;
@@ -213,13 +237,14 @@ public sealed class ClientSession : IVideoSink
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(appStopping, _cts.Token);
         var ct = linked.Token;
-        Task? sendTask = null, tickTask = null;
+        Task? sendTask = null, tickTask = null, pingTask = null;
         try
         {
             if (!await HandshakeAsync(ct)) return;
             SessionManager.Register(this);
             sendTask = Task.Run(() => SendLoopAsync(ct), ct);
             tickTask = Task.Run(() => TickLoopAsync(ct), ct);
+            pingTask = Task.Run(() => PingLoopAsync(ct), ct);
             await ReceiveLoopAsync(ct);
         }
         catch (OperationCanceledException) { }
@@ -237,8 +262,8 @@ public sealed class ClientSession : IVideoSink
             // receive loop threw), where the send and tick loops used to run on through Cleanup (pinging, stepping,
             // re-attaching the cursor to a capture being released).
             _cts.Cancel();
-            if (sendTask != null && tickTask != null)
-                await Task.WhenAny(Task.WhenAll(Swallow(sendTask), Swallow(tickTask)), Task.Delay(5000));
+            var loops = new[] { sendTask, tickTask, pingTask }.Where(t => t != null).Select(t => Swallow(t!)).ToArray();
+            if (loops.Length > 0) await Task.WhenAny(Task.WhenAll(loops), Task.Delay(5000));
             Cleanup();
         }
     }
@@ -865,15 +890,29 @@ public sealed class ClientSession : IVideoSink
 
     /// <summary>
     /// Where to step down to: the first format below <paramref name="from"/> whose rate fits in <paramref name="fraction"/>
-    /// of what the path carried (kbps); the last one if none does. Always at least one step while there's one left.
+    /// of what the path carried (kbps) and leaves room to drain what's queued (<paramref name="queueMs"/> at that rate)
+    /// within 3 s; the last one if none does. Always at least one step while there's one left. As the Mac host.
     /// </summary>
-    public static int StepDown(AudioService.Format[] ladder, int from, double carriedKbps, double fraction = 0.8)
+    public static int StepDown(AudioService.Format[] ladder, int from, double carriedKbps, double queueMs = 0, double fraction = 0.8)
     {
         if (from + 1 >= ladder.Length) return from;
+        double room = Math.Min(carriedKbps * fraction, carriedKbps - 16 - Math.Max(0, queueMs) * carriedKbps / 3000);
         int i = from + 1;
-        while (i < ladder.Length - 1 && AudioService.WireKbps(ladder[i]) > carriedKbps * fraction) i++;
+        while (i < ladder.Length - 1 && AudioService.WireKbps(ladder[i]) > room) i++;
         return i;
     }
+
+    /// <summary>What a format needs from the path (kbps): the sound and its headers, 5%, and a little picture.</summary>
+    public static double NeedKbps(AudioService.Format f) => AudioService.WireKbps(f) * 1.05 + 64;
+
+    /// <summary>Recovery's test (MaybeStepUp): the path clear, and carrying at least twice what the next rung up needs.</summary>
+    public static bool CanStepUp(double queueMs, double carriedKbps, AudioService.Format next) => queueMs < 15 && carriedKbps >= 2 * NeedKbps(next);
+
+    /// <summary>
+    /// The picture's share of a path carrying <paramref name="capacityKbps"/> with the sound at <paramref name="soundKbps"/>
+    /// on it: 75% of the rest (room for framing and bursts), at least 16 kbps.
+    /// </summary>
+    public static int VideoShareKbps(double capacityKbps, double soundKbps) => Math.Max(16, (int)((capacityKbps - soundKbps) * 0.75));
 
     /// <summary>What the viewer gets now: what it asked for, less the bandwidth steps the connection forced.</summary>
     private AudioService.Format AudioFormatLocked()
@@ -924,7 +963,6 @@ public sealed class ClientSession : IVideoSink
                 }
                 Interlocked.Exchange(ref _audioAcceptedBytes, 0);
                 Interlocked.Exchange(ref _videoBytesOut, 0);
-                lock (_pingGate) _pingsOut.Clear();
                 _audioLogSinceUs = now;
                 _audioLogPackets = 0;
                 _audioLogP95Ms = _audioLogMaxMs = 0;
@@ -945,10 +983,17 @@ public sealed class ClientSession : IVideoSink
                 // the bitrate a stream already running had settled on. Only frames paced from now on measure the path.
                 _pathEstimate = new VideoPathEstimate();
                 _paceControl = new VideoPaceControl(nothingMeasured ? VideoPaceControl.StartKbps : Math.Max(VideoPaceControl.StartKbps, target));
-                _paceKbps = on ? _paceControl.Kbps : 0;
+                _paceKbps = on ? _paceControl.PaceKbps : 0;
                 pace = _paceKbps;
+                _videoShareCap = null;
             }
             lock (_fitWatch) _fitWatch.Reset(); // the bytes out count from now
+            lock (_pingGate)
+            {
+                if (on) _pingsOut.Clear();
+                _stalls = new StallDetector();
+                _rateMeter = new PathRateMeter();
+            }
             SetVideoPace(pace, now);
             if (on) _pipeline?.SetBitrate(target);
             Log.Info("session", on ? $"{Id}: audio priority on: sound first, video paced (from {pace} kbps) in fragments of 4-16 KiB" : $"{Id}: audio priority off");
@@ -1039,11 +1084,12 @@ public sealed class ClientSession : IVideoSink
     }
 
     /// <summary>
-    /// The path can't carry this sound: down the ladder to the highest rate that fits 80% of what it carried (at least one
-    /// step), told with reason "bandwidth"; then 3 s for what queued to drain before the way to the viewer is judged again.
-    /// Never back up by itself (the viewer can ask again), and never down to dropping it. Tick loop.
+    /// The path can't carry this sound: down the ladder to the highest rate that fits 80% of what it carried and drains
+    /// what's queued (at least one step, only one within 5 s of a stall), told with reason "bandwidth"; then 1.5 s before
+    /// the way to the viewer is judged again, and the picture kept to its share of what's left for 20 s. Never down to
+    /// dropping it. Tick loop.
     /// </summary>
-    private void StepAudioDown(double carriedKbps, string why)
+    private void StepAudioDown(double carriedKbps, double queueMs, string why)
     {
         lock (_rateGate) _stepPending = false;
         lock (_audioGate)
@@ -1051,13 +1097,55 @@ public sealed class ClientSession : IVideoSink
             if (!_audioEnabled || !_audioPriority || _closed) return;
             var ladder = AudioLadder(_audioPcm);
             int from = Math.Min(_audioStep, ladder.Length - 1);
-            int to = StepDown(ladder, from, carriedKbps);
+            int to = StepDown(ladder, from, carriedKbps, queueMs);
+            long now = NowUs;
+            long stallEndUs;
+            lock (_pingGate) stallEndUs = _lastStallEndUs;
+            // Within 5 s of a stall, one rung at most: what was measured around it is no measure of the path.
+            if (now - stallEndUs < 5_000_000) to = Math.Min(to, from + 1);
             if (to <= from) return;
             _audioStep = to;
-            _audioStepHoldUntilUs = NowUs + 3_000_000;
+            _lastStepUs = now;
+            _audioStepHoldUntilUs = now + 1_500_000;
+            // The picture must not take back the room the step made (a page jump flooded 300 kb/s right after one).
+            int share = VideoShareKbps(carriedKbps, AudioService.WireKbps(ladder[to])), pace;
+            lock (_flowGate)
+            {
+                _videoShareCap = (share, now + 20_000_000);
+                _paceControl.Limit(share);
+                _paceKbps = _paceControl.PaceKbps;
+                pace = _paceKbps;
+            }
+            SetVideoPace(pace, now);
             lock (_fitWatch) _fitWatch.Reset();
             Log.Warn("session", $"{Id}: {why}: {Describe(ladder[from])} doesn't fit, stepping down to {Describe(ladder[to])}");
             ApplyAudioLocked(true, "bandwidth");
+        }
+    }
+
+    /// <summary>
+    /// Back up one Opus rung after a step down (never to lossless by itself: the viewer asks for that): 15 s since the last
+    /// step, the path clear (under 15 ms queued) and carrying at least twice what the next rung needs, by what video was
+    /// let through (its pace, or what big frames showed) plus the sound now. Told with reason "recovered". Tick loop.
+    /// </summary>
+    private void MaybeStepUp(long now, double? queueMs)
+    {
+        if (queueMs is not { } q) return;
+        lock (_audioGate)
+        {
+            if (!_audioEnabled || !_audioPriority || _closed) return;
+            var ladder = AudioLadder(_audioPcm);
+            int highest = Math.Max(0, Array.FindIndex(ladder, f => !f.Pcm)); // Opus at the top rate
+            int current = Math.Min(_audioStep, ladder.Length - 1);
+            if (current <= highest || now - _lastStepUs < 15_000_000) return;
+            double video;
+            lock (_flowGate) video = Math.Max(_paceKbps, _pathEstimate.PathKbps(now) ?? 0);
+            if (!CanStepUp(q, video + AudioService.WireKbps(ladder[current]), ladder[current - 1])) return;
+            _audioStep = current - 1;
+            _lastStepUs = now;
+            Log.Info("session", $"{Id}: the way to the viewer is clear again (carrying ~{video:0} kbps of picture besides the sound): "
+                + $"{Describe(ladder[current])} -> {Describe(ladder[current - 1])}");
+            ApplyAudioLocked(true, "recovered");
         }
     }
 
@@ -1137,33 +1225,68 @@ public sealed class ClientSession : IVideoSink
         _audioLogP95Ms = _audioLogMaxMs = 0;
     }
 
-    /// <summary>Tick loop, audio priority: a ping carrying its send time (this session's clock).</summary>
-    private void SendPing(long now)
+    /// <summary>
+    /// Audio priority: asks the send loop for a ping every 100 ms. Only while there's priority; at most 64 waiting (the send
+    /// loop held up).
+    /// </summary>
+    private async Task PingLoopAsync(CancellationToken ct)
     {
         if (_pings == null) return;
-        lock (_pingGate)
+        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(PingIntervalMs));
+        while (await timer.WaitForNextTickAsync(ct))
         {
-            if (!_pings.TrySendPing(now)) return; // the last one is still waiting for the connection
-            _pingsOut.Add(now);
-            if (_pingsOut.Count > 64) _pingsOut.RemoveAt(0);
+            if (!_priority || _pingRequests.Count >= 64) continue;
+            _pingRequests.Enqueue(NowUs);
+            _sendSignal.Release();
         }
     }
 
-    /// <summary>The viewer answered a ping (PingStream, on the receive path): its round trip, if the ping was ours.</summary>
+    /// <summary>
+    /// Send loop, audio priority: a ping carrying its send time (this session's clock), written between this session's own
+    /// frames: what had been sent towards the viewer by then (PriorityBytesOut) is exactly what went before it (PathRateMeter).
+    /// </summary>
+    private async Task SendPingAsync(long sentUs)
+    {
+        if (_pings == null) return;
+        long bytesOut = PriorityBytesOut();
+        lock (_pingGate)
+        {
+            _pingsOut.Add(sentUs);
+            if (_pingsOut.Count > 64) _pingsOut.RemoveAt(0);
+            _rateMeter.Sent(sentUs, bytesOut);
+        }
+        await _pings.SendPingAsync(sentUs);
+    }
+
+    /// <summary>
+    /// The viewer answered a ping (PingStream, on the receive path): its round trip, if the ping was ours. With priority it
+    /// also times the path (PathRateMeter) and shows stalls (StallDetector).
+    /// </summary>
     private void OnPong(long sentUs)
     {
         long now = NowUs;
+        bool stallEnded = false;
         lock (_pingGate)
         {
             if (!_pingsOut.Contains(sentUs)) return;
             // A viewer may answer only the latest of several pings: every older one counts as answered too.
             _pingsOut.RemoveAll(t => t <= sentUs);
             double ms = Math.Max(0, now - sentUs) / 1000.0;
+            if (_priority)
+            {
+                _rateMeter.Answered(sentUs, now);
+                if (_stalls.Pong(now, ms) is { } ended)
+                {
+                    _lastStallEndUs = ended;
+                    stallEnded = true;
+                }
+            }
             _pongs.Add((now, ms));
             _pongs.RemoveAll(x => now - x.Us > 2_000_000);
             _pongCount++;
             if (ms < _pongMinMs) _pongMinMs = ms;
         }
+        if (stallEnded) lock (_fitWatch) _fitWatch.Reset(); // only what the path does after the stall counts
     }
 
     private int PongCount
@@ -1172,10 +1295,11 @@ public sealed class ClientSession : IVideoSink
     }
 
     /// <summary>
-    /// With audio priority: how much is queued on the way to the viewer (ms), from the pings: the smallest round trip of
-    /// the last second (<paramref name="windowUs"/>; jitter doesn't count, a standing queue does), or how long the oldest
-    /// unanswered ping has been out if that's longer, less the path's own round trip (the smallest seen, or the
-    /// handshake's). Null until pings say.
+    /// With audio priority: how much is queued on the way to the viewer (ms), from answered pings only: the smallest round
+    /// trip answered within the window (<paramref name="windowUs"/>; jitter doesn't count, a standing queue does), less the
+    /// path's own round trip (the smallest seen, or the handshake's). Null without an answer in the window: a stall brings
+    /// none, so it's no evidence about the path's rate (counting the unanswered pings grew the estimate during a stall and
+    /// stepped the sound down on cellular).
     /// </summary>
     private double? PathQueueMs(long now, long windowUs = 1_000_000)
     {
@@ -1186,10 +1310,15 @@ public sealed class ClientSession : IVideoSink
             double recent = double.MaxValue;
             foreach (var pong in _pongs)
                 if (now - pong.Us <= windowUs && pong.Ms < recent) recent = pong.Ms;
-            double waiting = _pingsOut.Count > 0 ? Math.Max(0, now - _pingsOut[0]) / 1000.0 : 0;
-            if (recent == double.MaxValue && waiting <= 0) return null;
-            return Math.Max(0, Math.Max(recent == double.MaxValue ? 0 : recent, waiting) - baseMs);
+            if (recent == double.MaxValue) return null;
+            return Math.Max(0, recent - baseMs);
         }
+    }
+
+    /// <summary>What the path carries by the pings (PathRateMeter), or null.</summary>
+    private double? PathRateKbps(long now)
+    {
+        lock (_pingGate) return _rateMeter.Kbps(now);
     }
 
     /// <summary>With audio priority: the fastest video may leave (0: unpaced).</summary>
@@ -1354,6 +1483,7 @@ public sealed class ClientSession : IVideoSink
     {
         long now = NowUs;
         int newPace = 0;
+        if (_priority) lock (_pingGate) _stalls.Evidence(now);
         lock (_flowGate)
         {
             // Acks are cumulative-ish: anything older than the acked frame is also delivered.
@@ -1391,7 +1521,7 @@ public sealed class ClientSession : IVideoSink
                     {
                         var measured = _pathEstimate.Samples[_pathEstimate.Samples.Count - 1];
                         _paceControl.Frame(measured.Kbps, measured.LimitedByPace, _lastPathQueueMs, PaceCeilingKbps(_targetKbps, _minKbps));
-                        _paceKbps = _paceControl.Kbps;
+                        _paceKbps = _paceControl.PaceKbps;
                         newPace = _paceKbps;
                     }
                 }
@@ -1438,6 +1568,11 @@ public sealed class ClientSession : IVideoSink
             waitMs = Timeout.Infinite;
             while (!ct.IsCancellationRequested)
             {
+                if (_pingRequests.TryDequeue(out long pingUs))
+                {
+                    await SendPingAsync(pingUs);
+                    continue;
+                }
                 if (_control.TryDequeue(out var c))
                 {
                     await _ws.SendAsync(c.Data, c.Type, true, ct);
@@ -1533,7 +1668,6 @@ public sealed class ClientSession : IVideoSink
             AttachCursor();
             try { FollowDisplays(now); }
             catch (Exception ex) { Log.Warn("session", $"{Id}: display check failed: {ex.Message}"); }
-            if (_priority) SendPing(now);
             bool step;
             double carried;
             lock (_rateGate)
@@ -1541,7 +1675,7 @@ public sealed class ClientSession : IVideoSink
                 step = _stepPending;
                 carried = _stepCarriedKbps;
             }
-            if (step) StepAudioDown(carried, $"its queue here held over 300 ms for 2 s while the path carried {carried:0} kbps of it");
+            if (step) StepAudioDown(carried, 0, $"its queue here held over 300 ms for 2 s while the path carried {carried:0} kbps of it");
             AdaptBitrate(now);
             if (now - lastStats >= 1_000_000)
             {
@@ -1605,10 +1739,15 @@ public sealed class ClientSession : IVideoSink
         // what's queued beyond this computer.
         bool priority = _priority;
         long audioWaitUs = priority ? TakeAudioTickMaxUs() : 0;
+        // From answered pings only (PathQueueMs): a stall brings no new answers, so it's no evidence about the path's rate,
+        // for the sound (the fit watch), the picture's pace or its bitrate.
         double? pathQueue = priority ? PathQueueMs(now) : null;
         double? recentQueue = priority ? PathQueueMs(now, 500_000) : null;
+        double? quickQueue = priority ? PathQueueMs(now, 300_000) : null;
         long bytesOut = priority ? PriorityBytesOut() : 0;
         int pacedWaits = priority ? TakePacedWaits() : 0;
+        double? capacityKbps = priority ? PathRateKbps(now) : null;
+        double soundWire = _audioWireKbps;
         bool congested;
         long blocked;
         double usedKbps;
@@ -1623,7 +1762,7 @@ public sealed class ClientSession : IVideoSink
             // Re-learn min RTT every 30 s in case the path changed (e.g. Wi-Fi -> LAN).
             if (now - _minRttResetUs > 30_000_000) { _minRttResetUs = now; if (_inflight.Count == 0) _minRttMs = double.MaxValue; }
             // With audio priority the pings' estimate (jitter doesn't count), else the frames' smoothed RTT over their minimum.
-            double queueDelay = priority && pathQueue is { } q ? q : _minRttMs == double.MaxValue ? 0 : _srttMs - _minRttMs;
+            double queueDelay = priority ? pathQueue ?? 0 : _minRttMs == double.MaxValue ? 0 : _srttMs - _minRttMs;
             // Congested = a ready frame spent >40% of a tick waiting for the network, or the path shows queueing
             // delay (bufferbloat) beyond what serialization explains, two ticks running. One big frame (a whole new
             // screen) holds the next back for a tick: that's the picture, not the link. Sharpening passes wait for an
@@ -1671,24 +1810,46 @@ public sealed class ClientSession : IVideoSink
         lock (_flowGate)
         {
             _paceControl.Tick(pathQueue, pacedWaits, PaceCeilingKbps(_targetKbps, _minKbps));
-            _paceKbps = _paceControl.Kbps;
+            // Backed up, with the path's rate measured: the picture gets at most 75% of what's left after the sound, for 20 s
+            // after the last such reading.
+            if (recentQueue is { } backedUp && backedUp > 100 && capacityKbps is { } capacity)
+                _videoShareCap = (VideoShareKbps(capacity, soundWire), now + 20_000_000);
+            if (_videoShareCap is { } share)
+            {
+                if (now < share.UntilUs) _paceControl.Limit(share.Kbps);
+                else _videoShareCap = null;
+            }
+            _paceKbps = _paceControl.PaceKbps;
             pace = _paceKbps;
         }
         SetVideoPace(pace, now);
-        // Whether the sound fits the way to the viewer (AudioFitWatch, on the pings' queue of the last 500 ms). The picture
-        // has yielded once it's paced to what the path carries for it and its bitrate is cut to near its floor.
+        // The picture has yielded once it's paced to what the path carries for it and its bitrate is cut to near its floor.
         bool videoAtFloor = _targetKbps <= _minKbps * 2;
-        double needKbps = _audioWireKbps * 1.05 + 64; // the sound, its headers, a little picture
+        double needKbps = _audioWireKbps * 1.05 + 64; // NeedKbps: the sound, its headers, 5%, a little picture
+        // The path is backed up (over 100 ms queued, within 300 ms) and what it delivers, measured between pings, is clearly
+        // less than the sound needs (under 90%): step now, straight to what fits and drains (the growth-based estimate
+        // lagged: 423 kb/s read on 300). On a path that isn't backed up the answers come as fast as they were sent, which
+        // reads near the sound's own rate: the 90% keeps that from counting.
+        if (now >= _audioStepHoldUntilUs && quickQueue is { } quick && quick > 100 && capacityKbps is { } carried && carried < needKbps * 0.9)
+        {
+            StepAudioDown(carried, quick, $"the way to the viewer is backed up and delivers ~{carried:0} kbps, less than the sound needs (~{needKbps:0})");
+            return;
+        }
+        // Whether the sound fits the way to the viewer (AudioFitWatch, on the pings' queue of the last 500 ms).
         (double CarriedKbps, bool Peak)? fit = null;
+        double fitQueue = 0;
         if (now >= _audioStepHoldUntilUs && recentQueue is { } queue)
         {
             int pongs = PongCount;
+            fitQueue = queue;
             lock (_fitWatch) fit = _fitWatch.Update(now, queue, bytesOut, pongs, needKbps, videoAtFloor);
         }
         if (fit is { } f)
-            StepAudioDown(f.CarriedKbps, f.Peak
+            StepAudioDown(f.CarriedKbps, fitQueue, f.Peak
                 ? $"the way to the viewer queued over 450 ms without draining (it carried ~{f.CarriedKbps:0} kbps)"
                 : $"the way to the viewer queued up while carrying ~{f.CarriedKbps:0} kbps, less than the sound needs (~{needKbps:0})");
+        else
+            MaybeStepUp(now, pathQueue);
     }
 
     private void SendStats(long now)
@@ -2209,10 +2370,11 @@ public sealed class AudioRateWatch
 
 /// <summary>
 /// Whether the sound fits the way to the viewer (with audio priority), from the queue the pings measure, every tick.
-/// - Growing: over the last second the queue grew by 50 ms or more, to over 100 ms, while answers kept coming, and what the
-///   path carried meanwhile (sent / (1 + growth): a queue grows by (sent - carried) / carried) is less than the sound
-///   needs. It doesn't fit: step down now, before the viewer's buffer runs dry. The path's capacity decides, so a picture
-///   flood on a path that carries the sound doesn't count.
+/// - Growing: over the last second the queue grew by 50 ms or more (at least 10 ms in each half: a stall's jump and drain
+///   isn't a path that can't keep up), to over 100 ms, while answers kept coming, and what the path carried meanwhile
+///   (sent / (1 + growth): a queue grows by (sent - carried) / carried) is less than the sound needs. It doesn't fit: step
+///   down now, before the viewer's buffer runs dry. The path's capacity decides, so a picture flood on a path that carries
+///   the sound doesn't count.
 /// - Peak: the queue is over 450 ms and not draining (fell less than 50 ms in the second), with the picture already yielded
 ///   (at its floor) or the path carrying less than 1.25x what the sound needs. Catches a backlog that the sound's silences
 ///   keep draining: lossless music, 1 s of silence in 4, built ~700 ms a cycle on 2 Mb/s (on the Mac host).
@@ -2236,11 +2398,15 @@ public sealed class AudioFitWatch
         if (at < 0) return null;
         var then = _history[at];
         if (pongs - then.Pongs < 3) return null;
+        int midAt = _history.FindLastIndex(h => nowUs - h.Us >= 400_000);
+        double midQueueMs = midAt >= 0 ? _history[midAt].QueueMs : then.QueueMs;
         double spanMs = (nowUs - then.Us) / 1000.0;
         double growth = (queueMs - then.QueueMs) / spanMs;
         double carried = (bytesOut - then.BytesOut) * 8 / spanMs / (1 + Math.Max(0, growth));
+        // Growth in both halves of the second: a stall's jump and drain isn't a path that can't keep up.
+        bool sustained = midQueueMs - then.QueueMs >= 10 && queueMs - midQueueMs >= 10;
         (double CarriedKbps, bool Peak)? verdict = null;
-        if (queueMs > GrowMinMs && growth >= GrowPerMs && carried < needKbps)
+        if (queueMs > GrowMinMs && growth >= GrowPerMs && sustained && carried < needKbps)
             verdict = (carried, false);
         else if (queueMs > PeakMs && queueMs > then.QueueMs - 50 && (videoAtFloor || carried < needKbps * 1.25))
             verdict = (carried, true);
@@ -2256,7 +2422,8 @@ public sealed class AudioFitWatch
 /// frame the path held back sets it just under what the path carried (0.97x), one the pace held back lifts it to 1.25x
 /// that while the path stays clear (under 15 ms queued). Every tick it backs off 15% while the path is queued (over 30 ms
 /// by the pings) and climbs 8% while video waited on the pace and the path stayed clear. Never above 1.5x the bitrate
-/// target, never under 100 kbps. The same rules as the Mac host's VideoPaceControl.
+/// target, never under 100 kbps; a measurement of the path can cap it lower (Limit). With the sound over 300 ms behind,
+/// the picture all but stops (16 kb/s) until it has caught up. The same rules as the Mac host's VideoPaceControl.
 /// </summary>
 public sealed class VideoPaceControl
 {
@@ -2280,7 +2447,101 @@ public sealed class VideoPaceControl
         if (pathQueueMs is { } q && q > 30) Kbps = Kbps * 85 / 100;
         else if (pacedWaits > 0 && (pathQueueMs ?? 0) < 15) Kbps = Kbps * 108 / 100;
         Clamp(ceilingKbps);
+        // The sound over 300 ms behind: the picture all but stops (16 kb/s) until it has caught up.
+        Held = (pathQueueMs ?? 0) > 300;
     }
 
+    public bool Held { get; private set; }
+
+    /// <summary>No faster than <paramref name="cap"/> (from a measurement of the path).</summary>
+    public void Limit(int cap) => Kbps = Math.Max(16, Math.Min(Kbps, cap));
+
+    /// <summary>What the pacer gets.</summary>
+    public int PaceKbps => Held ? 16 : Kbps;
+
     private void Clamp(int ceiling) => Kbps = Math.Min(Math.Max(Kbps, 100), Math.Max(ceiling, 100));
+}
+
+/// <summary>
+/// Stalls on the way to the viewer (with audio priority), from the pings (every 100 ms) and the frames' acks: over 250 ms
+/// without either, ended by a burst, the next answer within 150 ms coming back at least 50 ms faster (the pings held during
+/// the stall, released together). A gap after which the answers keep coming later and later is the path slowing down (a
+/// drop to 300 kb/s spaced them over 250 ms apart), and counts as evidence like any other. The same rules as the Mac host's
+/// StallDetector.
+/// </summary>
+public sealed class StallDetector
+{
+    public const long GapUs = 250_000;
+    public const long BurstUs = 150_000;
+    public const double BurstDropMs = 50;
+
+    private long _lastUs;
+    private (long Us, double RttMs)? _gapEnd;
+
+    /// <summary>An ack (or anything else showing the path delivers).</summary>
+    public void Evidence(long nowUs) => _lastUs = nowUs;
+
+    /// <summary>A pong. Not null: when a stall ended, once this answer confirms one.</summary>
+    public long? Pong(long nowUs, double rttMs)
+    {
+        long? ended = null;
+        if (_gapEnd is { } g)
+        {
+            bool burst = nowUs - g.Us <= BurstUs && rttMs <= g.RttMs - BurstDropMs;
+            if (burst) ended = g.Us;
+            if (burst || nowUs - g.Us > BurstUs) _gapEnd = null;
+        }
+        if (_lastUs > 0 && nowUs - _lastUs > GapUs) _gapEnd = (nowUs, rttMs);
+        _lastUs = nowUs;
+        return ended;
+    }
+}
+
+/// <summary>
+/// What the way to the viewer carries, with the pings as markers (with audio priority): the host knows what it sent between
+/// two pings, and while the path is backed up the answers come back as far apart as the path took to deliver it. Rate per
+/// answer = bytes between the two pings / time between their answers; the median of the latest (up to 5 within 600 ms, at
+/// least 3). Only meaningful while the path is backed up (the caller checks the queue): otherwise answers come as fast as
+/// they were sent. After a stall the held answers arrive together, which reads as a high rate: harmless. The same rules as
+/// the Mac host's PathRateMeter.
+/// </summary>
+public sealed class PathRateMeter
+{
+    private readonly List<(long SentUs, long BytesOut)> _pings = new();
+    private (long ArrivalUs, long SentUs, long BytesOut)? _last;
+    private readonly List<(long Us, double Kbps)> _samples = new();
+
+    /// <summary>A ping went, with what had been sent towards the viewer before it.</summary>
+    public void Sent(long sentUs, long bytesOut)
+    {
+        _pings.Add((sentUs, bytesOut));
+        if (_pings.Count > 64) _pings.RemoveAt(0);
+    }
+
+    /// <summary>The answer to the ping sent at <paramref name="sentUs"/> arrived.</summary>
+    public void Answered(long sentUs, long nowUs)
+    {
+        int at = _pings.FindIndex(p => p.SentUs == sentUs);
+        if (at < 0) return;
+        var ping = _pings[at];
+        _pings.RemoveAll(p => p.SentUs <= sentUs);
+        if (_last is { } l && sentUs > l.SentUs && nowUs - l.ArrivalUs >= 1_000)
+        {
+            double kbps = (ping.BytesOut - l.BytesOut) * 8 / ((nowUs - l.ArrivalUs) / 1000.0);
+            _samples.Add((nowUs, kbps));
+            _samples.RemoveAll(x => nowUs - x.Us > 1_000_000);
+        }
+        _last = (nowUs, sentUs, ping.BytesOut);
+    }
+
+    /// <summary>
+    /// kbps: the median of the latest samples (up to 5, within 600 ms; at least 3), or null. Recent ones only: older ones,
+    /// from before the path changed, kept the median up for a second after a drop.
+    /// </summary>
+    public double? Kbps(long nowUs)
+    {
+        var recent = _samples.Where(x => nowUs - x.Us <= 600_000).Select(x => x.Kbps).ToList();
+        var k = recent.Skip(Math.Max(0, recent.Count - 5)).OrderBy(x => x).ToList();
+        return k.Count >= 3 ? k[k.Count / 2] : (double?)null;
+    }
 }
