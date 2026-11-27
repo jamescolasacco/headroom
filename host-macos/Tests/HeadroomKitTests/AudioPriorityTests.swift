@@ -375,6 +375,71 @@ final class AudioPriorityTests: XCTestCase {
         }
     }
 
+    func testStallsAreBurstsNotSlowPaths() {
+        // Answers every 100 ms: no stall.
+        var d = StallDetector()
+        for i in 0..<20 { XCTAssertNil(d.pong(nowUs: Int64(i) * 100_000, rttMs: 140)) }
+        // A 400 ms stall: nothing, then the held pings come back together, each 100 ms faster.
+        var t: Int64 = 1_900_000
+        XCTAssertNil(d.pong(nowUs: 2_350_000, rttMs: 540))
+        XCTAssertEqual(d.pong(nowUs: 2_352_000, rttMs: 440), 2_350_000)
+        XCTAssertNil(d.pong(nowUs: 2_353_000, rttMs: 340))
+        // A path slowing down (300 kb/s): answers 300 ms apart, each later than the last: never a stall.
+        var e = StallDetector()
+        t = 0
+        for i in 0..<10 { XCTAssertNil(e.pong(nowUs: t, rttMs: 140)); t += 100_000; _ = i }
+        var rtt = 140.0
+        for _ in 0..<20 {
+            t += 300_000
+            rtt += 200
+            XCTAssertNil(e.pong(nowUs: t, rttMs: rtt))
+        }
+        // Acks fill the gaps between answers: no gap, no stall.
+        var f = StallDetector()
+        XCTAssertNil(f.pong(nowUs: 0, rttMs: 140))
+        f.evidence(nowUs: 200_000)
+        XCTAssertNil(f.pong(nowUs: 400_000, rttMs: 600))
+        XCTAssertNil(f.pong(nowUs: 401_000, rttMs: 140))
+    }
+
+    func testPathRateMeterReadsTheBottleneckFromPingSpacing() {
+        // 480 kb/s sent (6000 B between pings 100 ms apart) into a backed-up 240 kb/s path: answers 200 ms apart.
+        var m = PathRateMeter()
+        for i in 0..<12 { m.sent(sentUs: Int64(i) * 100_000, bytesOut: Int64(i) * 6000) }
+        XCTAssertNil(m.kbps(nowUs: 0))
+        m.answered(sentUs: 0, nowUs: 1_000_000)
+        m.answered(sentUs: 100_000, nowUs: 1_200_000)
+        m.answered(sentUs: 200_000, nowUs: 1_400_000)
+        XCTAssertNil(m.kbps(nowUs: 1_400_000)) // two samples: not yet
+        for i in 3..<6 { m.answered(sentUs: Int64(i) * 100_000, nowUs: 1_000_000 + Int64(i) * 200_000) }
+        XCTAssertEqual(m.kbps(nowUs: 2_000_000) ?? 0, 240, accuracy: 0.1)
+        XCTAssertNil(m.kbps(nowUs: 3_000_000)) // nothing recent
+        // A burst after a stall (answers 1 ms apart) reads high: never a reason to step down.
+        var b = PathRateMeter()
+        for i in 0..<8 { b.sent(sentUs: Int64(i) * 100_000, bytesOut: Int64(i) * 6000) }
+        for i in 0..<8 { b.answered(sentUs: Int64(i) * 100_000, nowUs: 900_000 + Int64(i) * 1_000) }
+        XCTAssertGreaterThan(b.kbps(nowUs: 910_000) ?? 0, 10_000)
+    }
+
+    func testStepDownDrainsWhatIsQueued() {
+        let opus = ClientSession.audioLadder(.opus)
+        // 300 kb/s carried: 80% is 240, so 128 (143 on the wire) fits...
+        XCTAssertEqual(ClientSession.stepDown(opus, from: 0, carriedKbps: 300), 2)
+        // ...and still does with 1.4 s queued (room 300 - 16 - 140 = 144), but not with 1.8 s (104): 64.
+        XCTAssertEqual(ClientSession.stepDown(opus, from: 0, carriedKbps: 300, queueMs: 1400), 2)
+        XCTAssertEqual(ClientSession.stepDown(opus, from: 0, carriedKbps: 300, queueMs: 1800), 3)
+        // Lossless on 2 Mb/s with 300 ms queued: top-rate Opus, as before.
+        XCTAssertEqual(ClientSession.stepDown(ClientSession.audioLadder(.pcm24), from: 0, carriedKbps: 2000, queueMs: 300), 1)
+    }
+
+    func testRecoveryStepsUpOnlyOnAClearPathWithRoom() {
+        let r256 = AudioService.Format(mode: .opus, priority: true, kbps: 256)
+        XCTAssertEqual(ClientSession.needKbps(r256), Double(256 + 15) * 1.05 + 64, accuracy: 0.001) // 348.55
+        XCTAssertTrue(ClientSession.canStepUp(queueMs: 5, carriedKbps: 700, next: r256))   // 2 x 348.55 = 697.1
+        XCTAssertFalse(ClientSession.canStepUp(queueMs: 5, carriedKbps: 690, next: r256))  // not twice what it needs
+        XCTAssertFalse(ClientSession.canStepUp(queueMs: 20, carriedKbps: 5000, next: r256)) // the path is queued
+    }
+
     func testStepDownLadder() {
         let lossless = ClientSession.audioLadder(.pcm24)
         XCTAssertEqual(lossless.map(\.mode), [.pcm24, .opus, .opus, .opus, .opus])
@@ -452,7 +517,18 @@ final class AudioPriorityTests: XCTestCase {
         XCTAssertEqual(c.kbps, 3750)
         for _ in 0..<60 { c.tick(pathQueueMs: 500, pacedWaits: 0, ceilingKbps: 3750) }
         XCTAssertEqual(c.kbps, 100)
+        // The sound over 300 ms behind: the picture all but stops until it has caught up.
+        XCTAssertTrue(c.held)
+        XCTAssertEqual(c.paceKbps, 16)
+        c.tick(pathQueueMs: 20, pacedWaits: 0, ceilingKbps: 3750)
+        XCTAssertFalse(c.held)
+        XCTAssertEqual(c.paceKbps, 100)
         XCTAssertEqual(VideoPaceControl(startKbps: 20000).kbps, 20000) // a stream already running keeps its pace
+        // A measured path caps it: 300 kb/s with Opus 128 (143 on the wire) on it leaves the picture 0.75 x 157.
+        var d = VideoPaceControl(startKbps: 570)
+        d.limit(kbps: ClientSession.videoShareKbps(capacityKbps: 300, soundKbps: 143))
+        XCTAssertEqual(d.kbps, 117)
+        XCTAssertEqual(ClientSession.videoShareKbps(capacityKbps: 100, soundKbps: 143), 16)
     }
 
     func testVideoPathEstimateFromBigFrames() {
@@ -506,6 +582,13 @@ final class AudioPriorityTests: XCTestCase {
             }
         }
         XCTAssertEqual(peak, 4)
+        // A stall's shape: the queue jumps (nothing delivered for 400 ms) and drains right after. Not a path that can't
+        // keep up, even sending little (Opus): nothing.
+        w.reset()
+        let stall: [Double] = [20, 20, 25, 20, 420, 380, 200, 60, 25, 20, 20, 20]
+        for (tick, q) in stall.enumerated() {
+            XCTAssertNil(w.update(nowUs: Int64(tick) * 250_000, queueMs: q, bytesOut: Int64(tick) * 20_000, pongs: tick * 2, needKbps: 615, videoAtFloor: false))
+        }
         // Draining, or a stall (no answers): nothing.
         w.reset()
         for tick in 0..<12 {

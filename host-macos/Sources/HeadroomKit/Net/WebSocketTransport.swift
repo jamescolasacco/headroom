@@ -35,12 +35,12 @@ public protocol WebSocketPeer: AnyObject {
     /// The last fragment of `frame` is about to be written (register it as in flight before the ack can arrive).
     /// Called on the event loop, not the peer's queue.
     func videoFrameWillComplete(_ frame: EncodedVideoFrame)
-    /// The viewer answered one of our pings (`sendPing`) after `rttUs`.
-    func webSocketPong(rttUs: Int64)
+    /// The viewer answered our ping sent at `sentUs` (`sendPing`) after `rttUs`.
+    func webSocketPong(sentUs: Int64, rttUs: Int64)
 }
 
 public extension WebSocketPeer {
-    func webSocketPong(rttUs: Int64) {}
+    func webSocketPong(sentUs: Int64, rttUs: Int64) {}
 }
 
 /// The transport's audio queue. Without audio priority, as before: past 25 queued packets (250 ms) new ones are
@@ -248,7 +248,7 @@ public final class WebSocketTransport: ChannelInboundHandler {
             lock.unlock()
             guard ours else { break }
             let rtt = max(0, Clock.nowUs - sentUs)
-            queue.async { [weak self] in self?.peer?.webSocketPong(rttUs: rtt) }
+            queue.async { [weak self] in self?.peer?.webSocketPong(sentUs: sentUs, rttUs: rtt) }
         case .connectionClose:
             if !closedSent {
                 closedSent = true
@@ -305,23 +305,22 @@ public final class WebSocketTransport: ChannelInboundHandler {
     /// A WebSocket ping carrying its send time: the viewer's WebSocket answers it by itself (browsers and Node do,
     /// RFC 6455), through the relay's tunnel too, and the round trip includes whatever is queued on the way to the
     /// viewer. With audio priority it shows a backlog that sits beyond this computer (in the relay, the network).
-    public func sendPing() {
+    /// Returns the ping's send time (its id), with what this session had sent towards the viewer by then
+    /// (`priorityBytesOut`): the ping is a marker in the byte stream.
+    @discardableResult
+    public func sendPing() -> (sentUs: Int64, bytesOut: Int64) {
         var b = [UInt8](repeating: 0, count: 8)
         let now = Clock.nowUs
         b.putI64(now, at: 0)
         lock.lock()
-        if closed { lock.unlock(); return }
+        let out = audioWrittenBytes + videoBytesOut
+        if closed { lock.unlock(); return (now, out) }
         pingsOut.append(now)
         if pingsOut.count > 64 { pingsOut.removeFirst() }
         control.append((b, .ping))
         lock.unlock()
         schedulePump()
-    }
-
-    /// How long the oldest unanswered ping has been out (0: none).
-    public var oldestPingAgeUs: Int64 {
-        lock.lock(); defer { lock.unlock() }
-        return pingsOut.first.map { max(0, Clock.nowUs - $0) } ?? 0
+        return (now, out)
     }
 
     private func enqueueControl(_ bytes: [UInt8], opcode: WebSocketOpcode) {

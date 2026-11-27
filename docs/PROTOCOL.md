@@ -148,16 +148,20 @@ The host only ever sees plain key codes.
     Decoded Opus trails the timestamps by the encoder's look-ahead (2.5 ms for the restricted low-delay CELT used).
   - The host never drops audio, keeps video from queueing ahead of it (video fragments of 4–16 KiB, paced to what the
     path carries; small socket buffers) and makes video give up bandwidth first. It sends a WebSocket ping every
-    250 ms with its 8-byte send time to measure the queue end to end; viewers answer as WebSocket requires
-    (browsers do it themselves).
-  - If the sound can't be carried (its queue stays over 300 ms for 2 s), the host steps down at once to the highest
-    rung that fits the measured rate: lossless → Opus 510/512 → 256 → 128 → 64 kbps, at least 5 s apart. It
-    never steps back up by itself: an `audio` message with `mode` asks again, and turning priority on starts over.
+    100 ms with its 8-byte send time to measure the queue and the path's rate end to end; viewers answer as
+    WebSocket requires (browsers do it themselves). A stall (no answers, then a burst of them) is never read as
+    missing bandwidth.
+  - If the sound can't be carried (its queue keeps growing, or the measured rate is below what it needs), the host
+    steps down at once to the highest rung that fits the measured rate and drains the backlog: lossless → Opus 510
+    → 256 → 128 → 64 kbps, at least 1.5 s apart. Once the path has had room for twice the next rung for 15 s, it
+    steps back up one Opus rung at a time (`"reason":"recovered"`), but never back to lossless by itself: an
+    `audio` message with `mode` asks again, and turning priority on starts over.
   - `stats` also carries `audioQueueMs` (p95 over the last second), `audioQueueMaxMs`, `audioBacklogMs` and
     `audioDropped`.
   - The client keeps a steady reserve that absorbs network jitter and clock drift, changing it only in silence.
   The host says what it sends with `{"t":"audio-mode","mode":"opus"|"pcm24","priority":bool,"kbps":n}` whenever
-  that changes (`kbps` is 2304 for pcm24); `"reason":"bandwidth"` marks a step down, `"unsupported"` an unknown mode
+  that changes (`kbps` is 2304 for pcm24); `"reason":"bandwidth"` marks a step down, `"recovered"` a step back up,
+  `"unsupported"` an unknown mode
   (it sends Opus). Older hosts never send it: assume Opus without priority.
 - **Files**: `{"t":"file-token","path":"…","id":"…"}` makes the host reply with `file-token` and a
   2-minute single-use `token` for `GET /api/files/download?t=`.
