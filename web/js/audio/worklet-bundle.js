@@ -14,7 +14,9 @@
 //   - Lateness is measured, not guessed: each packet's arrival on the output clock against its place on the host's
 //     timeline (seq x 480 frames). The buffer keeps a reserve ahead of the latest packet seen in the last 3 minutes:
 //     20 ms, plus a quarter of the jitter seen (at most 40 ms more), plus 10 ms per recent underrun (falling 1 ms per
-//     10 s). Until the network has proven itself the reserve is 110 ms (110-120 ms buffered), fading out over 30 s.
+//     10 s). Until the network has proven itself the reserve is 110 ms, fading out over 30 s. And never less than
+//     120 ms ahead of an on-time packet (the floor): the WebSocket lives on the main thread, which a phone stalls for
+//     ~100 ms on sheets, scrolling and GC; jitter already buffered counts toward the floor, so it doesn't stack.
 //     Lateness over 750 ms stops counting once it is a couple of seconds old (one dropout beats seconds of delay).
 //   - The buffer moves only by dropping or adding samples inside digital silence (silence packets, which are 480
 //     zeros, or frames of exact zeros), never inside sound. Silences shorter than 20 ms are left alone; corrections
@@ -38,6 +40,7 @@ const FRAMES_PER_PACKET = 480; // seq advances by one per 10 ms frame
 
 /** Priority-mode tunables (ms unless named otherwise); any of them can be passed to the constructor. */
 const PLAYOUT_DEFAULTS = Object.freeze({
+  floorMs: 120,           // never less buffered than this ahead of an on-time packet: bridges ~100 ms main-thread stalls
   startMs: 110,           // reserve before the network has proven anything ...
   proveMs: 30000,         // ... fading to nothing over this long
   guardMs: 20,            // reserve kept ahead of the latest packet within memory
@@ -439,14 +442,14 @@ class Playout {
     this.penalty = 0;
     this.lastUnderrun = -Infinity;
     this.c = { // in frames
-      start: f(o.startMs), guard: f(o.guardMs), marginMax: f(o.jitterMarginMaxMs), maxJitter: f(o.maxJitterMs), prove: f(o.proveMs),
+      floor: f(o.floorMs), start: f(o.startMs), guard: f(o.guardMs), marginMax: f(o.jitterMarginMaxMs), maxJitter: f(o.maxJitterMs), prove: f(o.proveMs),
       penalty: f(o.penaltyMs), penaltyMax: f(o.penaltyMaxMs), penaltyDecay: 1 / o.penaltyDecayMs,
       minSilence: f(o.minSilenceMs), adjustStart: f(o.adjustStartMs), adjustStop: f(o.adjustStopMs), adjustScale: f(o.adjustScaleMs),
       minSlack: f(o.minSlackMs), bandLow: f(o.bandLowMs), bandHigh: f(o.bandHighMs), rest: f(o.restMs),
       maxCorr: o.maxCorrectionPpm * 1e-6, maxDev: o.maxRatioPpm * 1e-6, slew: o.ratioSlewPpm * 1e-6, returnDev: o.returnPpm * 1e-6,
       hardSkip: f(o.hardSkipMs), maxGap: Math.round(o.maxGapMs / 10), reset: f(o.resetMs), rebase: f(5),
     };
-    this.geff = this.c.start;
+    this.geff = Math.max(this.c.start, this.c.floor);
     this.dmax = 0; this.dnow = 0;
     this.excess = -Infinity;
     this.geffRun = 0; this.dmaxRun = 0;              // the target when the buffer was last on it
@@ -644,8 +647,9 @@ class Playout {
       const margin = Math.min(c.marginMax, this.opts.jitterMargin * span);
       const tObs = this.outPos * this.rr - this.anchorT;
       const extra = Math.max(0, c.start - c.guard - margin - span) * Math.max(0, 1 - tObs / c.prove);
-      this.geff = c.guard + margin + this.penalty + extra;
       this.dmax = Math.max(a.minT + span, a.recentT()); // old lateness is capped, today's isn't
+      // The reserve ahead of the latest packet, and the floor ahead of an on-time one (jitter already counts toward it).
+      this.geff = Math.max(c.guard + margin + this.penalty + extra, c.floor - (this.dmax - a.minT));
       this.dnow = this.dmax - a.eps * (this.newestHp + FRAMES_PER_PACKET);
     }
     this._recompute();
@@ -1001,7 +1005,7 @@ class Playout {
   _statsPriority(ms) {
     const a = this.arrivals;
     const target = a.count ? this.geff + Math.max(0, this.dnow + a.eps * (this.newestHp + FRAMES_PER_PACKET) - a.avgT) + FRAMES_PER_PACKET / 2
-      : this.c.start + FRAMES_PER_PACKET / 2;
+      : Math.max(this.c.start, this.c.floor) + FRAMES_PER_PACKET / 2;
     return {
       mode: 'priority',
       playing: this.state === PLAYING,

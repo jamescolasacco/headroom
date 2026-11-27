@@ -120,7 +120,7 @@ test('decodePcm24: signed 24-bit little-endian stereo, value / 2^23, exact', () 
   assert.deepEqual(Object.keys(PLAYOUT_DEFAULTS).length > 10, true);
 });
 
-test('priority: a good network plays every sound sample bit-exactly, shrinking only inside silence', () => {
+test('priority: a good network plays every sound sample bit-exactly, holding the 120 ms floor, adjusting only inside silence', () => {
   const r = rng(1);
   const arr = arrivals(12000, { delay: () => 2 + 6 * r() });
   const res = run({ arr, kind: k => (music(k) ? 'sound' : 'silence') });
@@ -130,9 +130,9 @@ test('priority: a good network plays every sound sample bit-exactly, shrinking o
   assert.equal(res.c.altered + res.c.resampled, 0, 'every sound sample exact');
   assert.equal(res.st.hashes.consumed, res.st.hashes.played, 'what left the buffer is what played');
   assert.equal(res.st.hashes.consumedFrames, res.st.hashes.playedFrames);
-  assert.ok(res.st.droppedMs > 50, `the start reserve came down in silence (${res.st.droppedMs} ms)`);
-  assert.ok(res.buf.p95 < 45, `then little buffered: p95 ${res.buf.p95} ms`);
-  assert.ok(res.events.filter(e => e.type === 'drop').every(e => !music(Math.floor((e.host - 480) / 480))), 'drops only in silence');
+  assert.ok(res.buf.min >= 105 && res.buf.p95 <= 150, `the floor holds, within the 150 ms bound: ${res.buf.min}-${res.buf.p95} ms (p95)`);
+  const adj = res.events.filter(e => e.type === 'drop' || e.type === 'insert');
+  assert.ok(adj.every(e => !music(Math.floor((e.host - 480) / 480))), 'adjusted only in silence');
 });
 
 // ------------------------------------------------------------------------------------------- clock drift
@@ -151,7 +151,7 @@ for (const ppm of [300, -300]) {
     // 300 ppm for 2 h is 2.16 s of clock difference: all of it absorbed in silence.
     const moved = ppm > 0 ? res.st.droppedMs : res.st.insertedMs;
     assert.ok(moved > 2000, `${moved} ms re-centred in silence`);
-    assert.ok(res.buf.min > 8 && res.buf.max < 50, `buffer stays in band after the first minute: ${res.buf.min}-${res.buf.max} ms`);
+    assert.ok(res.buf.min > 100 && res.buf.max < 150, `buffer stays in band (the 120 ms floor) after the first minute: ${res.buf.min}-${res.buf.max} ms`);
   });
 }
 
@@ -185,8 +185,9 @@ test('30 minutes of sound without silence at +200 ppm: the slow resampler engage
 test('the resampler is clean: >= 95 dB SNR at 1 kHz and 15 kHz while 731 ppm off', () => {
   for (const f of [1000, 15000]) {
     const amp = 0.5, w = 2 * Math.PI * f / 48000;
-    const p = new Playout({ mode: 'priority', bandLowMs: 0, bandHighMs: 0, ratioSlewPpm: 1e6 });
-    p._wantDev = () => 731e-6; // a fixed step, so the ideal output is known
+    const p = new Playout({ mode: 'priority', bandHighMs: -1e6, ratioSlewPpm: 1e6 });
+    p._wantDev = () => 731e-6; // a fixed step, so the ideal output is known ...
+    p._rsDone = () => false;   // ... for as long as it runs
     const q = 128, L = new Float32Array(q), R = new Float32Array(q);
     let sig = 0, err = 0, k = 0;
     for (let quantum = 0; quantum < 2000; quantum++) {
@@ -216,8 +217,8 @@ test('the resampler is clean: >= 95 dB SNR at 1 kHz and 15 kHz while 731 ppm off
 
 const profiles = {
   // base ± jitter (ms); stalls as in COMMON-audio.md
-  wifi: { delay: r => () => 3 + 30 * r(), p95: 120 },
-  remote: { delay: r => () => 40 + 40 * r(), p95: 120 },
+  wifi: { delay: r => () => 3 + 30 * r(), p95: 150 },
+  remote: { delay: r => () => 40 + 40 * r(), p95: 150 },
   tight: { delay: r => () => 20 + 10 * r() + (r() < 0.02 ? 50 * r() : 0), p95: 250 },
 };
 for (const [name, prof] of Object.entries(profiles)) {
@@ -265,14 +266,15 @@ test('lossless the link can\'t carry, then the step down to Opus: the overload\'
 
 test('the network getting worse mid-sound waits for silence: no resampling (drift alone moves the resampler)', () => {
   const r = rng(11);
-  // Lateness steps up 15 ms at 45.5 s (after the start reserve has gone), in the middle of a stretch of sound.
-  const arr = arrivals(6000, { delay: (k, sent) => 3 + 2 * r() + (sent > 45500 ? 15 : 0) });
+  // Lateness steps up 100 ms at 45.5 s, mid-sound: more than the floor can absorb (smaller steps only use up the
+  // floor's headroom and need nothing), less than the reserve (no underrun).
+  const arr = arrivals(6000, { delay: (k, sent) => 3 + 2 * r() + (sent > 45500 ? 100 : 0) });
   const res = run({ arr, kind: k => (music(k) ? 'sound' : 'silence'), warmMs: 0 });
   none(res);
   assert.equal(res.st.underruns, 0);
   assert.equal(res.st.resampledMs, 0);
   assert.equal(res.c.altered + res.c.resampled, 0, 'bit-exact throughout');
-  assert.ok(res.st.insertedMs >= 10, `the reserve was rebuilt in the next silence (${res.st.insertedMs} ms added)`);
+  assert.ok(res.st.insertedMs >= 20, `the reserve was rebuilt in the next silence (${res.st.insertedMs} ms added)`);
 });
 
 // ------------------------------------------------------------------------------------------- backlogs
@@ -312,12 +314,24 @@ test('an underrun is concealed with a fade (no NaN, no click) and raises the tar
   const res = run({ arr, samples: sine, onQuantum: (p, fr) => { if (fr === 44000 * 48) before = p.stats(); } });
   assert.equal(res.c.nan, 0, 'no NaN');
   assert.equal(res.st.underruns, 1);
-  assert.ok(res.st.concealedMs > 200 && res.st.concealedMs < 400, `concealed ${res.st.concealedMs} ms`);
+  assert.ok(res.st.concealedMs > 100 && res.st.concealedMs < 300, `concealed ${res.st.concealedMs} ms (the 120 ms floor bridged the rest)`);
   const slew = amp * w;
   assert.ok(res.c.maxStep <= slew + amp * Math.PI / (2 * 193) + 1e-6, `no click: max step ${res.c.maxStep} vs the sine's own ${slew}`);
-  assert.ok(res.st.targetMs > before.targetMs + 250, `target ${before.targetMs} -> ${res.st.targetMs} ms`);
+  assert.ok(res.st.targetMs > 300 && res.st.targetMs > before.targetMs + 200, `the target now covers a 300 ms stall: ${before.targetMs} -> ${res.st.targetMs} ms`);
   const e = res.events.find(x => x.type === 'conceal');
   assert.ok(e && e.frames > 0, 'the concealment is reported with its length');
+});
+
+test('the 120 ms floor bridges a 100 ms main-thread stall on a quiet path, mid-sound, long after the start reserve', () => {
+  const r = rng(21);
+  // Nothing reaches the worklet for 100 ms (a sheet opening, GC), then everything at once.
+  const stall = at => (at > 61200 && at < 61300 ? 61300 : 0);
+  const arr = arrivals(8000, { delay: () => 2 + 2 * r(), stall });
+  const res = run({ arr, kind: k => (music(k) ? 'sound' : 'silence') });
+  none(res);
+  assert.equal(res.st.underruns, 0, 'no dropout');
+  assert.equal(res.c.underrunFrames + res.c.altered + res.c.resampled, 0, 'bit-exact through it');
+  assert.ok(res.buf.p95 <= 150, `buffer p95 ${res.buf.p95} ms`);
 });
 
 test('a stall in silence is no dropout: the silence just lasts longer', () => {

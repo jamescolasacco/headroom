@@ -481,7 +481,7 @@ export class Toolbar {
         const quality = row('Sound quality', segmented([
           { value: 'compressed', label: 'Compressed' }, { value: 'lossless', label: 'Lossless' },
         ], p.audioQuality === 'lossless' ? 'lossless' : 'compressed', v => s.setPref('audioQuality', v)));
-        const status = h('p', { class: 'muted small' });
+        const status = h('p', { class: 'muted small sound-status' });
         const show = () => {
           quality.hidden = !p.audioPriority;
           status.hidden = !s.audioOn;

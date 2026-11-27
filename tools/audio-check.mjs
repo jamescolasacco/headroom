@@ -13,6 +13,7 @@
 //        [--seconds=150] [--mode=pcm24|opus] [--priority=on|off] [--audio-in-start] [--max-fps=15]
 //        [--signal=music|tone] [--playout=auto|today|module] [--ppm=80,-80] [--out=audio-check.json] [--label=...]
 //        [--save=<prefix>] [--expect=pass] [--max-delay-p95=ms] [--playout-mode=priority|standard] [--opus-delay=frames]
+//        [--opus-encoder=libopus|audiotoolbox]
 //   node tools/audio-check.mjs --replay=<prefix> [--profile= --playout= --ppm= --out= --expect=]   (a saved capture again)
 //   node tools/audio-check.mjs --drift [--minutes=60] [--ppm=80,-80] [--signals=continuous,music-priority] [--playout=module]
 //        [--expect=pass]                                                           (clock drift alone, no host)
@@ -36,13 +37,12 @@
 //   first second, and the buffer delays it costs: no playout can do better on that path (so no criterion can ask it).
 // - lossless: every non-silent sample bit-exact, on the wire (each PCM packet against the generator, aligned by the
 //   first packet's seq and verified by exact match) and at the output. Opus: fidelity is scored, not just timing:
-//   SNR of the decoded sound against the generator per second of sound, lined up by the encoder's own delay
-//   (AudioToolbox on a Mac host: 312 frames; libopus/Concentus restricted low delay: 120; correlation only checks it),
-//   plus the bitrate per second from the packet sizes. The reference is the encoder actually in use, measured the
-//   same way on the same music at the top announced rate (AudioToolbox through afconvert for a Mac host, which also
-//   gets libopus's figures for comparison). Reported apart: the coding SNR (what no linear filter explains: an
-//   encoder's high-pass or phase shift isn't in it) and the bass level at 20/40/60/100/220 Hz (Apple's encoder
-//   high-passes below ~60 Hz).
+//   SNR of the decoded sound against the generator per second of sound, lined up by the encoder's own delay (libopus
+//   restricted low delay, both hosts: 120 frames; --opus-delay / --opus-encoder=audiotoolbox: 312; correlation only
+//   checks it), plus the bitrate per second from the packet sizes. The reference is the encoder actually in use,
+//   measured the same way on the same music at the top announced rate (libopus through ffmpeg; AudioToolbox through
+//   afconvert on request, with libopus beside it). Reported apart: the coding SNR (what no linear filter explains: an
+//   encoder's high-pass or phase shift isn't in it) and the bass level at 20/40/60/100/220 Hz.
 // - "After the first second" = from 1 s after the first sample played.
 // --expect=pass (COMMON, revised after the baseline): priority + lossless/compressed — after the first second no
 // underruns, nothing dropped or inserted inside sound, lossless bit-exact, buffer delay p95 <= 150 ms (lan, wifi,
@@ -406,7 +406,13 @@ export function simulatePlayout({ packets, ppm = 0, make, isSound = () => true, 
       if (fractional) add(ts, 'resampled', 1);
       if (!S.started) { S.started = true; S.firstPlayAt = ts; }
       else if (fractional || S.frac) {
-        if (Math.abs(nx - S.lastN - 1) > 1.5 || S.zeros || S.altered) gap(Math.floor(S.lastN), Math.ceil(nx), ts);
+        const jump = nx - S.lastN - 1, off = nx % IDX_W;
+        if (Math.abs(jump) > 1.5 || S.zeros || S.altered) {
+          // (Within 64 frames of one of the index signal's 2^21-frame block edges, a resampler's kernel straddles the
+          // edge: a few samples read as altered or a frame or two off. That is the index signal's, not the sound's.)
+          if (!S.zeros && Math.min(off, IDX_W - off) < 64 && Math.abs(jump) <= 8 + S.altered) add(ts, 'modified', Math.max(1, S.altered));
+          else gap(Math.floor(S.lastN), Math.ceil(nx), ts);
+        }
       } else if (nx !== S.lastN + 1 || S.zeros || S.altered) gap(S.lastN, nx, ts);
       S.lastN = nx;
       S.frac = fractional;
@@ -945,11 +951,13 @@ export async function analyze(cap, opts = {}) {
       opusChunks = new Map();
       opusPackets.forEach((p, j) => opusChunks.set(p, j));
       if (music && expected) {
-        // The decoder's delay is the encoder's own lookahead: AudioToolbox (the Mac host) 312 frames, libopus/Concentus
-        // restricted low delay (the Windows host) 120; --opus-delay overrides. Correlation only checks it: Apple's
-        // encoder high-passes the bass (a phase shift at the music's 220 Hz), and a free search locks on a wrong lag.
+        // The decoder's delay is the encoder's own lookahead: both hosts encode with libopus restricted low delay (the Mac
+        // host vendors libopus 1.6.1; the Windows host's Concentus is a port of it): 120 frames. --opus-delay overrides
+        // (312 for AudioToolbox, which the Mac host used before). Correlation only checks it: a high-passing encoder
+        // shifts the phase of the music's 220 Hz, and a free search can lock on a wrong lag.
         const os = cap.meta?.host?.os;
-        const known = opts.opusDelay ?? (os === 'macos' ? 312 : 120);
+        const encoderInUse = opts.opusEncoder || 'libopus';
+        const known = opts.opusDelay ?? (encoderInUse === 'audiotoolbox' ? 312 : 120);
         // The lookahead fixes the delay within a packet. Which packet (and, for Opus alone, which cycle of the music) is
         // settled by lining the decoded sound up: candidates whole packets and whole cycles apart, far wider than the
         // bass's correlation lobe that misleads a free search.
@@ -1013,7 +1021,7 @@ export async function analyze(cap, opts = {}) {
         atUsed = snrAt(used);
         const atBest = snrAt(best.lag);
         fid.decoderDelay = {
-          lookahead: known, used, source: opts.opusDelay != null ? '--opus-delay' : os === 'macos' ? 'AudioToolbox lookahead (Mac host)' : 'libopus/Concentus restricted low-delay lookahead',
+          lookahead: known, used, source: opts.opusDelay != null ? '--opus-delay' : encoderInUse === 'audiotoolbox' ? 'AudioToolbox lookahead' : 'libopus restricted low-delay lookahead',
           correlation: r2(corrAt(used, 1)), snrDb: r1(atUsed), check: { correlationPeakAt: best.lag, correlation: r2(best.corr), snrDb: r1(atBest) },
         };
         // (A free lag that lines the sound up much better than any of those means the host isn't the encoder assumed.)
@@ -1066,10 +1074,10 @@ export async function analyze(cap, opts = {}) {
         const N = 16384;
         const sp = spectralFidelity((c, m) => expected[2 * m + c] / 8388608, yAt, soundSegments(Math.max(0, base - shift), (audio.at(-1).k + 1) * FRAMES - shift, N, N, okSpan), N);
         if (sp) { fid.codingSnrDb = sp.codingSnrDb; fid.bassDb = sp.bassDb; fid.spectralSegments = sp.segments; }
-        // The reference: the encoder actually in use, at the top announced rate, measured the same way (AudioToolbox
-        // through afconvert for a Mac host; libopus otherwise); for a Mac host also libopus, which vendoring it would give.
+        // The reference: the encoder actually in use, at the top announced rate, measured the same way (libopus restricted
+        // low delay through ffmpeg; with --opus-encoder=audiotoolbox, Apple's through afconvert, and libopus beside it).
         const top = (cap.audioModes || []).find(m => m.mode === 'opus')?.kbps ?? 256;
-        const enc = os === 'macos' ? 'audiotoolbox' : 'libopus';
+        const enc = encoderInUse;
         fid.reference = encoderReference(enc, top, tmp);
         if (fid.reference.error && enc === 'audiotoolbox') fid.reference = { ...encoderReference('libopus', top, tmp), note: `AudioToolbox unavailable (${fid.reference.error}): libopus instead` };
         if (enc === 'audiotoolbox') fid.libopusReference = encoderReference('libopus', top, tmp);
@@ -1539,7 +1547,7 @@ async function main() {
       const save = arg('save', out.replace(/\.json$/, '') + '.capture');
       if (save !== 'none') saveCapture(cap, save);
     }
-    const rep = await analyze(cap, { signal: arg('signal', 'music'), ppms, playout, playoutMode: arg('playout-mode'), profile: profile ?? cap.meta?.network?.profile, maxDelayP95: num('max-delay-p95'), opusDelay: num('opus-delay'), label: arg('label'), tmp });
+    const rep = await analyze(cap, { signal: arg('signal', 'music'), ppms, playout, playoutMode: arg('playout-mode'), profile: profile ?? cap.meta?.network?.profile, maxDelayP95: num('max-delay-p95'), opusDelay: num('opus-delay'), opusEncoder: arg('opus-encoder'), label: arg('label'), tmp });
     writeFileSync(out, JSON.stringify(rep, null, 1));
     console.log(summary(rep));
     console.log(`  (report: ${out})`);

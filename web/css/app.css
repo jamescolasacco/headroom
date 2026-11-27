@@ -658,6 +658,7 @@ button.task-row:not(:disabled):not([aria-disabled="true"]):active { transform: n
 .sheet .item.active { color: var(--light); font-weight: 500; }
 .sheet .row { padding: 6px 10px 10px; }
 .sheet .muted { color: var(--ink-2); }
+.sheet .sound-status { margin: 0 12px 6px; }
 .sheet textarea { min-height: 110px; background: rgba(0, 0, 0, .32); padding: 10px; font: var(--t-body) var(--mono); resize: vertical; } /* 16px: iOS doesn't zoom */
 .sheet .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 6px; padding: 4px 6px 8px; }
 .sheet .grid button { background: rgba(238, 241, 246, .07); border-color: transparent; font-size: var(--t-label); }

@@ -277,6 +277,17 @@ internal static class AudioPriorityTests
         connection.HoldBigWrites.SetResult();
         await Task.WhenAll(frameWrite, ping);
         Check(connection.Written.SequenceEqual(big.Concat(new byte[] { 0x89, 8, 8, 7, 6, 5, 4, 3, 2, 1 })), "the ping goes after the whole frame");
+
+        // The session over (the connection let go): no more pings, and one waiting behind a frame being written is dropped.
+        var closing = new FakeConnection(Array.Empty<byte>(), 1, hold: true);
+        var closingStream = new PingStream(closing);
+        var lastFrame = closingStream.WriteAsync(big).AsTask();
+        var queuedPing = closingStream.SendPingAsync(99);
+        closingStream.Dispose();
+        Check(!closingStream.TrySendPing(100), "no ping once the connection is let go");
+        closing.HoldBigWrites.SetResult();
+        await Task.WhenAll(lastFrame, queuedPing);
+        Check(closing.Written.SequenceEqual(big), "a ping waiting when the connection went is dropped");
     }
 
     private static void Check(bool ok, string what)

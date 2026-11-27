@@ -204,15 +204,14 @@ public sealed class ClientSession : IVideoSink
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(appStopping, _cts.Token);
         var ct = linked.Token;
+        Task? sendTask = null, tickTask = null;
         try
         {
             if (!await HandshakeAsync(ct)) return;
             SessionManager.Register(this);
-            var sendTask = Task.Run(() => SendLoopAsync(ct), ct);
-            var tickTask = Task.Run(() => TickLoopAsync(ct), ct);
+            sendTask = Task.Run(() => SendLoopAsync(ct), ct);
+            tickTask = Task.Run(() => TickLoopAsync(ct), ct);
             await ReceiveLoopAsync(ct);
-            _cts.Cancel();
-            await Task.WhenAll(Swallow(sendTask), Swallow(tickTask));
         }
         catch (OperationCanceledException) { }
         catch (WebSocketException ex)
@@ -225,6 +224,12 @@ public sealed class ClientSession : IVideoSink
         }
         finally
         {
+            // Stop what uses this session's objects, wait for it, then tear down: also when the socket dropped (the
+            // receive loop threw), where the send and tick loops used to run on through Cleanup (pinging, stepping,
+            // re-attaching the cursor to a capture being released).
+            _cts.Cancel();
+            if (sendTask != null && tickTask != null)
+                await Task.WhenAny(Task.WhenAll(Swallow(sendTask), Swallow(tickTask)), Task.Delay(5000));
             Cleanup();
         }
     }
@@ -1737,6 +1742,7 @@ public sealed class ClientSession : IVideoSink
         // No more (re)starts: the tick loop can outlive the receive loop (a dropped socket) and would otherwise be able to
         // start a pipeline (and audio) after this has torn them down.
         lock (_streamGate) _startJson = null;
+        if (_pings != null) _pings.Pong = null;
         InputInjector.Instance.ReleaseAll(_input);
         DetachCursor();
         lock (_audioGate)
@@ -1793,6 +1799,7 @@ public sealed class PingStream : Stream
     private readonly byte[] _mask = new byte[4];
     private readonly byte[] _payload = new byte[8];
     private bool _lost;             // the frames stopped making sense: no more pongs, the bytes still pass
+    private volatile bool _closed;  // disposed: no more pings
 
     public PingStream(Stream inner) => _inner = inner;
 
@@ -1802,7 +1809,7 @@ public sealed class PingStream : Stream
     /// <summary>Sends a ping carrying <paramref name="payload"/>; false (nothing sent) while the last one waits for the connection.</summary>
     public bool TrySendPing(long payload)
     {
-        if (Interlocked.CompareExchange(ref _pinging, 1, 0) != 0) return false;
+        if (_closed || Interlocked.CompareExchange(ref _pinging, 1, 0) != 0) return false;
         _ = SendPingAsync(payload);
         return true;
     }
@@ -1818,6 +1825,7 @@ public sealed class PingStream : Stream
             await _writeLock.WaitAsync().ConfigureAwait(false);
             try
             {
+                if (_closed) return; // the connection was let go meanwhile
                 await _inner.WriteAsync(frame).ConfigureAwait(false);
                 await _inner.FlushAsync().ConfigureAwait(false);
             }
@@ -1893,10 +1901,17 @@ public sealed class PingStream : Stream
         finally { _writeLock.Release(); }
     }
 
-    public override ValueTask DisposeAsync() => _inner.DisposeAsync();
+    public override ValueTask DisposeAsync()
+    {
+        _closed = true;
+        Pong = null;
+        return _inner.DisposeAsync();
+    }
 
     protected override void Dispose(bool disposing)
     {
+        _closed = true;
+        Pong = null;
         if (disposing) _inner.Dispose();
         base.Dispose(disposing);
     }

@@ -402,7 +402,11 @@ public sealed unsafe class MfH264Encoder : IDisposable
                         break;
                     case MediaEventTypes.TransformHaveOutput:
                         if (TraceEvents) Log.Debug("encoder", $"t={System.Diagnostics.Stopwatch.GetTimestamp() / (System.Diagnostics.Stopwatch.Frequency / 1000)} HaveOutput");
-                        lock (_mftGate) PullOutput();
+                        // Never once Dispose has begun: it shuts the MFT down under this same lock.
+                        lock (_mftGate)
+                        {
+                            if (!_disposed) PullOutput();
+                        }
                         break;
                     case MediaEventTypes.TransformDrainComplete:
                         break;
@@ -491,22 +495,34 @@ public sealed unsafe class MfH264Encoder : IDisposable
         }
     }
 
+    /// <summary>
+    /// Stops the encoder, then lets go of it. An async MFT delivers output on its event thread (EventLoop), which pulls
+    /// it under _mftGate: the stream is ended and the MFT shut down under that lock, so the thread is never inside
+    /// ProcessOutput when the MFT goes; the native objects are released only after the thread has left (it leaves on
+    /// MF_E_SHUTDOWN). Shut down outside the lock, or released while the thread was still in GetEvent, the MFT could be
+    /// freed under it (the likely cause of an access violation in ntdll at about one session end in ten with NVIDIA's
+    /// async encoder). If the thread doesn't leave in time, the objects are kept (a leak) rather than freed under it.
+    /// </summary>
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
-        try
+        lock (_mftGate)
         {
-            lock (_mftGate)
+            if (_disposed) return;
+            _disposed = true;
+            try
             {
                 _mft.ProcessMessage(TMessageType.MessageNotifyEndOfStream, 0);
                 _mft.ProcessMessage(TMessageType.MessageCommandFlush, 0);
             }
+            catch { }
+            try { _activate?.ShutdownObject(); } catch { }
         }
-        catch { }
-        try { _activate?.ShutdownObject(); } catch { }
         _needInput.Release(64);
-        _eventThread?.Join(1000);
+        if (_eventThread != null && !_eventThread.Join(5000))
+        {
+            Log.Warn("encoder", $"{Name}: its event thread didn't stop; keeping the encoder's objects rather than freeing them under it");
+            return;
+        }
         _codec?.Dispose();
         _events?.Dispose();
         _mft.Dispose();

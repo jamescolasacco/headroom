@@ -47,4 +47,5 @@ foreach (var scale in new[] { 0.05, 1, 12 })
     if (a < -2560 || b >= 0 || a >= b || y != 1389) throw new Exception("Off-monitor touch");
 }
 await AudioPriorityTests.Run();
+EncoderTeardownTest.Run();
 await DesktopInputTest.Run();
